@@ -79,10 +79,7 @@ extension AppModel {
             let only = windows.count == 1 ? windows[0].usedPercent : nil
             usage[AgentPool.usageKey(account)] = .init(session: used("Session") ?? only, weekly: used("Weekly") ?? only, at: at)
         }
-        // Only an account with room: when all are full, work stays where it is.
-        guard let best = AgentPool.pick(pool, usage: usage, config: accountsConfig, isFull: { _ in false }),
-              AgentPool.room(best, usage: usage, config: accountsConfig) != nil else { return nil }
-        return best.id
+        return AgentPool.next(pool, usage: usage, config: accountsConfig)?.id
     }
 
     /// Why no account of the provider can run agents ("Install agy"), else nil.

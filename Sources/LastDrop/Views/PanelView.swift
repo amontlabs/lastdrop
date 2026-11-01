@@ -195,8 +195,9 @@ private struct AccountRow: View {
             Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
         } else if info.isNext {
             Text("Next").font(.caption2.weight(.semibold)).foregroundStyle(Brand.accent)
-                .help(info.account.provider == .claude ? "New subagents run on this account: it has the most room."
-                                                        : "New \(info.account.provider.displayName) agents run on this account: it has the most room.")
+                .help(info.account.provider != .claude ? "New \(info.account.provider.displayName) agents run on this account: it has the most room."
+                      : info.account.isMain ? "New subagents run on this account: no other account has room."
+                      : "New subagents run on this account: of the accounts your sessions don't use, it has the most room.")
         }
     }
 

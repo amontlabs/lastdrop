@@ -38,6 +38,14 @@ enum AgentPool {
         return best?.0 ?? accounts.first
     }
 
+    /// The account the panel marks Next: only one with room, since when all are full, work stays where it is.
+    /// Claude subagents avoid the session's own account, which the panel takes to be Main, until no other has room.
+    static func next(_ pool: [Account], usage: [String: SubagentUsage.Status], config: AccountsConfig, now: Date = .now) -> Account? {
+        let open = pool.filter { room($0, usage: usage, config: config, now: now) != nil }
+        let others = open.filter { $0.provider == .claude && !$0.isMain }
+        return pick(others.isEmpty ? open : others, usage: usage, config: config, now: now, isFull: { _ in false })
+    }
+
     /// Points left before the nearer threshold; nil when unknown, stale or past it.
     static func room(_ account: Account, usage: [String: SubagentUsage.Status], config: AccountsConfig, now: Date = .now) -> Double? {
         guard let status = usage[usageKey(account)], now.timeIntervalSince(status.at) < 30 * 60 else { return nil }
