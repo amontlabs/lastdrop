@@ -20,7 +20,8 @@ const AGENT_KEYS = new Set([
 const ISOLATIONS = new Set([undefined, 'worktree', 'remote'])
 
 const PANE = 'lastdrop-agents'
-const agents = atom({ plugin: 'lastdrop', key: 'agents' } as const, [] as RemoteAgent[])
+/** The pane's rows. In memory, not session state: state has a size limit, and a display must never fail an agent. */
+let agents: RemoteAgent[] = []
 const paneShown = atom({ plugin: 'lastdrop', key: 'paneShown' } as const, false)
 /** Agents whose transcript is unfolded, in their row and in the pane. */
 const open = atom({ plugin: 'lastdrop', key: 'open' } as const, [] as string[])
@@ -118,7 +119,7 @@ const active = new Set<string>()
 async function running($: EngineInterface): Promise<Set<string>> {
   const ids = new Set(active)
   for (const [id, route] of routes) if (!route.ran) ids.add(id)
-  for (const agent of await read($, agents)) if (agent.status === 'running') ids.add(agent.id)
+  for (const agent of agents) if (agent.status === 'running') ids.add(agent.id)
   return ids
 }
 
@@ -323,64 +324,59 @@ async function showPane($: EngineInterface): Promise<void> {
 async function started($: EngineInterface, line: Line, description: string, resumed: boolean,
                        toolUseId?: string, lazyPane = false): Promise<void> {
   const id = String(line.agentId)
-  await update($, agents, list => {
-    const known = list.find(a => a.id === id)
-    if (known) return list.map(a => (a.id === id ? { ...a, status: 'running' as const, endedAt: undefined } : a))
+  if (agents.some(a => a.id === id)) {
+    agents = agents.map(a => (a.id === id ? { ...a, status: 'running' as const, endedAt: undefined } : a))
+  } else {
     const agent: RemoteAgent = {
       id, description, account: String(line.account), model: String(line.model ?? ''),
       provider: line.provider === undefined ? undefined : String(line.provider),
       status: 'running', steps: [], items: [], startedAt: Date.now(), toolUseId,
     }
-    return [...list, agent].slice(-50)
-  })
+    agents = [...agents, agent].slice(-50)
+  }
+  $.ui.invalidate('ui.render')
   if (lazyPane) quiet.add(id)
   else if (!resumed) await showPane($)
   await showStatus($)
 }
 
-/** Records a line of an agent's run; for its result, returns the agent as it ended. */
-async function record($: EngineInterface, id: string, line: Line): Promise<RemoteAgent | undefined> {
+/** Records a line of an agent's run in its row. */
+async function record($: EngineInterface, id: string, line: Line): Promise<void> {
   if (quiet.has(id) && (line.type === 'step' || line.type === 'item' || line.type === 'result')) {
     quiet.delete(id)
     await showPane($)
   }
   if (line.type === 'started') {
     // A later attempt of the same run (a fallback): the row stays, and shows what really runs now.
-    await update($, agents, list => list.map(a => (a.id === id
+    agents = agents.map(a => (a.id === id
       ? { ...a, account: String(line.account ?? a.account), model: String(line.model ?? a.model),
           provider: line.provider === undefined ? a.provider : String(line.provider) }
-      : a)))
+      : a))
     $.ui.invalidate('ui.render')
     return
   }
   if (line.type === 'step' || line.type === 'moved') {
     const text = line.type === 'moved' ? `Moved off ${line.account}: ${line.reason}` : String(line.text)
-    await update($, agents, list => list.map(a => (a.id === id ? { ...a, steps: [...a.steps, text].slice(-40) } : a)))
+    agents = agents.map(a => (a.id === id ? { ...a, steps: [...a.steps, text].slice(-40) } : a))
     $.ui.invalidate('ui.render')
     return
   }
   if (line.type === 'item') {
     const { type: _, ...item } = line
-    await update($, agents, list =>
-      list.map(a => (a.id === id ? { ...a, items: [...a.items, item as unknown as TranscriptItem].slice(-300) } : a)))
+    agents = agents.map(a => (a.id === id ? { ...a, items: [...a.items, item as unknown as TranscriptItem].slice(-300) } : a))
+    $.ui.invalidate('ui.render')
     return
   }
   if (line.type !== 'result') return
   const failed = line.isError === true
   const stopped = line.stopped === true
-  let agent: RemoteAgent | undefined
-  await update($, agents, list =>
-    list.map(a => {
-      if (a.id !== id) return a
-      agent = { ...a, status: stopped ? 'stopped' : failed ? 'failed' : 'done', endedAt: Date.now(),
-                result: stopped ? 'Stopped' : String(line.text ?? ''),
-                account: String(line.account ?? a.account), model: String(line.model ?? a.model),
-                provider: line.provider === undefined ? a.provider : String(line.provider) }
-      return agent
-    }),
-  )
+  agents = agents.map(a => (a.id === id
+    ? { ...a, status: stopped ? 'stopped' : failed ? 'failed' : 'done', endedAt: Date.now(),
+        account: String(line.account ?? a.account), model: String(line.model ?? a.model),
+        provider: line.provider === undefined ? a.provider : String(line.provider) }
+    : a))
+  $.ui.invalidate('ui.render')
   await showStatus($)
-  return agent
 }
 
 /** Admission happens before native spawn; it never starts a remote model or claims a warm process. */
@@ -477,7 +473,7 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
   route.resumePrompt = undefined
   const prompt = route.ran ? nextPrompt : [String(route.request.prompt), previous > 0 ? nextPrompt : ''].filter(Boolean).join('\n\n')
   if (route.ran && !prompt) throw new Error('The native agent resumed without a new text message.')
-  await $.store.set(`native-agent:${id}`, route)
+  await put($, `native-agent:${id}`, route)
   let run: Run | undefined
   const stop = () => {
     void stopRemote($, id).catch(error => $.ui.log(`lastdrop: stop ${id} failed: ${String(error)}`, { to: 'debug' }))
@@ -502,7 +498,7 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
     for (const line of begun.early) await record($, id, line)
     route.ran = true
     route.request.prompt = ''
-    await $.store.set(`native-agent:${id}`, route)
+    await put($, `native-agent:${id}`, route)
     let result: Line | undefined
     for (let line = await run.next(); line; line = await run.next()) {
       if (line.type === 'native') {
@@ -520,7 +516,7 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
     if (result.type === 'native') return result
     if (result.isError === true || result.type === 'error') throw new Error(String(result.text ?? 'The remote agent failed.'))
     await inbox($, id, route)
-    await $.store.set(`native-agent:${id}`, route)
+    await put($, `native-agent:${id}`, route)
     return result
   } finally {
     signal.removeEventListener('abort', stop)
@@ -555,7 +551,7 @@ async function selfTest($: EngineInterface): Promise<void> {
 }
 
 async function showStatus($: EngineInterface): Promise<void> {
-  const running = (await read($, agents)).filter(a => a.status === 'running')
+  const running = agents.filter(a => a.status === 'running')
   const where = [...new Set(running.map(a => a.account))].join(', ')
   const text = [running.length > 0 ? `${running.length} agent${running.length === 1 ? '' : 's'} on ${where}` : undefined, broken]
     .filter(Boolean).join(' · ')
@@ -783,7 +779,7 @@ export const register: Register = on => {
         route.resumePrompt = e.prompt
         if (e.permissionMode) route.request.permissionMode = e.permissionMode
         routes.set(id, route)
-        await $.store.set(`native-agent:${id}`, route)
+        await put($, `native-agent:${id}`, route)
       } else if (owns(e.subagentType) || await wasAdded($, id)) {
         // A native turn would answer as Claude, without the agent that ran before.
         return { deny: `lastdrop has no saved route for added agent ${id}, so it can't be resumed. Start a new one.` }
@@ -848,7 +844,8 @@ export const register: Register = on => {
       quiet.delete(e.agentId)
       const id = e.agentId
       await $.store.delete(`native-agent:${id}`)
-      await update($, agents, list => list.filter(a => a.id !== id))
+      agents = agents.filter(a => a.id !== id)
+      $.ui.invalidate('ui.render')
       await showStatus($)
       return yield* next(e)
     }
@@ -863,7 +860,7 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const list = (await read($, agents)).slice().reverse()
+    const list = agents.slice().reverse()
     const unfolded = await read($, open)
     return (
       <Box flexDirection="column">

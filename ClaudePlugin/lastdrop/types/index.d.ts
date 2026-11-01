@@ -18,8 +18,6 @@ export type RemoteAgent = {
   steps: string[]
   /** Its transcript so far, newest last, long texts cut. */
   items: TranscriptItem[]
-  /** Its final answer, once it finished. */
-  result?: string
   /** The Agent call it answered: its row in the session's transcript. */
   toolUseId?: string
   startedAt: number
@@ -28,6 +26,6 @@ export type RemoteAgent = {
 
 declare module 'claude-code' {
   interface PluginState {
-    lastdrop: { agents: RemoteAgent[]; paneShown: boolean; open: string[] }
+    lastdrop: { paneShown: boolean; open: string[] }
   }
 }

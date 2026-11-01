@@ -932,6 +932,24 @@ test('a fallback attempt updates the pane row and creates no second one', async 
   await ui.unmount()
 })
 
+test('a pane fuller than session state can hold never fails an agent', async ($, on) => {
+  const item = { type: 'item', kind: 'text', text: 'x'.repeat(100_000) }
+  const e = engine([$, on], { outputs: [...Array.from({ length: 50 }, () => item), RESULT] })
+  await e.launch()
+  expect(report(await step($))).toContain('exact remote report')
+  const ui = await $.ui.mount({ plugin: 'lastdrop', component: 'Pane', requestId: 'lastdrop-agents', props: {}, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /Show transcript/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('a store that fills up mid-run never loses the report', async ($, on) => {
+  const options = { storeFailure: false }
+  const e = engine([$, on], options)
+  await e.launch()
+  options.storeFailure = true
+  expect(report(await step($))).toContain('exact remote report')
+})
+
 test('a switch made before the agent started still reaches its row', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, before: [{ type: 'moved', account: 'Codex', reason: 'usage limit' }] })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
