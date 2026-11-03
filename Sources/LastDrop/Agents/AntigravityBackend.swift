@@ -21,7 +21,7 @@ enum AntigravityBackend: AgentBackend {
 
     private static func models(executable: String) async throws -> [AgentModel] {
         var output = ""
-        let command = try await execute(executable, ["models"], directory: nil) { output += $0 + "\n" }
+        let command = try await execute(executable, ["models"], directory: LastDropPaths.helperDirectory) { output += $0 + "\n" }
         guard command.status == 0 else { throw Failure(message(command.stderr.isEmpty ? output : command.stderr)) }
         let models = parseModels(output)
         guard !models.isEmpty else { throw Failure("Antigravity returned no models. Run `agy models` in Terminal to check access.") }

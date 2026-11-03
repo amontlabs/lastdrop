@@ -8,7 +8,7 @@ enum CLILogin {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = environment
-        process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        process.currentDirectoryURL = URL(fileURLWithPath: LastDropPaths.helperDirectory)
         process.standardInput = FileHandle.nullDevice
         let output = Pipe()
         process.standardOutput = output

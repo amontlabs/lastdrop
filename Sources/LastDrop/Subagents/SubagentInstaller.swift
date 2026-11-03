@@ -79,6 +79,7 @@ enum SubagentInstaller {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = args
+        process.currentDirectoryURL = URL(fileURLWithPath: LastDropPaths.helperDirectory)
         // Its own default config, whichever session or account lastdrop was started from.
         process.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("CLAUDE") }
         let output = Pipe()

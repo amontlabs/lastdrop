@@ -115,6 +115,7 @@ enum SelfTest {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: claude)
         process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: LastDropPaths.helperDirectory)
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

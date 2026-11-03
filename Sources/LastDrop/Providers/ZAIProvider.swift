@@ -134,6 +134,7 @@ struct ZAIProvider: UsageProvider {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = ["-lic", "printf %s \"$\(name)\""]
+        p.currentDirectoryURL = URL(fileURLWithPath: LastDropPaths.helperDirectory)
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice

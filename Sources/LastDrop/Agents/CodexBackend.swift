@@ -23,7 +23,7 @@ enum CodexBackend: AgentBackend {
 
     static func models() async throws -> [AgentModel] {
         guard let path = executable() else { throw Failure("Codex (`codex`) was not found on this Mac.") }
-        let server = CodexAppServer(executable: path, directory: NSHomeDirectory(), environment: ProcessInfo.processInfo.environment)
+        let server = CodexAppServer(executable: path, directory: LastDropPaths.helperDirectory, environment: ProcessInfo.processInfo.environment)
         try server.start()
         defer { server.stop() }
         return try await withTaskCancellationHandler {

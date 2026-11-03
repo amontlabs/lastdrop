@@ -22,6 +22,13 @@ enum LastDropPaths {
     /// The Claude Code version the subagent self-test last passed on.
     static let selfTest = support.appendingPathComponent("selftest.json")
     static let selfTestLock = support.appendingPathComponent("selftest.lock")
+    /// An empty folder that helper CLIs (sign-in, model lists) start in. Starting them in the home folder made macOS ask
+    /// for access to Music, Documents and volumes on lastdrop's behalf whenever they looked around where they started.
+    static var helperDirectory: String {
+        let url = support.appendingPathComponent("helper", isDirectory: true)
+        ensure(url)
+        return url.path
+    }
 
     /// Creates `dir` readable by the user only.
     static func ensure(_ dir: URL) {

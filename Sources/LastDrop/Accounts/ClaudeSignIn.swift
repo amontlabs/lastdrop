@@ -63,7 +63,7 @@ enum ClaudeSignIn {
         process.executableURL = URL(fileURLWithPath: claude)
         process.arguments = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
         process.environment = SubagentRunner.environment(for: account, from: ProcessInfo.processInfo.environment)
-        process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        process.currentDirectoryURL = URL(fileURLWithPath: LastDropPaths.helperDirectory)
         let input = Pipe()
         process.standardInput = input
         process.standardOutput = FileHandle.nullDevice
