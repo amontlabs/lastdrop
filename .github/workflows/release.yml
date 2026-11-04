@@ -56,5 +56,10 @@ jobs:
 
           Requires macOS 15 or later. Universal (Apple silicon and Intel).
           NOTES
+          # A release published by hand (gh release create pushes the tag too) keeps its own build.
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "::notice::Release $GITHUB_REF_NAME already exists; leaving it as it is."
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" dist/lastdrop.zip dist/lastdrop.zip.sha256 \
             --title "lastdrop ${GITHUB_REF_NAME#v}" --notes-file notes.md --generate-notes --target "$GITHUB_SHA"
