@@ -22,7 +22,7 @@ type Message = { role: 'user' | 'assistant'; content: { type: string; text?: str
 type Options = {
   route?: object; background?: boolean; fork?: boolean; workflow?: boolean; refusal?: string; 
   outputs?: object[]; gate?: Promise<void>; wrongID?: boolean; noStart?: boolean; catalog?: typeof CATALOG; handback?: boolean
-  storeFailure?: boolean; selfTest?: object; nativeTasks?: boolean; liveCatalog?: () => object; runnerFails?: boolean; agentModels?: boolean; before?: object[]; spawnId?: () => string; noAgentTool?: boolean; storeLimit?: number; sessionId?: () => string
+  storeFailure?: boolean; selfTest?: object; nativeTasks?: boolean; liveCatalog?: () => object; runnerFails?: boolean; agentModels?: boolean; before?: object[]; spawnId?: () => string; noAgentTool?: boolean; storeLimit?: number; sessionId?: () => string; env?: Record<string, string>; t3?: Record<string, object>; t3Throws?: boolean
 }
 
 function engine([$test, on]: Body, options: Options = {}) {
@@ -40,6 +40,7 @@ function engine([$test, on]: Body, options: Options = {}) {
   let modelSteps = 0
   let runCount = 0
   on('fs.exists', () => ({ value: true }))
+  on('env.get', (_, e) => ({ value: options.env?.[e.name] }))
   on('session.cwd', () => ({ value: '/work' }))
   on('session.id', () => ({ value: options.sessionId?.() ?? 'session-1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
@@ -88,6 +89,10 @@ function engine([$test, on]: Body, options: Options = {}) {
   on('tool.call', async (_, e) => {
     nativeCalls.push(e.tool)
     nativeInputs.push(e)
+    if (options.t3Throws && e.tool.startsWith('mcp__t3-code__')) throw new Error('connection reset')
+    const t3 = options.t3?.[e.tool]
+    // As Claude Code gives a T3 tool's answer: one JSON string (blocks in older versions).
+    if (t3) return { result: JSON.stringify(t3), text: JSON.stringify(t3) } as never
     if (e.tool !== 'Agent') return { result: { marker: `native ${e.tool}` } }
     if (options.refusal) return { deny: options.refusal }
     const spawn = await $test.agent.spawn({ tool_use_id: e.tool_use_id, prompt: e.prompt, description: e.description,
@@ -958,4 +963,230 @@ test('a switch made before the agent started still reaches its row', async ($, o
   const ui = await $.ui.mount({ plugin: 'lastdrop', component: 'Pane', requestId: 'lastdrop-agents', props: {}, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /Moved off Codex: usage limit/ }))?.text).toContain('usage limit')
   await ui.unmount()
+})
+
+// T3 Code's delegate_task: the parent tags the child's task, and lastdrop answers the child's own turns.
+const DELEGATE = 'mcp__t3-code__delegate_task'
+async function delegate($: Body[0], fields: object = {}) {
+  return $.tool.call({ tool: DELEGATE, tool_use_id: 'toolu_d', task: 'review the diff', title: 'review', ...fields } as never)
+}
+function tagOf(task: string): Record<string, unknown> {
+  const match = /\n\n<!-- lastdrop (\{.*\}) -->$/.exec(task)
+  expect(match).toBeTruthy()
+  return JSON.parse(match![1]!)
+}
+async function mainStep($: Body[0], turnId: string) {
+  const chunks = []
+  for await (const chunk of $.turn.step({ turnId, index: 0, model: 'claude-haiku-5-5', messageCount: 1 })) chunks.push(chunk)
+  return chunks
+}
+const child = (task: string, ...more: Message[]): Message[] => [{ role: 'user', content: [{ type: 'text', text: task }] }, ...more]
+
+test('delegate_task with no target is tagged with the run and keeps no target', async ($, on) => {
+  const e = engine([$, on])
+  expect((await delegate($)).result).toEqual({ marker: `native ${DELEGATE}` })
+  const input = e.nativeInputs.at(-1)!
+  expect(input.target).toBeUndefined()
+  expect(String(input.task).startsWith('review the diff\n\n<!-- lastdrop ')).toBe(true)
+  const run = tagOf(String(input.task))
+  expect(run.id).toMatch(/^t3-[a-z0-9]+$/)
+  expect(run.agent).toBeUndefined()
+  expect(run.description).toBe('review')
+  const route = e.calls.find(c => c.flag === '--agent-route')!.request
+  expect(route.prompt).toBe('review the diff')
+  expect(route.parentModel).toBe('claude-haiku-5-5')
+  expect(e.runCount).toBe(0)
+})
+
+test('delegate_task with an added model drops it from the target and tags it as the agent', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await delegate($, { target: { model: 'sol', options: { effort: 'high' } }, mode: 'async' })
+  const input = e.nativeInputs.at(-1)!
+  expect(input.target).toEqual({ options: { effort: 'high' } })
+  expect(input.mode).toBe('async')
+  const run = tagOf(String(input.task))
+  expect(run.agent).toBe('sol')
+  expect(run.model).toBeUndefined()
+  expect(run.effort).toBe('high')
+  expect(e.calls.find(c => c.flag === '--agent-route')?.request.agent).toBe('sol')
+})
+
+test('delegate_task with a Claude model keeps it on the target and in the tag', async ($, on) => {
+  const e = engine([$, on])
+  await delegate($, { target: { model: 'claude-opus-5-5', options: [{ id: 'effort', value: 'max' }] } })
+  const input = e.nativeInputs.at(-1)!
+  expect((input.target as Record<string, unknown>).model).toBe('claude-opus-5-5')
+  expect(tagOf(String(input.task))).toMatchObject({ model: 'claude-opus-5-5', effort: 'max' })
+})
+
+test('no room leaves a plain delegate_task untouched and denies an added model', async ($, on) => {
+  const e = engine([$, on], { route: { type: 'no_room' }, catalog: CATALOG })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await delegate($)
+  expect(e.nativeInputs.at(-1)!.task).toBe('review the diff')
+  expect((await delegate($, { target: { model: 'sol' } })).deny).toBe('lastdrop found nowhere to run sol.')
+})
+
+test('delegate_task to another provider, model or machine is left to T3', async ($, on) => {
+  const e = engine([$, on])
+  await delegate($, { target: { providerInstanceId: 'codex', model: 'gpt-6.1-sol' } })
+  await delegate($, { target: { model: 'gpt-6.1-sol' } })
+  await delegate($, { target: { environmentId: 'vps' } })
+  expect(e.nativeInputs.map(i => i.task)).toEqual(['review the diff', 'review the diff', 'review the diff'])
+  expect(e.calls.some(c => c.flag === '--agent-route')).toBe(false)
+})
+
+test('a delegated child’s turn runs on lastdrop’s runner, never on its own model', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  e.messages(child('review the diff\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol","effort":"high","description":"review"} -->'))
+  const chunks = await mainStep($, 'turn-1')
+  expect(report(chunks)).toBe(RESULT.text)
+  expect(chunks.find(c => c.kind === 'stop')?.stopReason).toBe('end_turn')
+  const request = e.calls.find(c => c.flag === '--agent-run')!.request
+  expect(request).toMatchObject({ prompt: 'review the diff', id: 't3-abc', agent: 'sol', effort: 'high', subagentType: 'general-purpose', cwd: '/work' })
+  expect(request.resume).toBeUndefined()
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a follow-up to a delegated child resumes the same run with only the new message', async ($, on) => {
+  const e = engine([$, on])
+  const task = 'note the word\n\n<!-- lastdrop {"id":"t3-abc","model":"claude-haiku-5-5"} -->'
+  e.messages(child(task))
+  await mainStep($, 'turn-1')
+  e.messages(child(task, { role: 'assistant', content: [{ type: 'text', text: 'noted' }] },
+    { role: 'user', content: [{ type: 'text', text: 'what was it?' }] }))
+  expect(report(await mainStep($, 'turn-2'))).toBe(RESULT.text)
+  const run = e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request
+  expect(run).toMatchObject({ prompt: 'what was it?', resume: 't3-abc', id: 't3-abc', model: 'claude-haiku-5-5' })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a delegated child the runner hands back runs on its own model from then on', async ($, on) => {
+  const e = engine([$, on], { noStart: true, outputs: [{ type: 'native' }] })
+  const task = 'do it\n\n<!-- lastdrop {"id":"t3-abc"} -->'
+  e.messages(child(task))
+  expect((await mainStep($, 'turn-1'))[0]).toEqual({ kind: 'text', index: 0, text: 'built-in response' })
+  e.messages(child(task, { role: 'assistant', content: [] }, { role: 'user', content: [{ type: 'text', text: 'more' }] }))
+  await mainStep($, 'turn-2')
+  expect(e.runCount).toBe(1)
+  expect(e.modelSteps).toBe(2)
+})
+
+test('a delegated added model that fails reports it and never falls back to Claude', async ($, on) => {
+  const e = engine([$, on], { noStart: true, outputs: [{ type: 'no_room' }] })
+  e.messages(child('do it\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol"} -->'))
+  expect(report(await mainStep($, 'turn-1'))).toBe('lastdrop agent failed: lastdrop found nowhere to run sol.')
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a main session without the tag keeps its own model', async ($, on) => {
+  const e = engine([$, on])
+  e.messages(child('hello <!-- lastdrop {"id":"x"} --> there'))
+  await mainStep($, 'turn-1')
+  expect(e.modelSteps).toBe(1)
+  expect(e.runCount).toBe(0)
+})
+
+test('in T3 Code the listing says delegate_task accepts the added models too', async ($, on) => {
+  engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\nThe Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n${LIST}${COMMAND}`)
+})
+
+test('a delegated child’s report names the account and model it ran on', async ($, on) => {
+  const e = engine([$, on], { outputs: [{ ...RESULT, account: 'Antigravity', model: 'claude-sonnet-5-5-medium' }] })
+  e.messages(child('do it\n\n<!-- lastdrop {"id":"t3-abc"} -->'))
+  expect(report(await mainStep($, 'turn-1'))).toBe(`Ran on Antigravity (claude-sonnet-5-5-medium).\n\n${RESULT.text}`)
+})
+
+const SHELL = { taskId: 'task-1', childThreadId: 'thread-1', providerInstanceId: 'claudeAgent', model: 'claude-haiku-5-5', status: 'running' }
+const json = (answer: { result?: unknown; text?: unknown }) => {
+  expect(answer.text).toBe(answer.result)
+  return JSON.parse(answer.result as string)
+}
+
+test('delegate_task’s answer names the added model and where it runs, not the child thread’s model', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, t3: { [DELEGATE]: SHELL } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  const answer = await delegate($, { target: { model: 'sol' } })
+  expect(json(answer)).toEqual({ ...SHELL, model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high' })
+  expect(answer.context).toBeUndefined()
+  expect(e.store.get('delegated-child:task-1')).toBe('sol')
+  expect(e.store.get('delegated-child:thread-1')).toBe('sol')
+})
+
+test('a plain delegate_task’s answer is left as T3 wrote it', async ($, on) => {
+  engine([$, on], { t3: { [DELEGATE]: SHELL } })
+  expect(json(await delegate($))).toEqual(SHELL)
+})
+
+test('T3’s later answers about an added model’s child name it too, and leave other threads alone', async ($, on) => {
+  const read = { thread: { threadId: 'thread-1', model: 'claude-haiku-5-5' }, recentRuns: [{ runId: 'r1', model: 'claude-haiku-5-5' }] }
+  const other = { thread: { threadId: 'thread-9', model: 'claude-haiku-5-5' } }
+  engine([$, on], { catalog: CATALOG, t3: { [DELEGATE]: SHELL, 'mcp__t3-code__task_status': { ...SHELL, status: 'completed' },
+    'mcp__t3-code__t3_thread_read': read, 'mcp__t3-code__t3_thread_list': other } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await delegate($, { target: { model: 'sol' } })
+  const status = await $.tool.call({ tool: 'mcp__t3-code__task_status', tool_use_id: 't1', taskId: 'task-1' } as never)
+  expect(json(status)).toMatchObject({ model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high', status: 'completed' })
+  const thread = await $.tool.call({ tool: 'mcp__t3-code__t3_thread_read', tool_use_id: 't2', threadId: 'thread-1' } as never)
+  expect(json(thread)).toEqual({ thread: { threadId: 'thread-1', model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high' },
+    recentRuns: [{ runId: 'r1', model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high' }] })
+  expect(json(await $.tool.call({ tool: 'mcp__t3-code__t3_thread_list', tool_use_id: 't3' } as never))).toEqual(other)
+})
+
+test('orchestrator_capabilities’ answer lists the added models and where they run', async ($, on) => {
+  const caps = { inheritedModel: 'claude-haiku-5-5', providers: [{ providerInstanceId: 'antigravity', constraints: ['Provider instance is disabled.'] }] }
+  engine([$, on], { catalog: CATALOG, t3: { 'mcp__t3-code__orchestrator_capabilities': caps } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  const answer = await $.tool.call({ tool: 'mcp__t3-code__orchestrator_capabilities', tool_use_id: 'toolu_c' } as never)
+  expect(json(answer)).toEqual({ ...caps, addedModels: [
+    { model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high' },
+    { model: 'argon', runsOn: 'lastdrop · Antigravity · gemini-4-argon' },
+  ] })
+})
+
+test('a delegated child’s conversation is never compacted, so its tag stays', async ($, on) => {
+  const e = engine([$, on])
+  e.messages(child('do it\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol"} -->'))
+  const answer = await $.session.compact({ trigger: 'manual', messages: [MESSAGE] } as never)
+  expect(answer.skip).toBe('lastdrop runs this thread’s agent elsewhere; its conversation stays whole.')
+  e.messages(child('hello'))
+  expect((await $.session.compact({ trigger: 'manual', messages: [MESSAGE] } as never)).skip).toBeUndefined()
+})
+
+test('a delegated child whose state was lost resumes after lastdrop’s last answer', async ($, on) => {
+  const e = engine([$, on])
+  e.messages(child('first task\n\n<!-- lastdrop {"id":"t3-abc"} -->', { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: 'follow-up' }] }))
+  await mainStep($, 'turn-2')
+  expect(e.calls.find(c => c.flag === '--agent-run')!.request).toMatchObject({ prompt: 'follow-up', resume: 't3-abc' })
+})
+
+test('a follow-up that failed after reaching the runner is not sent again', async ($, on) => {
+  const options: { outputs?: object[] } = { outputs: [{ type: 'result', isError: true, text: 'broke' }] }
+  const e = engine([$, on], options)
+  const task = 'go\n\n<!-- lastdrop {"id":"t3-abc"} -->'
+  e.messages(child(task))
+  expect(report(await mainStep($, 'turn-1'))).toBe('lastdrop agent failed: broke')
+  options.outputs = undefined
+  e.messages(child(task, { role: 'user', content: [{ type: 'text', text: 'next' }] }))
+  await mainStep($, 'turn-2')
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'next', resume: 't3-abc' })
+})
+
+test('a T3 tool that throws is never run a second time', async ($, on) => {
+  const e = engine([$, on], { t3Throws: true })
+  const answer = await $.tool.call({ tool: 'mcp__t3-code__t3_thread_send', tool_use_id: 't1', threadId: 'x', message: 'hi' } as never)
+  expect(answer.deny).toContain('mcp__t3-code__t3_thread_send failed')
+  expect(e.nativeCalls.filter(t => t === 'mcp__t3-code__t3_thread_send').length).toBe(1)
+})
+
+test('orchestrator_capabilities for another machine lists no added models', async ($, on) => {
+  const caps = { providers: [] }
+  engine([$, on], { catalog: CATALOG, t3: { 'mcp__t3-code__orchestrator_capabilities': caps } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  const answer = await $.tool.call({ tool: 'mcp__t3-code__orchestrator_capabilities', tool_use_id: 'c', environmentId: 'vps' } as never)
+  expect(json(answer)).toEqual(caps)
 })

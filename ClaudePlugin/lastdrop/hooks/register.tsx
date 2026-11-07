@@ -84,6 +84,8 @@ function listText(): string {
 
 /** What the model reads of the list: appended to the native listing, and in a note when it changes. */
 const ADDED = "The Agent tool's model parameter also accepts these models the user added:\n"
+/** In T3 Code, whose delegate_task runs background children: lastdrop runs those too (see DELEGATE). */
+const ADDED_T3 = "The Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n"
 const CHANGED = "The models the user added to the Agent tool's model parameter changed. It now accepts:\n"
 const REMOVED = "The models the user added to the Agent tool's model parameter were removed."
 /** Ends the frozen listing, so the command's instructions cost nothing until they're read. */
@@ -445,9 +447,9 @@ function* respond(e: TurnStepInput, text: string, usage: TurnUsage | null, handb
 }
 
 /** Where an added agent ran and what it could not do, for the report's first lines; a reroute gets only its worktree. */
-function header(route: Route, line: Line): string {
+function header(request: Request, line: Line): string {
   const where = line.worktreePath ? `Worktree: ${String(line.worktreePath)}${line.worktreeBranch ? ` (branch ${String(line.worktreeBranch)})` : ''}.` : ''
-  if (route.request.agent === undefined) return where ? `${where}\n\n` : ''
+  if (request.agent === undefined) return where ? `${where}\n\n` : ''
   if (!line.model) return ''
   const worktree = where ? ` ${where}` : ''
   const declined = Array.isArray(line.declined) && line.declined.length > 0 ? `\nDeclined (needed approval): ${line.declined.join('; ')}` : ''
@@ -614,6 +616,224 @@ function agentBlock($: EngineInterface, e: Parameters<EngineInterface['ui']['res
   )
 }
 
+/**
+ * T3 Code's tool for a child thread, the way to run background work there: T3 replaces a thread's Claude
+ * Code process (a model change, Stop), which ends its native background agents. The child is an ordinary
+ * T3 Claude thread; lastdrop's plugin inside it answers its turns with `lastdrop --agent-run`, as for an
+ * Agent subagent, so the child's own model never runs on the session's account. The tag at the end of the
+ * task carries the run; when lastdrop hands the run back (no room), the child's model reads the task.
+ */
+const DELEGATE = 'mcp__t3-code__delegate_task'
+const TAG = '<!-- lastdrop '
+const TAG_END = ' -->'
+/** T3's built-in Claude instance; another instance may be another provider, which lastdrop leaves alone. */
+const T3_CLAUDE = 'claudeAgent'
+
+const CAPABILITIES = 'mcp__t3-code__orchestrator_capabilities'
+const T3_TOOLS = /^mcp__t3-code__/
+
+/** Where a delegated child's report came from: T3 shows only the child thread's own instance and model. */
+function delegatedHeader(line: Line): string {
+  const where = line.worktreePath ? ` Worktree: ${String(line.worktreePath)}${line.worktreeBranch ? ` (branch ${String(line.worktreeBranch)})` : ''}.` : ''
+  const declined = Array.isArray(line.declined) && line.declined.length > 0 ? `\nDeclined (needed approval): ${line.declined.join('; ')}` : ''
+  const skipped = Array.isArray(line.unavailable) && line.unavailable.length > 0 ? `, ${line.unavailable.join(', ')} unavailable` : ''
+  if (!line.account) return where ? `${where.trim()}\n\n` : ''
+  return `Ran on ${String(line.account)}${line.model ? ` (${String(line.model)}${skipped})` : ''}.${where}${declined}\n\n`
+}
+
+/** Where an added model runs, as T3's answers show it in place of the child thread's own model. */
+function runsOn(agent: string): string {
+  return `lastdrop · ${catalog.get(agent)?.summary ?? 'its own provider'}`
+}
+
+/**
+ * T3's answers name a child by the instance and model of its thread, which never run for an added model.
+ * This rewrites, in the JSON the model reads, each of our children's `model` to the added model and adds
+ * `runsOn`; `children` maps a task's or thread's id to its added model. Another answer is left as it is.
+ */
+function rewriteChildren(value: unknown, children: ReadonlyMap<string, string>, agent?: string): unknown {
+  if (Array.isArray(value)) return value.map(v => rewriteChildren(v, children, agent))
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  const thread = record.thread as Record<string, unknown> | undefined
+  const ids = [record.taskId, record.childThreadId, record.threadId, thread?.threadId]
+  const own = agent ?? ids.map(id => (typeof id === 'string' ? children.get(id) : undefined)).find(Boolean)
+  const out: Record<string, unknown> = {}
+  for (const [key, field] of Object.entries(record)) {
+    out[key] = key === 'model' && own !== undefined ? own : rewriteChildren(field, children, own)
+    if (key === 'model' && own !== undefined) out.runsOn = runsOn(own)
+  }
+  return out
+}
+
+/** The ids of tasks and threads a JSON answer names, to look up which are ours. */
+function idsIn(value: unknown, found = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) for (const v of value) idsIn(v, found)
+  else if (value !== null && typeof value === 'object') {
+    for (const [key, field] of Object.entries(value)) {
+      if ((key === 'taskId' || key === 'childThreadId' || key === 'threadId') && typeof field === 'string') found.add(field)
+      else idsIn(field, found)
+    }
+  }
+  return found
+}
+
+/** The texts of a T3 tool's answer: Claude Code gives an MCP tool's text as one string, or as text blocks. */
+function textsOf(answer: { result?: unknown }): string[] {
+  if (typeof answer.result === 'string') return [answer.result]
+  if (!Array.isArray(answer.result)) return []
+  return answer.result.flatMap(b => (b?.type === 'text' && typeof b.text === 'string' ? [b.text as string] : []))
+}
+
+/** The JSON values of a T3 tool's answer. */
+function jsonOf(answer: { result?: unknown }): unknown[] {
+  return textsOf(answer).flatMap(text => {
+    try {
+      return [JSON.parse(text) as unknown]
+    } catch {
+      return []
+    }
+  })
+}
+
+/** A T3 tool's answer with its JSON texts passed through `edit`; text that isn't JSON stays. */
+function editAnswer<T extends { result?: unknown; text?: unknown }>(answer: T, edit: (json: unknown) => unknown): T {
+  const change = (text: string) => {
+    try {
+      return JSON.stringify(edit(JSON.parse(text)))
+    } catch {
+      return text
+    }
+  }
+  const result = typeof answer.result === 'string' ? change(answer.result)
+    : Array.isArray(answer.result)
+      ? answer.result.map(b => (b?.type === 'text' && typeof b.text === 'string' ? { ...b, text: change(b.text) } : b))
+      : answer.result
+  return { ...answer, result, ...(typeof answer.text === 'string' ? { text: change(answer.text) } : {}) }
+}
+
+/** A T3 tool's answer with our children's model, and the added models, shown as they run. */
+async function rewriteT3<T extends { result?: unknown; text?: unknown }>($: EngineInterface, tool: string, answer: T): Promise<T> {
+  if (tool === CAPABILITIES) {
+    if (!agentModels || catalog.size === 0) return answer
+    const added = [...catalog.keys()].map(model => ({ model, runsOn: runsOn(model) }))
+    return editAnswer(answer, json => (json !== null && typeof json === 'object' && !Array.isArray(json) ? { ...json, addedModels: added } : json))
+  }
+  const children = new Map<string, string>()
+  for (const id of idsIn(jsonOf(answer))) {
+    const agent = await $.store.get(`delegated-child:${id}`)
+    if (typeof agent === 'string') children.set(id, agent)
+  }
+  return children.size === 0 ? answer : editAnswer(answer, json => rewriteChildren(json, children))
+}
+
+/** A delegated child's run, as its tag carries it. */
+type Delegated = { id: string; agent?: string; model?: string; effort?: string; description?: string }
+/** What the child's turns did so far: `cursor` is where its next turn's new messages start. */
+type DelegatedState = { ran: boolean; native: boolean; cursor: number }
+
+function tag(task: string, run: Delegated): string {
+  return `${task}\n\n${TAG}${JSON.stringify(run)}${TAG_END}`
+}
+
+function untag(text: string): { task: string; run: Delegated } | undefined {
+  const trimmed = text.trimEnd()
+  const start = trimmed.lastIndexOf(`\n\n${TAG}`)
+  if (start < 0 || !trimmed.endsWith(TAG_END)) return undefined
+  try {
+    const run = JSON.parse(trimmed.slice(start + 2 + TAG.length, -TAG_END.length)) as Delegated
+    return typeof run?.id === 'string' ? { task: trimmed.slice(0, start), run } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+type ApiMessage = { role: string; content: { type: string; text?: unknown }[] }
+
+/** A user message's own text, without the engine's reminders. */
+function userText(message: ApiMessage): string {
+  return message.content.filter(b => b.type === 'text' && typeof b.text === 'string' && !b.text.startsWith('<system-reminder>'))
+    .map(b => String(b.text)).join('\n\n')
+}
+
+/** `effort` from delegate_task's options, given as a list or an object. */
+function effortOf(options: unknown): string | undefined {
+  const value = Array.isArray(options) ? options.find(o => o?.id === 'effort')?.value : (options as Record<string, unknown> | undefined)?.effort
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * A main-session step of a delegated child: lastdrop's runner answers it, or undefined when this session
+ * isn't one or lastdrop handed the run back (the engine's model then runs).
+ */
+async function delegatedChild($: EngineInterface) {
+  const messages = await $.session.messages({ as: 'api' })
+  if (!Array.isArray(messages)) return undefined
+  const first = messages.findIndex(m => m.role === 'user')
+  const found = first < 0 ? undefined : untag(userText(messages[first] as ApiMessage))
+  if (!found) return undefined
+  const key = `delegated:${found.run.id}`
+  // Without its state (the store refused it, or pruned it), lastdrop's earlier answers say how far the run got.
+  const answered = messages.map(m => m.role).lastIndexOf('assistant')
+  const state = (await $.store.get(key) as DelegatedState | undefined)
+    ?? { ran: answered >= 0, native: false, cursor: answered >= 0 ? answered + 1 : first + 1 }
+  return { ...found, messages, key, state }
+}
+
+async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: AbortSignal): Promise<Line | undefined> {
+  const child = await delegatedChild($)
+  if (!child) return undefined
+  const { run, task, messages, key, state } = child
+  if (state.native) return undefined
+  if (e.index !== 0) throw new Error('Claude Code requested another model step after lastdrop’s answer.')
+  if (messages.length < state.cursor) throw new Error('The child’s transcript was compacted before lastdrop read its messages.')
+  const prompt = state.ran
+    ? messages.slice(state.cursor).filter(m => m.role === 'user').map(m => userText(m as ApiMessage)).filter(Boolean).join('\n\n')
+    : task
+  if (!prompt) throw new Error('The child got a new turn without a text message.')
+  const request: Request = {
+    prompt, description: run.description, subagentType: 'general-purpose', model: run.model, effort: run.effort,
+    cwd: await $.session.cwd(), permissionMode, parentModel: e.model, agent: run.agent, id: run.id,
+    resume: state.ran ? run.id : undefined,
+  }
+  // Nothing ran yet, so the child's own model can take a plain run; an added model never runs on Claude.
+  const plain = run.agent === undefined && !state.ran
+  const handBack = async () => {
+    if (!plain) throw new Error('lastdrop’s runner handed the agent back after it had run.')
+    state.native = true
+    await put($, key, state)
+    return undefined
+  }
+  let stream: Run | undefined
+  const stop = () => {
+    void stopRemote($, run.id).catch(error => $.ui.log(`lastdrop: stop ${run.id} failed: ${String(error)}`, { to: 'debug' }))
+  }
+  signal.addEventListener('abort', stop, { once: true })
+  try {
+    if (signal.aborted) throw new Error('Stopped by Claude Code.')
+    const begun = await start($, request)
+    if ('native' in begun || ('noRoom' in begun && plain)) return await handBack()
+    if ('noRoom' in begun) throw new Error(`lastdrop found nowhere to run ${run.agent ?? 'this agent'}.`)
+    if ('error' in begun) throw new Error(begun.error)
+    stream = begun.run
+    state.ran = true
+    // The messages so far reached the runner: a failure or a stop from here never sends them again.
+    state.cursor = messages.length
+    await put($, key, state)
+    let result: Line | undefined
+    for (let line = await stream.next(); line; line = await stream.next()) {
+      if (line.type === 'native') return await handBack()
+      if (line.type === 'result' || line.type === 'error') { result = line; break }
+    }
+    if (!result) throw new Error('lastdrop’s runner ended without the agent’s report.')
+    if (result.isError === true || result.type === 'error') throw new Error(String(result.text ?? 'The remote agent failed.'))
+    return { ...result, text: delegatedHeader(result) + String(result.text ?? '') }
+  } finally {
+    signal.removeEventListener('abort', stop)
+    stream?.stop()
+  }
+}
+
 export const register: Register = on => {
   // Context leaves the shared system prompt intact. Claude renders it before UserPromptSubmit, so
   // re-read the catalog here and invalidate this cached answer for the next prompt. Unchanged text
@@ -654,12 +874,18 @@ export const register: Register = on => {
       // A store that refuses leaves this request on the current list; the next one tries again.
       if (await put($, `listing:${id}`, list) && (await $.store.get(`announced:${id}`)) === undefined) await put($, `announced:${id}`, current)
     }
-    return list === '' ? answer : { ...answer, text: `${answer.text}\n\n${ADDED}${list}` }
+    const added = (await $.env.get('T3CODE_THREAD_ID')) ? ADDED_T3 : ADDED
+    return list === '' ? answer : { ...answer, text: `${answer.text}\n\n${added}${list}` }
   }).catch(($, e, next) => next(e))
 
   // A compaction builds the listing again. A precomputed one installs later, with no `session.compact`
   // of its own then, so the notice row it files is the sign; a replayed row never raises `session.append`.
   on('session.compact', async ($, e, next) => {
+    // A delegated child's own model never reads its conversation, and the summary would drop the tag.
+    if (e.agentId === undefined && e.trigger !== 'precompute') {
+      const child = await delegatedChild($)
+      if (child && !child.state.native) return { skip: 'lastdrop runs this thread’s agent elsewhere; its conversation stays whole.' }
+    }
     const answer = await next(e)
     if (e.agentId === undefined && e.trigger !== 'precompute' && answer.skip === undefined) await resetListing($)
     return answer
@@ -765,6 +991,64 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => ({ deny: `lastdrop failed: ${next.error.message ?? next.error.kind}` }))
 
+  // A T3 Code child thread runs where an Agent call would: lastdrop picks the account, or the added model's
+  // provider, and the child's turns run there (delegatedTurn). No room: T3 starts the child unchanged.
+  on('tool.call', { tool: DELEGATE }, async ($, e, next) => {
+    const call = e as unknown as Record<string, unknown>
+    const target = (call.target ?? {}) as Record<string, unknown>
+    if (typeof call.task !== 'string' || target.environmentId !== undefined) return next(e)
+    if ((target.providerInstanceId ?? T3_CLAUDE) !== T3_CLAUDE || (target.driverKind ?? T3_CLAUDE) !== T3_CLAUDE) return next(e)
+    const model = typeof target.model === 'string' ? target.model : undefined
+    if (model !== undefined && !model.startsWith('claude-') && !NATIVE.has(model) && !catalog.has(model)) await syncCatalog($)
+    const agent = model !== undefined && agentModels && catalog.has(model) ? model : undefined
+    // Another provider's model on this instance: T3 answers it.
+    if (model !== undefined && agent === undefined && !model.startsWith('claude-') && !NATIVE.has(model)) return next(e)
+    const effort = effortOf(target.options)
+    const description = typeof call.title === 'string' ? call.title : undefined
+    const request: Request = {
+      prompt: call.task, description, subagentType: 'general-purpose', model: agent ? undefined : model, effort,
+      cwd: await $.session.cwd(), permissionMode, parentModel: await $.session.model(), agent,
+    }
+    if (await admission($, request) === 'no_room') {
+      return agent ? { deny: `lastdrop found nowhere to run ${agent}.` } : next(e)
+    }
+    const id = `t3-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+    const run: Delegated = { id, agent, model: agent ? undefined : model, effort, description }
+    // T3 doesn't know an added model; the child keeps the session's, which never runs for it.
+    const { model: _, ...rest } = target
+    const childTarget = agent ? rest : target
+    const { target: __, ...args } = call
+    const routed = Object.keys(childTarget).length > 0 ? { ...args, target: childTarget } : args
+    const answer = await next({ ...routed, task: tag(call.task, run) } as unknown as typeof e)
+    if (answer.deny !== undefined || !agent) return answer
+    // The answer names the child thread's own model: the model reads the added one, and where it runs.
+    // The child exists now, so a failure here keeps T3's answer instead of failing (or repeating) the call.
+    try {
+      for (const id of idsIn(jsonOf(answer))) await put($, `delegated-child:${id}`, agent)
+      return editAnswer(answer, json => rewriteChildren(json, new Map(), agent))
+    } catch (error) {
+      $.ui.log(`lastdrop: rewriting delegate_task's answer failed: ${String(error)}`, { to: 'debug' })
+      return answer
+    }
+  }).catch(($, e, next) => ({ deny: `lastdrop failed: ${next.error.message ?? next.error.kind}` }))
+
+  // T3's other answers about our children (task_status, t3_thread_read, ...) name the thread's model too, and
+  // orchestrator_capabilities lists only T3's providers, without the added models.
+  on('tool.call', { tool: T3_TOOLS }, async ($, e, next) => {
+    if (e.tool === DELEGATE) return next(e)
+    const answer = await next(e)
+    if (answer.deny !== undefined) return answer
+    if (e.tool === CAPABILITIES && (e as unknown as Record<string, unknown>).environmentId !== undefined) return answer
+    // The tool ran: a failure here keeps T3's answer, never runs it again.
+    try {
+      return await rewriteT3($, e.tool, answer)
+    } catch (error) {
+      $.ui.log(`lastdrop: rewriting ${e.tool}'s answer failed: ${String(error)}`, { to: 'debug' })
+      return answer
+    }
+    // Only `next` can throw past the try, and a tool that failed must not run twice.
+  }).catch(($, e, next) => ({ deny: `${e.tool} failed: ${next.error.message ?? next.error.kind}` }))
+
   on('agent.spawn', async ($, e, next) => {
     const special = e.fork || e.isTeammate || e.workflow || e.parentAgentId !== undefined
     if (!e.resume && special && claims.get(e.tool_use_id)?.agent !== undefined) {
@@ -817,7 +1101,17 @@ export const register: Register = on => {
 
   // Separate registration: a spawn nested in agent.spawn/tool.call still reaches this hook.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) return yield* next(e)
+    if (!e.agentId) {
+      let result: Line | undefined
+      try {
+        result = await delegatedTurn($, e, next.signal)
+      } catch (error) {
+        if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+        throw error
+      }
+      if (!result) return yield* next(e)
+      return yield* respond(e, String(result.text ?? ''), usageOf(result, e.model), false)
+    }
     if (spawning.size > 0) await Promise.all([...spawning])
     const route = routes.get(e.agentId) ?? await $.store.get(`native-agent:${e.agentId}`) as Route | undefined
     if (!route) return yield* next(e)
@@ -829,7 +1123,7 @@ export const register: Register = on => {
       active.add(e.agentId)
       result = await remoteTurn($, e, route, next.signal)
       native = result.type === 'native'
-      if (!native) lead = header(route, result)
+      if (!native) lead = header(route.request, result)
     } catch (error) {
       if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
       result = { type: 'result', isError: true, text: `lastdrop agent failed: ${String(error)}` }

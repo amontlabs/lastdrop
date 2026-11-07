@@ -134,6 +134,49 @@ before validation, and rewriting through `next` keeps the model's own `model: "s
 each, all on the first try with `model`, and no added model for a search (Sonnet 0/10, Opus 0/5). These are small
 samples through `claude -p`. See [research H](research/H-agent-models.md) for the byte checks and live runs.
 
+## T3 Code
+
+T3 Code runs each thread's `claude` itself and replaces that process on a model change, a provider switch or
+Stop, which ends native background agents. Its orchestration prompt therefore sends background work through its
+`delegate_task` tool, which starts a child thread. lastdrop runs those children the way it runs an Agent call,
+with no extra providers or accounts set up in T3.
+
+- **Parent (`tool.call` on `mcp__t3-code__delegate_task`).** For a child on T3's built-in Claude instance (no
+  `providerInstanceId`, or `claudeAgent`) on this machine, with no model, a Claude model or an added model,
+  the plugin asks `--agent-route` as for Agent. No room: a plain call goes to T3 unchanged (the child runs on
+  the session's account), an added model is denied. Otherwise the task gets a last line
+  `<!-- lastdrop {"id":…,"agent"|"model":…,"effort":…,"description":…} -->`, and an added model is removed
+  from `target` (T3 doesn't know it; the child keeps the session's model, which never runs for it). Other
+  instances, other models and other machines are left to T3. The transcript keeps the model's own arguments.
+- **Child (`turn.step` on the main loop).** When the session's first user message ends with that tag, the
+  plugin answers each turn with `lastdrop --agent-run` (the task, then each new message with `resume`), so the
+  child's own model never runs. Accounts, added models, fallbacks at a limit and stop are the runner's, as for
+  Agent; the report starts with `Ran on <account> (<model>).` A run the runner hands back (no room, nothing
+  done) leaves the child on its own model from then on, reading the task with the tag line. Messages are sent
+  once: the cursor moves as soon as the runner has them, and without stored state lastdrop's last answer marks
+  where the run got to. The child's conversation is never compacted (`session.compact` is skipped), since no
+  model reads it and a summary would drop the tag.
+- **What the model reads of T3's answers.** T3 describes a child by its thread's instance and model, and lists
+  only its own providers, with Antigravity and the like as disabled. Models read that as the added model not
+  running (Opus cancelled such children). So, in the JSON T3 returns (the result is one string):
+  `delegate_task`, and later answers that name an added model's child by `taskId` or thread id
+  (`task_status`, `t3_thread_read`, …), show `"model":"flash","runsOn":"lastdrop · Antigravity · …"`; and
+  `orchestrator_capabilities` gains `"addedModels":[{"model","runsOn"}]` (not for another machine). Plain
+  Claude children are left as T3 wrote them. T3's own UI is unchanged. A rewrite that fails keeps T3's answer;
+  a T3 tool is never called twice.
+- **Listing.** In T3 (`T3CODE_THREAD_ID` set) the added models' line reads "The Agent tool's model parameter
+  and delegate_task's target.model also accept these models the user added. They run through the Agent tool
+  like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to
+  them: use Agent, and delegate_task only for background work." T3's own prompt says to use `delegate_task`
+  for another provider's model; it is appended after the sections a plugin can rewrite (`prompt.compose`
+  lists `lean_body, pronouns, …` without it), so lastdrop answers it here instead.
+
+Evidence (T3 Code beta, Claude Code 2.1.319, 2026-11-07, real T3 threads on Sonnet 5.5 and Opus 5.5):
+"ask gemini …" used Agent with `gemini`, 5/5. "… flash in the background" and "start flash in the
+background, then check task_status": before the answer rewrites, Opus cancelled 3 of 5 children and Sonnet
+said flash didn't run; with them, 6/6 used delegate_task with `flash`, kept the child, and reported Antigravity
+(task_status included). A follow-up `t3_thread_send` resumed the same run on the same account.
+
 ## Routing rules
 
 - An added agent always runs on its provider and its model: never the built-in agent, never another provider,
