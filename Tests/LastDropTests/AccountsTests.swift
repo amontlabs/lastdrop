@@ -175,4 +175,14 @@ final class AccountsTests: XCTestCase {
         XCTAssertEqual(StatusBarController.first(2, of: groups).map(\.entries.count), [2])
         XCTAssertEqual(StatusBarController.first(1, of: groups).map(\.entries.count), [1])
     }
+
+    @MainActor func testTheMenuBarKnowsWhenMacOSHidItsItem() {
+        let item = CGRect(x: 1148, y: 1290, width: 394, height: 39)
+        let shown = CGRect(x: 1542, y: 0, width: 109, height: 39)
+        // The window server measures y from the top, so only x and width have to match.
+        let hidden = CGRect(x: 1148, y: 0, width: 394, height: 39)
+        XCTAssertTrue(StatusBarController.isHidden(item, in: [(shown, true), (hidden, false)]))
+        XCTAssertFalse(StatusBarController.isHidden(item, in: [(hidden, true)]))
+        XCTAssertFalse(StatusBarController.isHidden(item, in: [(shown, false)]), "not found means not known to be hidden")
+    }
 }
