@@ -5,9 +5,8 @@
 <h1 align="center">lastdrop</h1>
 
 <p align="center">
-  Use any model as a built-in subagent in Claude Code, with a subscription or API key.<br>
-  Claude calls them like its native subagents, and lastdrop spreads usage across your accounts.<br>
-  A macOS menu bar app.
+  Use any model as a built-in subagent in Claude Code and T3 Code, with a subscription or API key.<br>
+  Claude calls them like its native subagents, and lastdrop spreads usage across your accounts.
 </p>
 
 <p align="center">
@@ -29,6 +28,8 @@ https://github.com/user-attachments/assets/cf7e7f33-c58a-4633-a22e-8449d3a87664
 - **Any model as a subagent.** Make an agent on any connected plan: a name, when to use it, a model
   and an effort.
 - **Built in for Claude.** Claude calls it through the Agent tool's model: `Agent({ subagent_type: "general-purpose", model: "<name>" })`.
+- **T3 Code too.** Claude your daily driver in T3 Code? Keep only the Claude provider in T3 and set up every
+  other model in lastdrop. Claude reaches them whenever it delegates.
 - **Load-balanced.** Add several accounts per plan, Claude included. Each subagent runs on the account with
   the most usage left.
 - **Save Claude usage.** A switch that encourages Claude to delegate to your agents.
@@ -38,7 +39,8 @@ https://github.com/user-attachments/assets/cf7e7f33-c58a-4633-a22e-8449d3a87664
 
 ## Install
 
-You need macOS 15 or later. The agent features need [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+You need macOS 15 or later. The agent features need [Claude Code](https://docs.anthropic.com/en/docs/claude-code), on its own or
+inside T3 Code.
 
 1. Download `lastdrop.zip` from the [latest release](https://github.com/amontlabs/lastdrop/releases/latest)
    and move `lastdrop.app` to Applications.
@@ -70,10 +72,15 @@ rm -rf /Applications/lastdrop.app && cp -R dist/lastdrop.app /Applications/
   </picture>
 </p>
 
-## Agents in Claude Code
+## Agents in Claude Code and T3 Code
 
-Turn on **Agents in Claude Code** in **Settings → Agents**. It works in the terminal and in the Claude
-desktop app.
+Turn on **Agents in Claude Code** in **Settings → Agents**. It works in the terminal, in the Claude
+desktop app and in T3 Code.
+
+**T3 Code.** If Claude is your daily driver in T3 Code, the Claude provider is the only one T3 needs. Your
+other models and accounts live in lastdrop, and Claude reaches them whenever it delegates: a subagent in the
+conversation (Agent) or a task in its own thread (`delegate_task`). Both use the same agents, accounts and
+fallbacks. Each report starts with the account and model it ran on.
 
 **Your agents.** Click **New agent…** and pick a name, when Claude should use it, a plan, a model and an
 effort. Claude sees it in the Agent tool's list of models.
