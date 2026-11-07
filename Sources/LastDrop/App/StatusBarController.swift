@@ -12,8 +12,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     /// has anything to show.
     private var strips: [NSImage] = []
     private lazy var gauge: NSImage? = BrandImages.menuBarGlyph()
-    /// macOS hid a strip this wide at the item's current right edge, so only narrower ones are tried there.
+    /// macOS hid a strip this wide, so only narrower ones are tried until the room changes.
     private var hiddenWidth = CGFloat.infinity
+    /// The item's right edge when last on screen. macOS parks a hidden item elsewhere, so its frame then says
+    /// nothing about the room.
     private var rightEdge: CGFloat?
     private var hiddenCheck: Task<Void, Never>?
 
@@ -75,36 +77,41 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     /// macOS hides a status item that doesn't fit, beside the notch or the app's menus, without telling the
     /// app, so show the fullest strip that fits, or the gauge. Beside the notch, the room gives a first guess;
-    /// macOS keeps a margin of its own, so a strip it still hides is dropped for the next smaller one. Items keep
-    /// their right edge as their width changes, which measures the room without flickering, and a new right edge
-    /// means the room changed, so every strip is tried again.
+    /// macOS keeps a margin of its own and makes room for the items beside, so a strip it still hides is dropped
+    /// for the next smaller one. Items keep their right edge as their width changes, which measures the room
+    /// without flickering.
     private func layout() {
         guard let button = item.button else { return }
-        let window = button.window
-        if let edge = window?.frame.maxX, edge != rightEdge {
-            rightEdge = edge
-            hiddenWidth = .infinity
-        }
         var room = hiddenWidth
         // The area beside the notch runs to the screen's right edge; its width avoids guessing its coordinates.
-        if let window, let screen = window.screen, let area = screen.auxiliaryTopRightArea, area.width > 0 {
+        if let window = button.window, let screen = window.screen, let area = screen.auxiliaryTopRightArea, area.width > 0 {
             let padding = window.frame.width - (button.image?.size.width ?? 0)
-            room = min(room, window.frame.maxX - padding - (screen.frame.maxX - area.width) + 0.5)
+            let edge = rightEdge ?? window.frame.maxX
+            room = min(room, edge - padding - (screen.frame.maxX - area.width) + 0.5)
         }
         let image = strips.first { $0.size.width < room } ?? gauge
         if button.image !== image { button.image = image }
         checkHidden()
     }
 
-    /// Once macOS has placed the item, drop to a narrower strip if it hid this one.
+    /// Once macOS has placed the item: if it hid this strip, drop to a narrower one; if it shows the item at a
+    /// new right edge, the room changed, so try every strip again.
     private func checkHidden() {
         hiddenCheck?.cancel()
-        guard let image = item.button?.image, image !== gauge else { return }
+        guard let image = item.button?.image else { return }
         hiddenCheck = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
             guard let self, !Task.isCancelled, let window = item.button?.window, item.button?.image === image,
-                  Self.isHidden(window.frame, in: Self.statusWindows()) else { return }
-            hiddenWidth = image.size.width
+                  let shown = Self.isShown(window.frame, in: Self.statusWindows()) else { return }
+            if !shown {
+                guard image !== gauge else { return }
+                hiddenWidth = min(hiddenWidth, image.size.width)
+            } else {
+                let edge = window.frame.maxX
+                defer { rightEdge = edge }
+                guard let old = rightEdge, abs(old - edge) >= 1 else { return }
+                hiddenWidth = .infinity
+            }
             layout()
         }
     }
@@ -122,11 +129,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// Whether the window server holds a status window at this frame's place and width, none of them on screen.
-    /// Only x and width are compared: the window server measures y from the top.
-    static func isHidden(_ frame: CGRect, in windows: [(CGRect, Bool)]) -> Bool {
+    /// Whether the window server shows the status window at this frame's place and width; nil when it holds
+    /// none there. Only x and width are compared: the window server measures y from the top.
+    static func isShown(_ frame: CGRect, in windows: [(CGRect, Bool)]) -> Bool? {
         let matches = windows.filter { abs($0.0.minX - frame.minX) < 1 && abs($0.0.width - frame.width) < 1 }
-        return !matches.isEmpty && !matches.contains { $0.1 }
+        return matches.isEmpty ? nil : matches.contains { $0.1 }
     }
 
     @objc private func itemMoved(_ notification: Notification) {
@@ -136,6 +143,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     @objc private func screensChanged() {
         hiddenWidth = .infinity
+        rightEdge = nil
         layout()
     }
 

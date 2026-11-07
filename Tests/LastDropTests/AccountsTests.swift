@@ -181,8 +181,8 @@ final class AccountsTests: XCTestCase {
         let shown = CGRect(x: 1542, y: 0, width: 109, height: 39)
         // The window server measures y from the top, so only x and width have to match.
         let hidden = CGRect(x: 1148, y: 0, width: 394, height: 39)
-        XCTAssertTrue(StatusBarController.isHidden(item, in: [(shown, true), (hidden, false)]))
-        XCTAssertFalse(StatusBarController.isHidden(item, in: [(hidden, true)]))
-        XCTAssertFalse(StatusBarController.isHidden(item, in: [(shown, false)]), "not found means not known to be hidden")
+        XCTAssertEqual(StatusBarController.isShown(item, in: [(shown, true), (hidden, false)]), false)
+        XCTAssertEqual(StatusBarController.isShown(item, in: [(hidden, true)]), true)
+        XCTAssertNil(StatusBarController.isShown(item, in: [(shown, false)]), "not found means not known")
     }
 }
