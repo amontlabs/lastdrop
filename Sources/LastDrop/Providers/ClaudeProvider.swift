@@ -6,6 +6,12 @@ struct ClaudeProvider: UsageProvider {
     var id: ProviderID { .claude }
     /// The Claude Code config folder whose sign-in to read (`CLAUDE_CONFIG_DIR`); nil for the default.
     var configDir: String?
+    /// A short-lived runner process: it asks the usage endpoint and nothing else. The plan name and reset grants
+    /// are the app's to fetch (their caches live in one process), and the runner reads the plan from the status file.
+    var lean = false
+
+    /// The id this account has in the shared usage file: "main", or its folder's name.
+    var usageID: String { configDir.map { ($0 as NSString).lastPathComponent } ?? ClaudeAccount.mainID }
 
     private static let usageURL = "https://api.anthropic.com/api/oauth/usage"
     private static let profileURL = "https://api.anthropic.com/api/oauth/profile"
@@ -13,6 +19,8 @@ struct ClaudeProvider: UsageProvider {
     struct Credentials { var accessToken: String; var expiresAt: Date?; var plan: String? }
 
     func fetch() async throws -> UsageSnapshot {
+        // Another process (or an earlier refresh) was told to back off: asking again only keeps the 429 going.
+        if let until = SubagentUsage.blockedUntil(usageID) { throw ProviderError.rateLimited(Self.rateLimitedMessage(until: until)) }
         guard let raw = Self.storedCredentials(configDir: configDir) else {
             throw ProviderError.notConfigured("Run `claude` to sign in.")
         }
@@ -25,7 +33,15 @@ struct ClaudeProvider: UsageProvider {
         if let expiry = creds.expiresAt, expiry.timeIntervalSinceNow < 60 {
             throw ProviderError.unauthorized(expired)
         }
-        let (windows, credits) = try await Self.usage(accessToken: creds.accessToken, expired: expired)
+        let windows: [UsageWindow], credits: ExtraCredits?
+        do {
+            (windows, credits) = try await Self.usage(accessToken: creds.accessToken, expired: expired)
+        } catch let limited as UsageRateLimited {
+            let until = SubagentUsage.recordBlock(usageID, retryAfter: limited.retryAfter)
+            throw ProviderError.rateLimited(Self.rateLimitedMessage(until: until))
+        }
+        SubagentUsage.clearBlock(usageID)
+        if lean { return UsageSnapshot(title: "Claude", plan: creds.plan, windows: windows, credits: credits) }
         // After a successful usage fetch, so the token is known to work; a failure only costs the badge.
         let token = creds.accessToken
         let resets = await Self.resetCache.value(configDir ?? "main") { try await Self.resetGrants(accessToken: token) }
@@ -35,6 +51,14 @@ struct ClaudeProvider: UsageProvider {
         snapshot.credits = credits
         return snapshot
     }
+
+    static func rateLimitedMessage(until: Date, now: Date = .now) -> String {
+        let minutes = max(1, Int((until.timeIntervalSince(now) / 60).rounded(.up)))
+        return "Claude usage is rate limited. Retrying in \(minutes) minute\(minutes == 1 ? "" : "s")."
+    }
+
+    /// The usage endpoint answered 429, with its Retry-After seconds when it sent them.
+    struct UsageRateLimited: Error { var retryAfter: TimeInterval? }
 
     /// Reset grants are asked for at most once an hour per account: asking on every refresh got
     /// OpenUsage sustained 429s on the usage endpoint.
@@ -93,7 +117,9 @@ struct ClaudeProvider: UsageProvider {
                        "anthropic-beta": "oauth-2025-04-20", "User-Agent": "lastdrop"]
         let (body, http) = try await HTTP.json(HTTP.request(usageURL, headers: headers))
         if http.statusCode == 401 || http.statusCode == 403 { throw ProviderError.unauthorized(expired) }
-        if http.statusCode == 429 { throw ProviderError.rateLimited("Claude usage is rate limited. Retrying in 5 minutes.") }
+        if http.statusCode == 429 {
+            throw UsageRateLimited(retryAfter: http.value(forHTTPHeaderField: "Retry-After").flatMap { Double($0.trimmingCharacters(in: .whitespaces)) })
+        }
         guard (200..<300).contains(http.statusCode) else { throw ProviderError.http(http.statusCode) }
         guard let root = body as? [String: Any] else { throw ProviderError.invalidResponse }
         let windows = windows(from: root)

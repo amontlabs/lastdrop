@@ -48,7 +48,10 @@ enum AgentPool {
 
     /// Points left before the nearer threshold; nil when unknown, stale or past it.
     static func room(_ account: Account, usage: [String: SubagentUsage.Status], config: AccountsConfig, now: Date = .now) -> Double? {
-        guard let status = usage[usageKey(account)], now.timeIntervalSince(status.at) < 30 * 60 else { return nil }
+        guard let status = usage[usageKey(account)] else { return nil }
+        // An account that can't be read right now (rate limited) keeps its last reading longer.
+        let blocked = status.blockedUntil.map { $0 > now } ?? false
+        guard now.timeIntervalSince(status.at) < (blocked ? SubagentUsage.readingKept : 30 * 60) else { return nil }
         let rooms = [status.session.map { config.sessionThreshold * 100 - $0 }, status.weekly.map { config.weeklyThreshold * 100 - $0 }].compactMap { $0 }
         guard let room = rooms.min(), room > 0 else { return nil }
         return room
