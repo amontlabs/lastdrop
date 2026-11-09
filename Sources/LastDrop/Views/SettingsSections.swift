@@ -196,6 +196,11 @@ struct AgentsSections: View {
                 }
                 if let error { Text(error).font(.caption).foregroundStyle(.red).padding(.top, 6) }
             }
+            if !judgedProviders.isEmpty {
+                CommandJudgesSection(providers: judgedProviders, judges: catalog.judges) { provider, judge in
+                    change { $0.judges[provider] = judge }
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentCatalogChanged)) { _ in catalog = AgentCatalog.load() }
         // `lastdrop --agents` is another process.
@@ -207,6 +212,11 @@ struct AgentsSections: View {
                 }
             }
         }
+    }
+
+    /// Providers with a judge the user can set: connected ones, and any already set.
+    private var judgedProviders: [AgentProvider] {
+        AgentProvider.judged.filter { !model.accounts($0.usageID).isEmpty || catalog.judges[$0] != nil }
     }
 
     private func row(_ agent: AgentDefinition) -> some View {

@@ -120,7 +120,7 @@ final class AgentModelsTests: XCTestCase {
             ["tool_name": "Bash", "tool_input": ["command": "git push"]],
             ["tool_name": "WebFetch", "tool_input": ["url": "https://example.test"]],
         ]])
-        XCTAssertEqual(result.declined, ["Bash: git push", "WebFetch: https://example.test"])
+        XCTAssertEqual(result.declined, ["Bash: git push (needed approval)", "WebFetch: https://example.test (needed approval)"])
         XCTAssertEqual(result.permissionDenials, 3)
     }
 

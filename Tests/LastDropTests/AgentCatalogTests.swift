@@ -60,6 +60,25 @@ final class AgentCatalogTests: XCTestCase {
         XCTAssertFalse(catalog.saveClaude)
     }
 
+    func testJudgesDecodeToDefaultsAndSkipWhatTheyCantRead() throws {
+        let older = try JSONDecoder.lastdrop.decode(AgentCatalog.self, from: Data(#"{"revision":3,"agents":[]}"#.utf8))
+        XCTAssertTrue(older.judges.isEmpty)
+        XCTAssertEqual(older.judge(.zai), AgentJudge(model: "glm-5.3"))
+        XCTAssertNil(older.judge(.openrouter), "the agent's own model")
+        XCTAssertEqual(older.judge(.antigravity), AgentJudge(model: "gemini-3.8-flash", effort: "low"))
+        XCTAssertNil(older.judge(.codex))
+        let newer = try JSONDecoder.lastdrop.decode(AgentCatalog.self, from: Data("""
+        {"revision":4,"agents":[],"judges":{"zai":{"model":"glm-5.4"},"antigravity":{"model":"gemini-4-argon","effort":"high"},
+        "openrouter":{"model":"x/y","effort":"high"},"codex":{"model":"gpt"},"someday":{"model":"m"},"bad":7}}
+        """.utf8))
+        XCTAssertEqual(newer.judges, [.zai: AgentJudge(model: "glm-5.4"), .antigravity: AgentJudge(model: "gemini-4-argon", effort: "high")])
+        // Round trip, and an empty map stays out of the file so an older app sees the catalog it wrote.
+        let data = try JSONEncoder().encode(newer)
+        XCTAssertEqual(try JSONDecoder.lastdrop.decode(AgentCatalog.self, from: data).judges, newer.judges)
+        let plain = try JSONSerialization.jsonObject(with: JSONEncoder().encode(older)) as? [String: Any]
+        XCTAssertNil(plain?["judges"])
+    }
+
     func testUsageSavingPersistsAndReachesThePlugin() throws {
         let worker = agent("worker")
         let catalog = AgentCatalog(agents: [worker, agent("off", enabled: false)], revision: 4, saveClaude: true)

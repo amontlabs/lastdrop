@@ -155,7 +155,7 @@ final class CodexBackendTests: XCTestCase {
     func testDeclinedRequestsAreDescribedForTheCaller() async throws {
         let fake = try fixture("standard")
         let result = await CodexBackend.run(job(in: fake.deletingLastPathComponent().path), CodexEventLog().events, executable: fake.path)
-        XCTAssertTrue(["Bash", "Edit files", "Extra permissions", "mcpServer/elicitation/request"].allSatisfy(result.declined.contains), "\(result.declined)")
+        XCTAssertTrue(["Bash", "Edit files", "Extra permissions", "mcpServer/elicitation/request"].map { $0 + " (needed approval)" }.allSatisfy(result.declined.contains), "\(result.declined)")
         XCTAssertEqual(Set(result.declined).count, result.declined.count)
         XCTAssertEqual(CodexBackend.describe(declined: "item/commandExecution/requestApproval", ["command": "git push\norigin"]), "Bash: git push origin")
         XCTAssertEqual(CodexBackend.describe(declined: "execCommandApproval", ["command": ["rm", "-rf", "x"]]), "Bash: rm -rf x")

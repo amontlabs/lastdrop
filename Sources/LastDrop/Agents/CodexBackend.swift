@@ -190,7 +190,7 @@ enum CodexBackend: AgentBackend {
         let declined = Declined()
         let server = CodexAppServer(executable: executable, directory: directory, environment: environment) { method, params in
             events.step("Declined Codex request: \(method)")
-            declined.add(describe(declined: method, params))
+            declined.add(describe(declined: method, params) + " (needed approval)")
             return decline(method)
         }
         defer { server.stop() }

@@ -100,6 +100,40 @@ final class AgentsCommandTests: XCTestCase {
         XCTAssertEqual(AgentCatalog.load(from: url).agents[0].model, "gpt-new")
     }
 
+    func testJudgeIsCheckedSavedListedAndReset() async throws {
+        let models: (AgentProvider) async throws -> [AgentModel] = { provider in
+            provider == .antigravity ? [AgentModel(id: "gemini-4-argon", name: "Argon", efforts: ["low", "high"], defaultEffort: nil)]
+                : provider == .zai ? [AgentModel(id: "glm-5.4", name: "GLM", efforts: [], defaultEffort: nil)] : []
+        }
+        func run(_ args: String...) async throws -> String { try await AgentsCommand.run(args, models: models, url: url) }
+        func failure(_ args: String...) async -> String? {
+            do { _ = try await AgentsCommand.run(args, models: models, url: url); return nil } catch { return error.localizedDescription }
+        }
+        let listed = try await run("list")
+        XCTAssertTrue(listed.contains(#""model" : "glm-5.3""#) && listed.contains("the agent's own model"), listed)
+        try await run("judge", "antigravity", "gemini-4-argon", "high")
+        try await run("judge", "zai", "glm-5.4")
+        XCTAssertEqual(AgentCatalog.load(from: url).judges, [.antigravity: AgentJudge(model: "gemini-4-argon", effort: "high"),
+                                                             .zai: AgentJudge(model: "glm-5.4")])
+        let relisted = try await run("list")
+        XCTAssertTrue(relisted.contains(#""model" : "gemini-4-argon""#))
+        let missingModel = await failure("judge", "antigravity", "nope", "low")
+        XCTAssertEqual(missingModel, "Antigravity doesn't offer nope. Run --agents models antigravity.")
+        let missingEffort = await failure("judge", "antigravity", "gemini-4-argon", "max")
+        XCTAssertEqual(missingEffort, "gemini-4-argon takes low, high; received max.")
+        let effortOnZai = await failure("judge", "zai", "glm-5.4", "high")
+        XCTAssertTrue(effortOnZai?.contains("takes no effort") ?? false)
+        let codex = await failure("judge", "codex", "gpt-6.1-sol")
+        XCTAssertTrue(codex?.contains("own reviewer") ?? false)
+        // OpenRouter lists nothing here: the id is taken as it is.
+        try await run("judge", "openrouter", "any/model")
+        try await run("judge", "zai", "default")
+        let catalog = AgentCatalog.load(from: url)
+        XCTAssertNil(catalog.judges[.zai])
+        XCTAssertEqual(catalog.judge(.zai), AgentJudge(model: "glm-5.3"))
+        XCTAssertEqual(catalog.judge(.openrouter), AgentJudge(model: "any/model"))
+    }
+
     func testRemoveAndSaving() async throws {
         try await run("set", input: sol())
         try await run("saving", "on")

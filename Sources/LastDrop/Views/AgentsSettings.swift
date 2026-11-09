@@ -185,3 +185,128 @@ private struct ColumnMenu<Items: View, Label: View>: View {
         .menuIndicator(.hidden)
     }
 }
+
+/// Settings → Agents → Command judges: the model that checks each judged provider's agents' commands.
+struct CommandJudgesSection: View {
+    let providers: [AgentProvider]
+    let judges: [AgentProvider: AgentJudge]
+    let save: (AgentProvider, AgentJudge?) -> Void
+
+    var body: some View {
+        PageSection("Command judges") {
+            Caption(JudgeRow.about).padding(.bottom, 4)
+            Nest {
+                ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
+                    if index > 0 { RowDivider() }
+                    JudgeRow(provider: provider, chosen: judges[provider]) { save(provider, $0) }
+                }
+            }
+        }
+    }
+}
+
+/// One provider's command judge: the default or a model from the provider's live list, and Antigravity's effort.
+/// A judge the provider no longer offers stays chosen and is flagged: lastdrop never swaps in another model.
+struct JudgeRow: View {
+    let provider: AgentProvider
+    /// The user's choice; nil is the default.
+    let chosen: AgentJudge?
+    let save: (AgentJudge?) -> Void
+    @State private var models: [AgentModel] = []
+    @State private var modelsError: String?
+    @State private var typed = ""
+
+    static let about = "A model checks each command an agent wants to run and refuses risky ones. A weak model lets risky commands through: glm-5.3-flash allowed an SSH-key upload that glm-5.3 blocked."
+
+    private var defaultName: String {
+        provider.defaultJudge.map { "Default (\($0.summary))" } ?? "Default (the agent's own model)"
+    }
+
+    private var current: AgentJudge? { chosen ?? provider.defaultJudge }
+
+    private var efforts: [String] {
+        guard provider.judgeTakesEffort, let model = current?.model else { return [] }
+        return models.first { $0.id == model }?.efforts ?? AntigravityBackend.efforts
+    }
+
+    /// The chosen judge isn't in the provider's list: its agents' checked commands fail until another is chosen.
+    private var missing: String? {
+        guard let judge = current, !models.isEmpty else { return nil }
+        guard let model = models.first(where: { $0.id == judge.model }) else {
+            return "\(provider.displayName) doesn't offer \(judge.model): checked commands will fail until you choose another judge."
+        }
+        if let effort = judge.effort, !model.efforts.isEmpty, !model.efforts.contains(effort) {
+            return "\(judge.model) doesn't take \(effort) effort: checked commands will fail until you choose another."
+        }
+        return nil
+    }
+
+    private func name(_ id: String) -> String { models.first { $0.id == id }?.name ?? id }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Image(nsImage: Logos.colored(provider.usageID, size: 13)).frame(width: 22)
+                Text(provider.displayName).frame(width: 96, alignment: .leading)
+                Group {
+                    if models.isEmpty {
+                        TextField("Judge model", text: $typed, prompt: Text(defaultName))
+                            .labelsHidden().textFieldStyle(.roundedBorder)
+                            .onSubmit { pick(typed.trimmingCharacters(in: .whitespaces)) }
+                    } else {
+                        ColumnMenu {
+                            Button(defaultName) { save(nil) }
+                            Divider()
+                            ForEach(models) { model in Button(model.name) { pick(model.id) } }
+                        } label: {
+                            Text(chosen.map { name($0.model) } ?? defaultName)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    if !efforts.isEmpty {
+                        ColumnMenu {
+                            Button("Auto") { save(AgentJudge(model: current!.model, effort: nil)) }
+                            ForEach(efforts, id: \.self) { effort in
+                                Button(effort.capitalized) { save(AgentJudge(model: current!.model, effort: effort)) }
+                            }
+                        } label: {
+                            Text(current?.effort?.capitalized ?? "Auto")
+                        }
+                    }
+                }
+                .frame(width: 76, alignment: .leading)
+            }
+            if let missing { Text(missing).font(.callout).foregroundStyle(.orange) }
+            if let modelsError { Caption(modelsError) }
+        }
+        .padding(.vertical, 8)
+        .task(id: provider) { await loadModels() }
+        .onAppear { typed = chosen?.model ?? "" }
+        .onChange(of: chosen) { typed = chosen?.model ?? "" }
+    }
+
+    /// Keeps the effort when the new model takes it; Antigravity's default effort otherwise.
+    private func pick(_ id: String) {
+        guard !id.isEmpty else { save(nil); return }
+        var effort: String?
+        if provider.judgeTakesEffort {
+            let offered = models.first { $0.id == id }?.efforts ?? AntigravityBackend.efforts
+            let wanted = current?.effort ?? provider.defaultJudge?.effort
+            effort = wanted.flatMap { offered.contains($0) ? $0 : nil }
+        }
+        save(AgentJudge(model: id, effort: effort))
+    }
+
+    private func loadModels() async {
+        models = []
+        modelsError = nil
+        do {
+            models = try await provider.backend.models()
+            if models.isEmpty { modelsError = "\(provider.displayName) lists no models here: type the judge's model id." }
+        } catch {
+            modelsError = "Couldn't list \(provider.displayName)'s models (\(error.localizedDescription)). Type the judge's model id."
+        }
+    }
+}

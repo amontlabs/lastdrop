@@ -20,9 +20,31 @@ final class EndpointBackendTests: XCTestCase {
         XCTAssertNil(env["CLAUDE_EFFORT"])
         XCTAssertNil(env["MAX_THINKING_TOKENS"])
         for key in EndpointProfile.modelVariables { XCTAssertEqual(env[key], "glm-5.3") }
+        XCTAssertEqual(env["CLAUDE_CODE_AUTO_MODE_SERVER"], "0")
+        XCTAssertEqual(env["CLAUDE_CODE_AUTO_MODE_MODEL"], "glm-5.3")
         XCTAssertNil(SubagentRunner.warmSpec(request, on: ClaudeAccount(id: "main"), in: "/tmp", environment: base))
         let account = SubagentRunner.environment(for: ClaudeAccount(id: "main"), from: base)
         XCTAssertFalse(account.keys.contains { $0.hasPrefix("ANTHROPIC_") })
+    }
+
+    func testAutoModeIsJudgedByTheProvidersStrongModel() {
+        let flash = EndpointProfile(provider: .zai, directory: "/tmp/zai", model: "glm-5.3-flash", effort: nil)
+        XCTAssertEqual(flash.environment["CLAUDE_CODE_AUTO_MODE_SERVER"], "0")
+        XCTAssertEqual(flash.environment["CLAUDE_CODE_AUTO_MODE_MODEL"], "glm-5.3")
+        let routed = EndpointProfile(provider: .openrouter, directory: "/tmp/or", model: "provider/model", effort: nil)
+        XCTAssertEqual(routed.environment["CLAUDE_CODE_AUTO_MODE_MODEL"], "provider/model")
+        XCTAssertTrue(flash.arguments.joined().contains("CLAUDE_CODE_AUTO_MODE_SERVER"))
+    }
+
+    func testAutoModeUsesTheJudgeChosenInSettings() {
+        var zai = EndpointProfile(provider: .zai, directory: "/tmp/zai", model: "glm-5.3-flash", effort: nil)
+        zai.judge = AgentJudge(model: "glm-5.4")
+        XCTAssertEqual(zai.environment["CLAUDE_CODE_AUTO_MODE_MODEL"], "glm-5.4")
+        var routed = EndpointProfile(provider: .openrouter, directory: "/tmp/or", model: "provider/model", effort: nil)
+        routed.judge = AgentJudge(model: "other/strong")
+        XCTAssertEqual(routed.environment["CLAUDE_CODE_AUTO_MODE_MODEL"], "other/strong", "a fixed OpenRouter judge")
+        XCTAssertEqual(EndpointProfile.judge(.openrouter, model: "provider/model"), "provider/model")
+        XCTAssertEqual(EndpointProfile.judge(.zai, model: "glm-5.3-flash"), "glm-5.3")
     }
 
     func testOpenRouterModelsRequireToolsAndDecodeReasoning() throws {

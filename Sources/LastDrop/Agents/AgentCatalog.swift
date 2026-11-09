@@ -30,6 +30,34 @@ enum AgentProvider: String, Codable, CaseIterable, Sendable, Identifiable {
         case .antigravity: .antigravity
         }
     }
+
+    /// Providers whose agents' commands go to a judge model lastdrop picks: Z.ai and OpenRouter through Claude Code's
+    /// own auto mode check (`CLAUDE_CODE_AUTO_MODE_MODEL`), Antigravity through `CommandJudge`. Claude accounts and
+    /// Codex judge with their own reviewers.
+    static let judged: [AgentProvider] = [.zai, .openrouter, .antigravity]
+
+    /// The judge when the user chose none. A strong model on purpose: a weak one lets risky commands through
+    /// (2026-11-09: `glm-5.3-flash` allowed an SSH-key upload that `glm-5.3` blocked). nil on OpenRouter, where the
+    /// agent's own model judges, and for providers without a judge.
+    var defaultJudge: AgentJudge? {
+        switch self {
+        case .zai: AgentJudge(model: "glm-5.3")
+        case .antigravity: AgentJudge(model: "gemini-3.8-flash", effort: "low")
+        default: nil
+        }
+    }
+
+    /// Only Antigravity's judge takes an effort: Claude Code's check has a model setting and no effort.
+    var judgeTakesEffort: Bool { self == .antigravity }
+}
+
+/// The model that judges a provider's agents' commands, as the user chose it.
+struct AgentJudge: Codable, Hashable, Sendable {
+    var model: String
+    var effort: String?
+
+    /// "gemini-3.8-flash · low".
+    var summary: String { ([model] + (effort.map { [$0] } ?? [])).joined(separator: " · ") }
 }
 
 /// One entry of an agent's models, in the order they're tried: its first is the agent's own provider and model.
@@ -146,6 +174,9 @@ struct AgentCatalog: Codable, Equatable, Sendable {
     var saveClaude = false
     /// The user's own wording of that instruction; nil uses `defaultSavingInstruction`.
     var saveClaudeText: String?
+    /// The command judge each provider uses, by provider; a provider left out uses its `defaultJudge`.
+    /// Stored as `judges: {"zai": {"model": …}}` and left out while empty, so a catalog without it is unchanged.
+    var judges: [AgentProvider: AgentJudge] = [:]
 
     /// What Claude reads while saving is on, unless the user rewrote it. The plugin keeps the same text
     /// for an app that sends none.
@@ -157,7 +188,24 @@ struct AgentCatalog: Codable, Equatable, Sendable {
         return text.isEmpty ? Self.defaultSavingInstruction : text
     }
 
-    private enum CodingKeys: String, CodingKey { case agents, revision, saveClaude, saveClaudeText }
+    private enum CodingKeys: String, CodingKey { case agents, revision, saveClaude, saveClaudeText, judges }
+
+    /// The judge `provider`'s agents use: the user's choice, else the default. nil on OpenRouter by default (the
+    /// agent's own model judges) and for providers without a judge.
+    func judge(_ provider: AgentProvider) -> AgentJudge? {
+        guard AgentProvider.judged.contains(provider) else { return nil }
+        return judges[provider] ?? provider.defaultJudge
+    }
+
+    /// Why `judge` can't be `provider`'s judge, else nil. The live list is checked where it's chosen.
+    static func problem(judge: AgentJudge, for provider: AgentProvider) -> String? {
+        guard AgentProvider.judged.contains(provider) else {
+            return "\(provider.displayName) checks commands with its own reviewer; only \(AgentProvider.judged.map(\.displayName).joined(separator: ", ")) take a judge."
+        }
+        if judge.model.trimmingCharacters(in: .whitespaces).isEmpty { return "Pick a model for the judge." }
+        if judge.effort != nil, !provider.judgeTakesEffort { return "\(provider.displayName)'s judge takes no effort: Claude Code sets only its model." }
+        return nil
+    }
 
     var enabled: [AgentDefinition] { agents.filter(\.enabled) }
 
@@ -244,7 +292,31 @@ extension AgentCatalog {
         revision = try values.decode(Int.self, forKey: .revision)
         saveClaude = try values.decodeIfPresent(Bool.self, forKey: .saveClaude) ?? false
         saveClaudeText = try values.decodeIfPresent(String.self, forKey: .saveClaudeText)
+        // A judge this version can't read (an unknown provider, a newer shape) is skipped, never a failure:
+        // the provider falls back to its default rather than losing the whole list.
+        let stored = (try? values.decodeIfPresent([String: Lenient<AgentJudge>].self, forKey: .judges)) ?? nil
+        for (key, value) in stored ?? [:] {
+            guard let provider = AgentProvider(rawValue: key), let judge = value.value, Self.problem(judge: judge, for: provider) == nil else { continue }
+            judges[provider] = judge
+        }
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(agents, forKey: .agents)
+        try c.encode(revision, forKey: .revision)
+        try c.encode(saveClaude, forKey: .saveClaude)
+        try c.encodeIfPresent(saveClaudeText, forKey: .saveClaudeText)
+        if !judges.isEmpty {
+            try c.encode(Dictionary(uniqueKeysWithValues: judges.map { ($0.key.rawValue, $0.value) }), forKey: .judges)
+        }
+    }
+}
+
+/// A value that decodes to nil instead of failing, so one bad entry doesn't fail its neighbours.
+private struct Lenient<Value: Decodable>: Decodable {
+    let value: Value?
+    init(from decoder: Decoder) throws { value = try? Value(from: decoder) }
 }
 
 extension AgentDefinition {

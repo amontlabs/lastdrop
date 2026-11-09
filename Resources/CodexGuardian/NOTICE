@@ -1,0 +1,17 @@
+Codex reviewer policy, used by lastdrop to judge Antigravity agents' commands.
+
+policy_template.md and policy.md are unmodified copies of
+  codex-rs/prompts/templates/guardian/policy_template.md
+  codex-rs/prompts/templates/guardian/policy.md
+from https://github.com/openai/codex, branch main, fetched 2026-11-09
+(policy_template.md at commit e54a5713caf331f42a6eef0166186df5f7563c29,
+policy.md last changed in commit a8c36ca6d265800c1b2c67d19d3583e23dee8382).
+
+They are licensed under the Apache License, Version 2.0 (see LICENSE).
+Upstream NOTICE:
+
+  OpenAI Codex
+  Copyright 2025 OpenAI
+
+lastdrop fills the template's {{ tenant_policy_config }} with policy.md and
+{{ extra_policy }} with its own lines at run time; the files themselves are not changed.
