@@ -145,3 +145,8 @@ Run with `google/gemini-3.8-flash` on OpenRouter (median 4.7 s, about $0.006 per
   `git rm --cached`).
 
 So it stops clearly dangerous actions, with Codex's more permissive line rather than Claude's.
+
+Judged instead through the user's own Antigravity plan (`agy -p`, plan mode, `gemini-3.8-flash`, low effort, run
+from an empty folder): the same 15 of 15 verdicts and risk scores, median 5.6 s and at most 18.5 s per review
+(each one starts `agy`), no extra cost. So each provider can judge its own agents: Z.ai with `glm-5.3` inside Claude
+Code, Antigravity with Gemini through `agy`, Codex with its own reviewer.
