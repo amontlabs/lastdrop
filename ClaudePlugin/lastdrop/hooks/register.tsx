@@ -432,18 +432,77 @@ async function inbox($: EngineInterface, id: string, route: Route): Promise<stri
   return text.join('\n\n')
 }
 
-/** Auto-mode native agents require handback; other modes deliver plain text at end_turn. */
-function* respond(e: TurnStepInput, text: string, usage: TurnUsage | null, handback: boolean): Generator<TurnStepChunk, TurnStepResult> {
+/**
+ * Auto-mode native agents require handback; other modes deliver plain text at end_turn. `block` is the
+ * first free content block: 1 after the live progress took block 0.
+ */
+function* respond(e: TurnStepInput, text: string, usage: TurnUsage | null, handback: boolean, block = 0): Generator<TurnStepChunk, TurnStepResult> {
   if (handback && e.index === 0) {
-    yield { kind: 'tool', index: 0, id: `lastdrop_${e.turnId}_${e.index}`, name: 'SubagentHandback' }
-    yield { kind: 'input', index: 0, json: JSON.stringify({ message: text }) }
+    yield { kind: 'tool', index: block, id: `lastdrop_${e.turnId}_${e.index}`, name: 'SubagentHandback' }
+    yield { kind: 'input', index: block, json: JSON.stringify({ message: text }) }
     yield { kind: 'stop', stopReason: 'tool_use', usage }
     return { turnId: e.turnId, index: e.index, answer: '',
              toolUses: [{ name: 'SubagentHandback', input: { message: text } }], stopReason: 'tool_use', usage }
   }
-  yield { kind: 'text', index: 0, text }
+  yield { kind: 'text', index: block, text }
   yield { kind: 'stop', stopReason: 'end_turn', usage }
   return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage }
+}
+
+/** How long a run may go without a visible update before a "still working" line; Claude Code stops a subagent silent for 600 s. */
+const QUIET_MS = 240_000
+
+/**
+ * Turns a run's lines into what its native turn shows live: each step as it happens and, through the
+ * runner's minute ticks, a "still working" line when a long step leaves it quiet. Claude Code's watchdog
+ * stops a subagent whose stream shows nothing for ten minutes, and treats these updates as progress.
+ * `held` keeps a plain reroute quiet until its first step: before any work it may still go to the
+ * built-in agent, whose own response must start the turn.
+ */
+function progress(report: (text: string) => void, held: boolean): (line: Line) => void {
+  let last = Date.now()
+  let current = ''
+  let open = !held
+  return line => {
+    const now = Date.now()
+    if (line.type === 'step') {
+      open = true
+      current = String(line.text ?? '')
+    } else if (line.type === 'moved') {
+      if (!open) return
+      current = `Moved off ${String(line.account)}: ${String(line.reason)}`
+    } else if (line.type === 'tick' && open && now - last >= QUIET_MS) {
+      const minutes = Math.round((now - last) / 60_000)
+      report(`Still working${current ? ` on ${current}` : ''} (${minutes} min without a new step)\n`)
+      last = now
+      return
+    } else {
+      return
+    }
+    last = now
+    if (current) report(`${current}\n`)
+  }
+}
+
+/**
+ * Runs `work` and yields each update it reports while it runs, as thinking in block 0, which is shown live
+ * and never recorded; the generator's value is the work's. `shown` says whether block 0 was used.
+ */
+async function* live<T>(work: (report: (text: string) => void) => Promise<T>, shown: { value: boolean }): AsyncGenerator<TurnStepChunk, T> {
+  const queue: string[] = []
+  let wake: (() => void) | undefined
+  let settled = false
+  const done = work(text => { queue.push(text); wake?.() })
+  void done.then(() => { settled = true; wake?.() }, () => { settled = true; wake?.() })
+  for (;;) {
+    while (queue.length > 0) {
+      shown.value = true
+      yield { kind: 'thinking', index: 0, text: queue.shift()! }
+    }
+    if (settled) return await done
+    await new Promise<void>(resolve => { wake = resolve })
+    wake = undefined
+  }
 }
 
 /** Where an added agent ran and what it could not do, for the report's first lines; a reroute gets only its worktree. */
@@ -465,7 +524,8 @@ function usageOf(line: Line, model: string): TurnUsage {
 }
 
 /** One remote run per native turn; the engine schedules new turns for messages queued while it worked. */
-async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, signal: AbortSignal): Promise<Line> {
+async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, signal: AbortSignal,
+                          report: (text: string) => void = () => {}): Promise<Line> {
   const id = e.agentId!
   if (route.error) throw new Error(route.error)
   if (e.index !== 0) throw new Error('Claude Code requested another model step after lastdrop’s handback.')
@@ -496,13 +556,15 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
     run = begun.run
     if (String(begun.line.agentId) !== id) throw new Error('lastdrop’s runner did not keep the native agent id. Update the lastdrop app and plugin together.')
     await started($, begun.line, route.description, route.ran, route.toolUseId, plain)
+    const show = progress(report, plain)
     // Switches made before the agent started (a fallback taken at once) still show in its row.
-    for (const line of begun.early) await record($, id, line)
+    for (const line of begun.early) { await record($, id, line); show(line) }
     route.ran = true
     route.request.prompt = ''
     await put($, `native-agent:${id}`, route)
     let result: Line | undefined
     for (let line = await run.next(); line; line = await run.next()) {
+      show(line)
       if (line.type === 'native') {
         // Only a run that has done no work can be handed over.
         if (!plain) throw new Error('lastdrop’s runner handed the agent to the built-in agent after it had run.')
@@ -780,7 +842,8 @@ async function delegatedChild($: EngineInterface) {
   return { ...found, messages, key, state }
 }
 
-async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: AbortSignal): Promise<Line | undefined> {
+async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: AbortSignal,
+                             report: (text: string) => void = () => {}): Promise<Line | undefined> {
   const child = await delegatedChild($)
   if (!child) return undefined
   const { run, task, messages, key, state } = child
@@ -820,8 +883,11 @@ async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: Abort
     // The messages so far reached the runner: a failure or a stop from here never sends them again.
     state.cursor = messages.length
     await put($, key, state)
+    const show = progress(report, plain)
+    for (const line of begun.early) show(line)
     let result: Line | undefined
     for (let line = await stream.next(); line; line = await stream.next()) {
+      show(line)
       if (line.type === 'native') return await handBack()
       if (line.type === 'result' || line.type === 'error') { result = line; break }
     }
@@ -1101,16 +1167,21 @@ export const register: Register = on => {
 
   // Separate registration: a spawn nested in agent.spawn/tool.call still reaches this hook.
   on('turn.step', async function* ($, e, next) {
+    const shown = { value: false }
     if (!e.agentId) {
       let result: Line | undefined
       try {
-        result = await delegatedTurn($, e, next.signal)
+        result = yield* live(report => delegatedTurn($, e, next.signal, report), shown)
       } catch (error) {
         if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+        if (shown.value) return yield* respond(e, `lastdrop agent failed: ${String(error)}`, null, false, 1)
         throw error
       }
-      if (!result) return yield* next(e)
-      return yield* respond(e, String(result.text ?? ''), usageOf(result, e.model), false)
+      if (!result) {
+        if (shown.value) return yield* respond(e, 'lastdrop agent failed: its runner handed the turn back after showing its work.', null, false, 1)
+        return yield* next(e)
+      }
+      return yield* respond(e, String(result.text ?? ''), usageOf(result, e.model), false, shown.value ? 1 : 0)
     }
     if (spawning.size > 0) await Promise.all([...spawning])
     const route = routes.get(e.agentId) ?? await $.store.get(`native-agent:${e.agentId}`) as Route | undefined
@@ -1121,7 +1192,7 @@ export const register: Register = on => {
     let native = false
     try {
       active.add(e.agentId)
-      result = await remoteTurn($, e, route, next.signal)
+      result = yield* live(report => remoteTurn($, e, route, next.signal, report), shown)
       native = result.type === 'native'
       if (!native) lead = header(route.request, result)
     } catch (error) {
@@ -1131,6 +1202,10 @@ export const register: Register = on => {
       $.ui.log(String(result.text), { to: 'debug' })
     } finally {
       active.delete(e.agentId)
+    }
+    if (native && shown.value) {
+      native = false
+      result = { type: 'result', isError: true, text: 'lastdrop agent failed: its runner handed the agent to the built-in agent after showing its work.' }
     }
     if (native) {
       // No account took the run and no work happened: the built-in agent runs it, as if lastdrop weren't here.
@@ -1145,7 +1220,7 @@ export const register: Register = on => {
     }
     const text = lead + String(result.text ?? '')
     const usage = usageOf(result, e.model)
-    return yield* respond(e, text, usage, route.handback === true)
+    return yield* respond(e, text, usage, route.handback === true, shown.value ? 1 : 0)
   }).catch(async function* ($, e, next) {
     // A routing adapter must never fail open to a model request on the session's account.
     const text = `lastdrop agent failed: ${next.error.message ?? next.error.kind}`

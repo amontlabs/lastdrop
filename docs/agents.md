@@ -95,7 +95,12 @@ once.
 The plugin then passes the call to the engine without `model` and without worktree isolation, so the engine
 validates it and creates its own task. The call's arguments in the transcript are not changed: the model's
 `model: "sol"` stays. `agent.spawn` claims the task, and `turn.step` runs `lastdrop --agent-run` and serves the
-report. Native models, `SendMessage` to older routes and every other call behave as before. A
+report. While the run works, the turn streams each of its steps as thinking ("Bash: swift test"), shown live and
+not recorded, and the report follows in the next block. Claude Code stops a subagent whose stream shows nothing
+for ten minutes ("Agent stalled", shown as `[Request interrupted by user for tool use]`), so during a long step the
+runner's `tick` line, once a minute, lets the plugin add "Still working on … (N min without a new step)" after four
+quiet minutes. A plain reroute shows nothing before its first step, since the built-in agent may still take it.
+T3's delegated children stream the same way. Native models, `SendMessage` to older routes and every other call behave as before. A
 `subagent_type: "lastdrop:x"` from before the update is denied with `model: "x"` as the replacement; runs
 started under the old names can still be continued.
 
@@ -251,9 +256,11 @@ Antigravity plan mode, and the Claude-runner providers (Claude accounts, Z.ai, O
   them (its turn ends at the denial, so lastdrop continues the conversation once with a short prompt).
   `agy` does accept per-session allow rules (`--settings '{"permissions":{"allow":["command(<exact command>)"]}}'`),
   which lastdrop doesn't turn on by itself.
-- In auto mode, reports from routed agents can carry Claude Code's notice that its safety classifier was
-  unavailable. Likely cause, not confirmed: the handoff classifier can't review a synthetic transcript.
-  lastdrop leaves this as it is rather than bypass a safety check.
+- On Z.ai and OpenRouter, auto mode can't approve anything: its safety check runs on Anthropic's servers, and
+  Claude Code asks the endpoint it talks to, which doesn't serve it (Claude Code 2.1.319 has no local check to
+  fall back on). With nobody to ask, every command that needs approval is refused ("Auto mode is unavailable:
+  its safety check does not run for this session"). lastdrop leaves this as it is rather than bypass a safety
+  check.
 - During an update, an older runner that is still running can strip `role` and the worktree fields from the
   ledger once, so a follow-up to a read-only agent started before the update may lose its read-only role. A brief,
   transient limit.

@@ -15,6 +15,8 @@ import Foundation
 /// - `{"type":"step","text"}`: a step the agent took ("Read: note.txt").
 /// - `{"type":"moved","account","reason"}`: the account reached its usage limit or lacks the model; another
 ///   took over (before any work, from the start; partway through, continuing the same session).
+/// - `{"type":"tick"}`: once a minute while it runs, so the plugin can show a long, quiet step is still going
+///   (Claude Code stops a subagent that shows nothing for ten minutes).
 /// - `{"type":"result","text","isError",...}`: its final answer; `stopped` when TaskStop ended it. An agent
 ///   from lastdrop's list also reports `worktreePath`, `worktreeBranch` and `declined` when they apply.
 ///
@@ -67,7 +69,10 @@ enum AgentRun {
                 emit(["type": "error", "text": "lastdrop received an invalid native agent id."])
                 exit(1)
             }
-            if routeOnly { emit(await route(request)) } else { await run(request) }
+            if routeOnly { emit(await route(request)) } else {
+                startTicks()
+                await run(request)
+            }
             AgentRegistry.setRunning(nil)
             exit(0)
         }
@@ -75,6 +80,16 @@ enum AgentRun {
     }
 
     private static var signalSources: [DispatchSourceSignal] = []
+    private static var ticks: DispatchSourceTimer?
+
+    /// A `tick` line every minute until the process ends: the plugin reads it as a sign of life, never as work.
+    private static func startTicks() {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 60, repeating: 60)
+        timer.setEventHandler { emit(["type": "tick"]) }
+        timer.resume()
+        ticks = timer
+    }
 
     /// The plugin ends a run nobody waits for any more (the person interrupted a foreground agent) by ending
     /// this process: the Claude Code it started ends with it.
@@ -127,10 +142,15 @@ enum AgentRun {
     /// The backend that runs an agent's provider; tests stand fakes in for the real ones.
     nonisolated(unsafe) static var backends: (AgentProvider) -> any AgentBackend.Type = { $0.backend }
 
+    private static let output = NSLock()
+
     static func emit(_ object: [String: Any]) {
         if let sink { return sink(object) }
         guard var data = try? JSONSerialization.data(withJSONObject: object, options: .withoutEscapingSlashes) else { return }
         data.append(0x0A)
+        // Ticks come from a timer thread: one line is written whole before the next starts.
+        output.lock()
+        defer { output.unlock() }
         FileHandle.standardOutput.write(data)
     }
 

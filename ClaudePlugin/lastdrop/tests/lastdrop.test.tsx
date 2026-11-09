@@ -342,6 +342,46 @@ test('a plain reroute opens its pane on the first sign of work, not on started',
   expect(e.opened).toBe(1)
 })
 
+test('a run shows each step live as thinking in block 0, before its report in block 1', async ($, on) => {
+  const e = engine([$, on], { outputs: [{ type: 'step', text: 'Bash: swift test' }, { type: 'tick' }, { type: 'step', text: 'Read: note.txt' }, RESULT] })
+  await e.launch()
+  const chunks = await step($)
+  const thinking = chunks.filter(c => c.kind === 'thinking')
+  expect(thinking.map(c => c.text)).toEqual(['Bash: swift test\n', 'Read: note.txt\n'])
+  expect(thinking.every(c => c.index === 0)).toBe(true)
+  expect(report(chunks)).toBe(RESULT.text)
+  expect(chunks.find(c => c.kind === 'tool')).toMatchObject({ name: 'SubagentHandback', index: 1 })
+  expect(chunks.findIndex(c => c.kind === 'thinking')).toBeLessThan(chunks.findIndex(c => c.kind === 'tool'))
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a run with no steps keeps its report in block 0', async ($, on) => {
+  const e = engine([$, on], { outputs: [{ type: 'tick' }, RESULT] })
+  await e.launch()
+  const chunks = await step($)
+  expect(chunks.some(c => c.kind === 'thinking')).toBe(false)
+  expect(chunks.find(c => c.kind === 'tool')?.index).toBe(0)
+})
+
+test('a plain reroute shows nothing before its first step, so the built-in agent can still take it', async ($, on) => {
+  const e = engine([$, on], { outputs: [{ type: 'moved', account: 'Pro', reason: 'limit' }, { type: 'native' }] })
+  await e.launch()
+  const chunks = await step($)
+  expect(chunks.some(c => c.kind === 'thinking')).toBe(false)
+  expect(report(chunks)).toBe('built-in response')
+  expect(e.modelSteps).toBe(1)
+})
+
+test('a failure after steps were shown is reported after them, never as a built-in step', async ($, on) => {
+  const e = engine([$, on], { outputs: [{ type: 'step', text: 'Bash: ls' }, { type: 'result', isError: true, text: 'boom' }] })
+  await e.launch()
+  const chunks = await step($)
+  expect(chunks[0]).toMatchObject({ kind: 'thinking', index: 0 })
+  expect(report(chunks)).toContain('boom')
+  expect(chunks.find(c => c.kind === 'tool')?.index).toBe(1)
+  expect(e.modelSteps).toBe(0)
+})
+
 test('an older runner that changes ids fails visibly', async ($, on) => {
   const e = engine([$, on], { wrongID: true })
   await e.launch()
@@ -1047,6 +1087,15 @@ test('a delegated child’s turn runs on lastdrop’s runner, never on its own m
   expect(request).toMatchObject({ prompt: 'review the diff', id: 't3-abc', agent: 'sol', effort: 'high', subagentType: 'general-purpose', cwd: '/work' })
   expect(request.resume).toBeUndefined()
   expect(e.modelSteps).toBe(0)
+})
+
+test('a delegated child shows its steps live before its answer', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, outputs: [{ type: 'step', text: 'Bash: git diff' }, RESULT] })
+  e.messages(child('review the diff\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol","effort":"high","description":"review"} -->'))
+  const chunks = await mainStep($, 'turn-1')
+  expect(chunks[0]).toMatchObject({ kind: 'thinking', index: 0, text: 'Bash: git diff\n' })
+  expect(chunks.find(c => c.kind === 'text')).toMatchObject({ index: 1 })
+  expect(report(chunks)).toBe(RESULT.text)
 })
 
 test('a follow-up to a delegated child resumes the same run with only the new message', async ($, on) => {
