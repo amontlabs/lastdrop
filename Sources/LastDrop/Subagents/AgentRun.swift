@@ -566,7 +566,7 @@ enum AgentRun {
             guard let signedIn = ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid, allowOwn || signedIn != own else { continue }
             let usage = await SubagentUsage.shared.usage(account)
             candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
-                                    active: AgentRegistry.running(account.id)))
+                                    active: AgentRegistry.running(account.id), size: PlanSize(plan: SubagentUsage.plan(account))))
         }
         let choice = SubagentAccounts.pick(candidates, sessionThreshold: config.sessionThreshold, weeklyThreshold: config.weeklyThreshold)
         if log { SubagentLog.write("own \(own?.prefix(8) ?? "?"); " + candidates.map {
