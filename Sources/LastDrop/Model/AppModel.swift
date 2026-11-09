@@ -184,6 +184,9 @@ final class AppModel {
         // This version's plugin, the first time it runs.
         if SubagentInstaller.isStale() { updatePlugin() }
         refreshLocalChecks()
+        // Every account reads the one shared conversations folder; renaming folders stays off the main thread.
+        let extras = claudeConfig.accounts
+        Task.detached(priority: .utility) { for account in extras { ClaudeSignIn.shareConversations(account) } }
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshDue()

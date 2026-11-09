@@ -8,9 +8,13 @@ final class UsageStatsTests: XCTestCase {
     override func setUpWithError() throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        SessionLedger.fileOverride = folder.appendingPathComponent("ledger.json")   // never the real one
     }
 
-    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: folder) }
+    override func tearDownWithError() throws {
+        SessionLedger.fileOverride = nil
+        try? FileManager.default.removeItem(at: folder)
+    }
 
     private func write(_ name: String, _ text: String) throws -> String {
         let url = folder.appendingPathComponent(name)

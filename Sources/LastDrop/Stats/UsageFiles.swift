@@ -10,6 +10,8 @@ struct UsageFile: Sendable {
     var size: Int64
     var modified: Int64
     var born: Int64
+    /// A conversation forked from another: its lines from before this were copies, which the original counts.
+    var forkedAt: Date?
 }
 
 enum UsageFiles {
@@ -21,28 +23,50 @@ enum UsageFiles {
     }
 
     /// Every place on this Mac with transcripts. An account's folder outlives its removal from lastdrop, and its
-    /// past use still counts.
+    /// past use still counts. Every account shares `~/.claude/projects`, so an account's own `projects` counts
+    /// only while it is still a real folder, and the copy kept aside at sharing counts as that account's.
     static func roots(home: String = NSHomeDirectory()) -> [Root] {
         var roots = [Root(path: home + "/.claude/projects", kind: .claude, account: "claude.main"),
                      Root(path: home + "/.codex/sessions", kind: .codex, account: "codex.main"),
                      Root(path: home + "/.codex/archived_sessions", kind: .codex, account: "codex.main"),
                      Root(path: home + "/.gemini/antigravity-cli/brain", kind: .antigravity, account: "antigravity.main")]
         for name in folders(home + "/.claude-accounts") {
-            roots.append(Root(path: "\(home)/.claude-accounts/\(name)/projects", kind: .claude, account: "claude.\(name)"))
+            let dir = "\(home)/.claude-accounts/\(name)"
+            for kept in folders(dir) where kept.hasPrefix("projects-before-sharing") {
+                roots.append(Root(path: "\(dir)/\(kept)", kind: .claude, account: "claude.\(name)"))
+            }
+            if isRealDirectory(dir + "/projects") {
+                roots.append(Root(path: dir + "/projects", kind: .claude, account: "claude.\(name)"))
+            }
         }
         for name in folders(home + "/.codex-accounts") {
             roots.append(Root(path: "\(home)/.codex-accounts/\(name)/sessions", kind: .codex, account: "codex.\(name)"))
         }
-        return roots
+        // Never walk one real folder twice: a link and the folder it points at are the same files.
+        var seen = Set<String>(), unique: [Root] = []
+        for root in roots where seen.insert(URL(fileURLWithPath: root.path).resolvingSymlinksInPath().path).inserted {
+            unique.append(root)
+        }
+        return unique
     }
 
     private static func folders(_ path: String) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []).filter { !$0.hasPrefix(".") }
     }
 
+    /// A real folder of the account's own, not a link to the shared one (a link that leads nowhere isn't one).
+    private static func isRealDirectory(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue,
+              (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) == nil else { return false }
+        return true
+    }
+
     /// The transcripts under `root`. One `getattrlistbulk` call returns a folder's sizes and dates together, where
     /// `lstat` would be a call per file: that's what lets a scan with nothing new run every time the panel opens.
-    static func list(_ root: Root, into files: inout [UsageFile]) {
+    /// `ledger` is the session ledger read once for the whole scan; it says which account each shared
+    /// conversation ran on.
+    static func list(_ root: Root, ledger: [String: SessionLedger.Session] = [:], into files: inout [UsageFile]) {
         if root.kind == .antigravity {
             // Each conversation's folder holds whatever the agent made; its transcript is always in one place.
             for name in folders(root.path) {
@@ -55,7 +79,31 @@ enum UsageFiles {
         } else {
             let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 1 << 18, alignment: 8)
             defer { buffer.deallocate() }
+            let start = files.count
             walk(root.path, depth: 0, root: root, buffer: buffer, into: &files)
+            attribute(root, ledger: ledger, into: &files, from: start)
+        }
+    }
+
+    /// A claude transcript's session id: `<project>/<session>.jsonl` names it in the file, and a file inside
+    /// `<project>/<session>/` (the side folder with the subagents) belongs to that session's folder.
+    static func sessionID(of path: String, under root: String) -> String? {
+        let rest = path.hasPrefix(root) ? String(path.dropFirst(root.count)) : path
+        let parts = rest.split(separator: "/")
+        guard parts.count >= 2 else { return nil }
+        let second = parts[1]
+        return second.hasSuffix(".jsonl") ? String(second.dropLast(".jsonl".count)) : String(second)
+    }
+
+    /// Conversations share one folder now, so the ledger says which account each session ran on, and which of
+    /// them were forks. Sessions the ledger doesn't know, and folders kept aside at sharing, stay with the
+    /// folder's own account.
+    private static func attribute(_ root: Root, ledger: [String: SessionLedger.Session], into files: inout [UsageFile], from start: Int) {
+        guard root.kind == .claude else { return }
+        for i in start..<files.count {
+            guard let id = sessionID(of: files[i].path, under: root.path), let noted = ledger[id] else { continue }
+            files[i].forkedAt = noted.forkedAt
+            if root.account == "claude.main" { files[i].account = "claude." + noted.account }   // the shared folder
         }
     }
 
