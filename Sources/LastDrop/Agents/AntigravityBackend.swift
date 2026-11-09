@@ -510,7 +510,11 @@ enum AntigravityBackend: AgentBackend {
                 case "cancelled": isError = true; message = "The Antigravity turn was cancelled."
                 default: isError = text.isEmpty; if isError { message = "Antigravity ended with \(stopReason)." }
                 }
-                return .init(text: message, isError: isError, limitReached: false, turns: turns, permissionDenials: denials,
+                // `agy` reports a spent quota as the model's own reply ("⚠ Individual quota reached. …") and ends the turn
+                // normally. A short reply that is only that is a failure of the attempt, never a report.
+                let limit = !isError && AntigravityBackend.isLimitNotice(text)
+                if limit { isError = true }
+                return .init(text: message, isError: isError, limitReached: limit, turns: turns, permissionDenials: denials,
                              toolUses: tools.count, durationMs: durationMs, inputTokens: Int(input), outputTokens: Int(output),
                              model: model, sessionID: sessionID, directory: directory, account: "Antigravity", declined: declined)
             }
@@ -591,7 +595,14 @@ enum AntigravityBackend: AgentBackend {
         let lower = text.lowercased()
         return !modelUnavailable(text) && (lower.contains("resource_exhausted") || lower.contains("quota exhausted")
             || lower.contains("quota exceeded") || lower.contains("quota has been exhausted") || lower.contains("usage limit")
-            || lower.contains("limit reached") || lower.contains("quota limit"))
+            || lower.contains("limit reached") || lower.contains("quota limit") || lower.contains("quota reached")
+            || lower.contains("upgrade your subscription"))
+    }
+
+    /// A whole reply that is just a quota notice (short, so a real report that merely discusses quotas isn't taken for one).
+    static func isLimitNotice(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count <= 600 && mentionsLimit(trimmed)
     }
 
     static func failure(_ text: String, directory: String, unavailable: Bool = false) -> SubagentRunner.Result {
