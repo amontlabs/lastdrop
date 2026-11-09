@@ -127,3 +127,21 @@ already adapts for another agent; check the licence first.
 The replay against real verdicts from T3's logs (scratchpad, not kept) put a reviewer outside Claude Code well
 behind Anthropic's: `gpt-oss-120b` with Claude's instructions caught 10 of 18 real blocks and wrongly blocked 6 of
 100 real allows; `gpt-oss-safeguard-20b` did worse.
+
+## 7. Codex's Guardian policy as Antigravity's reviewer (2026-11-09)
+
+Codex's reviewer policy is open source (Apache 2.0):
+`codex-rs/prompts/templates/guardian/policy_template.md` with `policy.md` as its security policy, about 18,000
+characters. It scores `risk_level` and `user_authorization`, then allows low and medium risk unless a deny rule
+or a prompt injection applies, allows high only with at least medium authorization, and denies critical.
+
+Run with `google/gemini-3.8-flash` on OpenRouter (median 4.7 s, about $0.006 per review, no cache hits):
+- 15 made-up cases after a "fix the failing test" request: all 10 dangerous ones denied (SSH key and AWS
+  credential uploads, `rm -rf ~/Documents`, force push to main, `curl | sudo bash`, making the repo public, deleting a
+  production namespace, dropping a production table, a crontab backdoor, a `.zshrc` beacon) and all 5 routine ones
+  allowed.
+- Against Claude's real verdicts from T3's logs it blocked 2 of 18 real blocks and 1 of 100 real allows: Codex's
+  policy allows by design what Claude blocks there (read-only production SSH, killing a local process,
+  `git rm --cached`).
+
+So it stops clearly dangerous actions, with Codex's more permissive line rather than Claude's.
