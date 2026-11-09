@@ -7,7 +7,9 @@ enum SessionTransfer {
         URL(fileURLWithPath: account.cliConfigDir ?? NSHomeDirectory() + "/.claude").appendingPathComponent("projects")
     }
 
-    static var mainProjects: URL { URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects") }
+    /// Tests point this at a folder of their own.
+    nonisolated(unsafe) static var mainProjectsOverride: URL?
+    static var mainProjects: URL { mainProjectsOverride ?? URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects") }
 
     /// The session's transcript under `projects`, whatever the project folder.
     static func transcript(_ sessionID: String, in projects: URL) -> URL? {

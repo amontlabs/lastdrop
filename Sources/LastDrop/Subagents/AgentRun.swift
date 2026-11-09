@@ -323,13 +323,12 @@ enum AgentRun {
             tried.insert(from.id)
             guard let to = await nextAccount(accounts, config: config, own: own, excluding: tried) else { break }
             // Sessions live in ~/.claude/projects whichever account ran them (one started before that is brought over).
-            guard let fileURL = SessionTransfer.transcriptInMain(entry.sessionID, from: from) else {
+            // The transcript is the conversation's only copy, and the fork's parent: it is never rewritten (a process
+            // of the full account may still be flushing lines into it). The fork reads it as is, notices included,
+            // and the continue prompt follows them. A trimmed temporary copy was rejected: it would be a second
+            // transcript for Stats to count, with its own side folder to carry.
+            guard SessionTransfer.transcriptInMain(entry.sessionID, from: from) != nil else {
                 SubagentLog.write("\(agentID): transcript for \(entry.sessionID) not found in \(SessionTransfer.mainProjects.path)")
-                break
-            }
-            guard let data = try? Data(contentsOf: fileURL),
-                  (try? SessionTransfer.withoutTrailingNotices(data).write(to: fileURL, options: .atomic)) != nil else {
-                SubagentLog.write("\(agentID): failed to rewrite transcript without trailing notices at \(fileURL.path)")
                 break
             }
             let newID = UUID().uuidString.lowercased()
