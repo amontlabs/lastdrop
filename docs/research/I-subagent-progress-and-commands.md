@@ -66,3 +66,33 @@ Allow; anything else → Deny. Declines must be clear to the main agent so it ca
   main agent can suggest an allow rule (`Bash(swift test:*)`) and ask the user to add it.
 - The agent is told up front (ACP `_meta.antigravity.systemPrompt.append`) that commands outside the user's allow
   rules are declined, and to say in its report which ones it needed and why.
+
+## 5. How Claude and Codex review actions, and what a lastdrop reviewer could use (2026-11-09)
+
+Sources checked by hand; agent reports that couldn't be confirmed are left out.
+
+**Claude Code auto mode.** Anthropic's post ([How we built Claude Code auto mode](https://www.anthropic.com/engineering/claude-code-auto-mode), as relayed by [digitalapplied](https://www.digitalapplied.com/blog/claude-code-auto-mode-classifier-numbers-published)):
+two stages on a Sonnet model, server-side. Stage 1 is a single-token yes/no filter tuned to block; stage 2 reasons only
+about what stage 1 flagged, sharing its cached prefix. It is reasoning-blind: it sees user messages and tool calls,
+not Claude's text or tool outputs (a separate probe screens tool outputs). Reads and in-project edits skip it.
+Published rates: false positives 0.4% on 10,000 real calls (stage 1 alone 8.5%); misses 17% on 52 real overeager
+actions and 5.7% on 1,000 synthetic exfiltration tasks. An independent stress test reports far more misses on
+ambiguous tasks ([arXiv 2604.04978](https://arxivexplorer.arxivexplorer.workers.dev/paper/2604.04978v2)).
+The policy itself ships with Claude Code: `claude auto-mode defaults` prints 16 allow, 72 soft-deny, 1 hard-deny
+rules and 21 environment fields (about 83,000 characters); `claude auto-mode config` prints the user's effective
+rules. `claude auto-mode critique` reviews custom rules.
+
+**Codex auto-review** ([docs](https://learn.chatgpt.com/docs/sandboxing/auto-review)): with
+`approvals_reviewer = "auto_review"`, requests that would wait for a person (escalated commands, network, edits
+outside writable roots, prompt rules, MCP calls) go to a separate reviewer agent. It sees a compact transcript (user
+messages, visible assistant updates, relevant tool calls and outputs, the request), not hidden reasoning, and may run
+read-only checks. It approves or denies with a rationale; a denial tells the agent not to work around it. Codex
+interrupts the turn after 3 denials in a row or 10 in the last 50. Policy: `[auto_review].policy` replaces it,
+`extra_policy` adds to it. Not a security guarantee, in OpenAI's words. The reviewer model isn't named in the docs
+(third parties call it `codex-auto-review`).
+
+**Models.** Guard models (Llama Guard, ShieldGemma, Qwen3Guard) moderate chat content against fixed categories and
+don't judge an action against a policy. `openai/gpt-oss-safeguard-20b` is built to reason over a given policy; on
+OpenRouter about $0.075 / $0.30 per million tokens in / out, $0.0375 cached, 131k context
+([OpenRouter](https://openrouter.ai/openai/gpt-oss-safeguard-20b)); open weights, so it can also run locally. A
+120b version exists. General small models can judge with a policy prompt too.
