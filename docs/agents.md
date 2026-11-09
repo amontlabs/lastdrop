@@ -282,16 +282,19 @@ Each provider judges its own agents. Nobody is asked and nothing is bypassed.
      allowed by a pattern and goes to the judge.
   2. Claude Code's read-only commands (`ReadOnlyCommands`), in every mode but bypass, plan included: allowed
      without the judge, logged as `Allowed as read-only (git status, ls): …`. The list was read from Claude Code
-     2.1.319 (the commands it runs without any check) and checked black-box with its `dontAsk` mode (research I §9);
-     lastdrop implements it with its own rules and flag tables. Plain readers (`ls`, `cat`, `head`, `wc`, `diff`,
+     2.1.319 (the commands it runs without any check) and checked black-box with its `dontAsk` mode (research I §9).
+     Its per-command flag tables are transcribed as data (`ReadOnlyFlagTables.swift`, 1,747 flags); the rules
+     around them are lastdrop's own code, never looser than Claude Code's. Plain readers (`ls`, `cat`, `head`, `wc`, `diff`,
      `stat`, `du`, …) take any arguments; `pwd`, `whoami` none; `echo`, `printf`, `cd`, `find` (no `-exec`,
      `-delete`, `-fprint…`), `jq` (no `-f`, `env`, `import`), `test` and `uniq` (flags only) have special rules;
      `git` (status, diff, log, show, blame, rev-parse, branch/tag listing, config `--get`, …), `gh` views,
-     `docker logs/inspect`, `grep`, `rg`, `sed` (printing scripts only, no `-i`), `sort` (no `-o`), `xargs` (a
-     read-only target), `fd` (no `-x`), `tree` (no `-o`), `date` (no setting) and a few more take only listed
-     flags. Any `$`, backtick, redirect to a file (`2>&1` and `>/dev/null` are fine), subshell, brace, background
+     `docker logs/inspect`, `grep`, `rg`, `sed` (printing scripts only, no `-i`), `sort` (no `-o`), `xargs` (only
+     `echo`, `printf`, `wc`, `grep`, `head`, `tail` as targets), `fd` (no `-x`), `tree` (no `-o`), `date` (no
+     setting), `ps`, `lsof`, `ss`, `pgrep`, `netstat` and a few more take only the flags in Claude Code's tables,
+     with its extra checks (git formats that run gpg, branch/tag listing only, `gh` values pointing at another
+     host, `docker` daemon options, `tput` reset capabilities). Any `$`, backtick, redirect to a file (`2>&1` and `>/dev/null` are fine), subshell, brace, background
      `&`, control flow or leading `VAR=` makes the command not read-only; a compound command is read-only only
-     when every part is. Unknown flags go to the judge: the list errs toward asking.
+     when every part is. Any other flag goes to the judge.
   3. Otherwise the judge: Codex's open-source reviewer policy (`codex-rs/prompts/templates/guardian`, Apache 2.0,
      shipped in `Resources/CodexGuardian` with its licence and NOTICE), asked of the command judge (default
      `gemini-3.8-flash` at low effort) through the user's own Antigravity plan: `agy -p … --mode plan --disable-slash-commands --print-timeout 120s`

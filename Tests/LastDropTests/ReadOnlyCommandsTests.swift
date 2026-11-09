@@ -20,18 +20,18 @@ final class ReadOnlyCommandsTests: XCTestCase {
 
     func testFlagTablesAllowListedFlagsOnly() {
         allowed(["grep -rn foo src", "grep -E 'a|b' file", "grep -A3 -i foo f", "rg -n --hidden foo", "rg -t swift foo",
-                 "sort -rn", "sort -k2,2n -t, f", "sed -n '1,20p' f", "sed -n -e '/foo/p' f", "sed 's/a/b/g' f",
+                 "sort -rn", "sort -k 2,2n -t , f", "sed -n '1,20p' f", "sed -n -e '/foo/p' f", "sed 's/a/b/g' f",
                  "base64 -d", "fd -e swift", "xargs grep foo", "xargs -0 grep -l foo", "hostname"])
         refused(["grep --frobnicate foo", "rg --pre ./x foo", "fd -x rm", "fd --exec rm", "sort -o out.txt in.txt",
                  "sort --output=out in", "sed -i 's/a/b/' f", "sed -i.bak 's/a/b/' f", "sed 's/a/b/w out' f",
                  "sed 'e date' f", "sed '1w out' f", "sed -f script.sed f", "base64 -o out in", "tree -o out",
                  "xargs rm", "xargs -0 rm", "hostname evil", "date 010100002030", "date -s 2030-01-01", "tput reset",
-                 "uniq in out", "uniq a.txt", "git -C .. status", "jq -f prog.jq", "jq 'env' f", "jq --rawfile a b ."])
+                 "uniq in out", "sort -t, f", "git log -n5", "git cat-file --textconv HEAD:a", "git cat-file --filters HEAD:a", "ss -K", "ps --frobnicate", "lsof -+L1x", "gh pr list --web", "gh pr view 1 -R host.example/o/r", "git log --format=%G?", "git log --pretty=myalias", "tput reset", "uniq a.txt", "git -C .. status", "jq -f prog.jq", "jq 'env' f", "jq --rawfile a b ."])
     }
 
     func testGitReadsOnly() {
         allowed(["git status", "git status -sb", "git status --porcelain", "git diff --stat HEAD~3",
-                 "git diff --cached -- a.swift", "git log --oneline -20", "git log -n5 --format=%H", "git show HEAD:a.txt",
+                 "git diff --cached -- a.swift", "git log --oneline -20", "git log -n 5 --format=%H", "git show HEAD:a.txt",
                  "git branch", "git branch -a -v", "git branch --list 'feat/*'", "git branch --contains HEAD", "git tag",
                  "git tag -l 'v*'", "git rev-parse --abbrev-ref HEAD", "git blame -L 1,20 a.swift", "git remote -v",
                  "git stash list", "git config --get user.name", "git worktree list", "git ls-files", "git merge-base main HEAD",
@@ -67,5 +67,68 @@ final class ReadOnlyCommandsTests: XCTestCase {
         XCTAssertNil(ReadOnlyCommands.check("git status && git push"))
         XCTAssertNil(ReadOnlyCommands.check("ls | xargs rm"))
         XCTAssertNil(ReadOnlyCommands.check("grep -l foo * | xargs sed -i s/a/b/"))
+    }
+}
+
+/// lastdrop's matcher against Claude Code 2.1.319's own flag tables: every listed flag is read-only, and no flag
+/// outside a command's table is.
+final class ReadOnlyTablesTests: XCTestCase {
+    /// A line that uses `flag` on `command`, with a value of its kind and whatever the command needs around it.
+    static func line(_ command: String, _ flag: String, _ kind: ReadOnlyCommands.Value?) -> String {
+        let value: String
+        switch kind {
+        case .some(.number): value = " 5"
+        case .some(.string): value = " x"
+        case .some(.char): value = " x"
+        case .some(.braces): value = " {}"
+        case .some(.eof): value = " EOF"
+        case .some(.none), nil: value = ""
+        }
+        let quoted = flag.contains("?") ? "'\(flag)'" : flag
+        // git takes `--format`/`--pretty` as a format, not a name from config (Claude Code refuses that too).
+        if ["--format", "--pretty"].contains(flag), command.hasPrefix("git") { return "\(command) \(flag) %h" }
+        switch command {
+        case "sed": return "sed \(quoted)\(value) p"
+        case "git remote show": return "git remote show -n \(quoted)\(value) origin"
+        case "test": return "test \(quoted)\(value)"
+        default: return "\(command) \(quoted)\(value)"
+        }
+    }
+
+    func testEveryFlagClaudeCodeAllowsIsReadOnly() {
+        var refused: [String] = []
+        var count = 0
+        for (command, table) in ReadOnlyCommands.flagTables {
+            for (flag, kind) in table where flag != "--" {
+                count += 1
+                let line = Self.line(command, flag, kind)
+                if ReadOnlyCommands.check(line) == nil { refused.append(line) }
+            }
+        }
+        print("TABLES accepted \(count - refused.count) of \(count)")
+        // Claude Code's own extra checks refuse the first two too (the value reads as a date to set, or a branch
+        // name). lastdrop is stricter on an unquoted `{}`, which its parser takes for a group: `-I '{}'` passes.
+        XCTAssertEqual(refused.sorted(), ["date --iso-8601 x", "git branch --abbrev 5", "xargs -I {}"])
+        XCTAssertNotNil(ReadOnlyCommands.check("xargs -I '{}' grep foo '{}'"))
+    }
+
+    func testNoFlagOutsideClaudeCodesTablesIsReadOnly() {
+        let tables = ReadOnlyCommands.flagTables
+        let longs = Set(tables.values.flatMap(\.keys).filter { $0.hasPrefix("--") && $0 != "--" })
+        let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".map { "-" + String($0) }
+        var accepted: [String] = []
+        var count = 0
+        // `test` operators are checked by lastdrop's own `test` rule, which only refuses `-v` and `-R`.
+        for (command, table) in tables where command != "test" {
+            // Claude Code takes `-<digits>` on every git command (`git log -20`).
+            for flag in longs.union(letters) where table[flag] == nil && !(command.hasPrefix("git ") && flag.dropFirst().allSatisfy(\.isNumber)) {
+                count += 1
+                for line in [Self.line(command, flag, nil), Self.line(command, flag, .string)] where ReadOnlyCommands.check(line) != nil {
+                    accepted.append(line)
+                }
+            }
+        }
+        print("TABLES refused \(count - Set(accepted.map { String($0.split(separator: " ").dropLast().joined()) }).count) of \(count) flags outside the tables")
+        XCTAssertEqual(accepted.sorted(), [], "Claude Code doesn't allow these")
     }
 }

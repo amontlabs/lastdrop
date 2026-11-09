@@ -2,9 +2,10 @@ import Foundation
 
 /// Commands that only read, which an Antigravity agent runs without waiting for the judge: the list Claude Code
 /// itself runs without a check (read from Claude Code 2.1.319 and checked with its `dontAsk` mode; see
-/// docs/research/I-subagent-progress-and-commands.md §9), implemented here as lastdrop's own rules and kept
-/// conservative: an unknown flag, a `$`, a backtick, a redirection to a file, a subshell or control flow is never
-/// read-only, and a compound command is read-only only when every part is. What isn't read-only goes to the judge.
+/// docs/research/I-subagent-progress-and-commands.md §9). Its per-command flag tables are transcribed as data in
+/// `ReadOnlyFlagTables.swift`; the rules are lastdrop's own code and never looser than Claude Code's: an unknown
+/// flag, a `$`, a backtick, a redirection to a file, a subshell or control flow is never read-only, and a compound
+/// command is read-only only when every part is. What isn't read-only goes to the judge.
 enum ReadOnlyCommands {
     /// The read-only commands `command` is made of (`["git status", "ls"]`), or nil when any part isn't one.
     static func check(_ command: String) -> [String]? {
@@ -77,7 +78,7 @@ enum ReadOnlyCommands {
         "cal", "uptime", "cat", "head", "tail", "wc", "stat", "strings", "hexdump", "od", "nl", "id", "uname", "free",
         "df", "du", "locale", "groups", "nproc", "basename", "dirname", "realpath", "cut", "paste", "tr", "column",
         "tac", "rev", "fold", "expand", "unexpand", "fmt", "comm", "cmp", "numfmt", "readlink", "diff", "true",
-        "false", "sleep", "type", "expr", "seq", "tsort", "pr", "ps", "netstat", "lsof", "pgrep", "ss",
+        "false", "sleep", "type", "expr", "seq", "tsort", "pr",
     ]
 
     /// Only with no arguments.
@@ -117,123 +118,112 @@ enum ReadOnlyCommands {
         case "gh": return gh(args)
         case "docker": return docker(args)
         case "xargs": return xargs(args)
-        case "sed": return sed(args) ? first : nil
-        case "tput": return args.count == 1 && ["cols", "lines", "colors", "longname"].contains(args[0]) ? first : nil
-        case "date":
-            // `date 0101…` sets the clock; only `+FORMAT`, or any word after BSD's `-j` (parse, don't set).
-            guard flagTables["date"]!.allows(args), !args.contains(where: { $0 == "-s" || $0.hasPrefix("--set") }) else { return nil }
-            let words = positionals(args, values: ["-d", "-r", "-f", "-v", "-z", "--date", "--reference"])
-            return args.contains("-j") || words.allSatisfy({ $0.hasPrefix("+") }) ? first : nil
-        default:
-            guard let table = flagTables[first] else { return nil }
-            return table.allows(args) ? first : nil
+        default: break
         }
+        guard let table = flagTables[first], flags(args, table, command: first), !dangerous(first, args) else { return nil }
+        return first
     }
 
-    // MARK: Flag tables
+    // MARK: Flags
 
-    /// A command whose flags must all be listed. `values` take the next word (or `=…`, or the rest of a short
-    /// cluster); `positional` false refuses any other word.
-    struct Flags: Sendable {
-        var short = ""          // letters allowed alone or in a cluster: "rn"
-        var shortValues = ""    // letters that take a value
-        var long: Set<String> = []
-        var longValues: Set<String> = []
-        var positional = true
+    /// Claude Code's flag rule: every flag is in the table, by its name before `=`. A flag that takes no value
+    /// takes no `=`; one that does takes `=value` or the next word, which isn't a flag, doesn't start with `-` for a
+    /// string (git's `--sort=-date` aside), is digits for a number and one character for a char. Short flags may
+    /// be clustered (`-rn`) only when none takes a value; `git log -20` and `grep -A3` are understood. Words that
+    /// aren't flags are allowed; after `--` every word is one.
+    static func flags(_ args: [String], _ table: [String: Value], command: String) -> Bool {
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            if arg == "--" { return true }
+            guard arg.hasPrefix("-"), arg.count > 1 else { i += 1; continue }
+            let parts = arg.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let name = String(parts[0]), attached = parts.count > 1 ? String(parts[1]) : nil
+            guard !name.isEmpty else { return false }
+            guard let kind = table[name] else {
+                if command == "git", name.range(of: #"^-\d+$"#, options: .regularExpression) != nil { i += 1; continue }
+                if ["grep", "egrep", "fgrep", "rg"].contains(command), !name.hasPrefix("--"), name.count > 2,
+                   let kind = table[String(name.prefix(2))], [.number, .string].contains(kind) {
+                    let rest = String(name.dropFirst(2))
+                    if rest.allSatisfy(\.isNumber) { i += 1; continue }
+                }
+                if !name.hasPrefix("--"), name.count > 2 {
+                    for letter in name.dropFirst() { guard table["-" + String(letter)] == Value.none else { return false } }
+                    i += 1; continue
+                }
+                return false
+            }
+            if kind == .none {
+                if attached != nil { return false }
+                i += 1; continue
+            }
+            let value: String
+            if let attached { value = attached; i += 1 } else {
+                guard i + 1 < args.count, !isFlag(args[i + 1]) else { return false }
+                value = args[i + 1]; i += 2
+            }
+            if kind == .string, value.hasPrefix("-"), !(command == "git" && name == "--sort" && value.range(of: #"^-[a-zA-Z]"#, options: .regularExpression) != nil) {
+                return false
+            }
+            switch kind {
+            case .none: return false
+            case .string: break
+            case .number: guard !value.isEmpty, value.allSatisfy(\.isNumber) else { return false }
+            case .char: guard value.count == 1 else { return false }
+            case .braces: guard value == "{}" else { return false }
+            case .eof: guard value == "EOF" else { return false }
+            }
+        }
+        return true
+    }
 
-        func allows(_ args: [String]) -> Bool {
-            var i = 0, afterDashes = false
+    private static func isFlag(_ word: String) -> Bool {
+        word.count > 1 && word.range(of: #"^-[a-zA-Z0-9_-]"#, options: .regularExpression) != nil
+    }
+
+    /// Claude Code's extra checks for commands whose flags alone don't make them safe.
+    static func dangerous(_ command: String, _ args: [String]) -> Bool {
+        switch command {
+        case "sed": return !sed(args)
+        case "date":
+            // `date 0101…` sets the clock: words must be `+FORMAT`, apart from these flags' values.
+            let values: Set<String> = ["-d", "--date", "-r", "--reference", "--rfc-3339"]
+            var i = 0
             while i < args.count {
                 let arg = args[i]
-                i += 1
-                if afterDashes || arg == "-" || !arg.hasPrefix("-") {
-                    if !positional { return false }
-                    continue
-                }
-                if arg == "--" { afterDashes = true; continue }
-                if arg.hasPrefix("--") {
-                    let name = String(arg.split(separator: "=", maxSplits: 1)[0])
-                    if long.contains(name) { if arg.contains("=") && !longValues.contains(name) { return false }; continue }
-                    guard longValues.contains(name) else { return false }
-                    if !arg.contains("=") { guard i < args.count else { return false }; i += 1 }
-                    continue
-                }
-                // A short cluster: `-rn`, `-k2,2n`, `-A3`, `-n 5`.
-                let letters = Array(arg.dropFirst())
-                var j = 0
-                while j < letters.count {
-                    let letter = letters[j]
-                    if shortValues.contains(letter) {
-                        if j == letters.count - 1 { guard i < args.count else { return false }; i += 1 }
-                        break
-                    }
-                    guard short.contains(letter) else { return false }
-                    j += 1
-                }
+                if arg.hasPrefix("--") && arg.contains("=") { i += 1 }
+                else if arg.hasPrefix("-") { i += values.contains(arg) ? 2 : 1 }
+                else { if !arg.hasPrefix("+") { return true }; i += 1 }
             }
-            return true
+            return false
+        case "hostname":
+            // Flags only: a name would set it.
+            return !args.allSatisfy { $0.range(of: #"^(-[a-zA-Z]|--[a-zA-Z-]+)$"#, options: .regularExpression) != nil }
+        case "which":
+            var after = false
+            for arg in args {
+                if after { continue }
+                if arg == "--" { after = true }
+                else if arg.hasPrefix("-"), arg.range(of: #"^(-[A-Za-z]+|--[a-z-]+)$"#, options: .regularExpression) == nil { return true }
+            }
+            return false
+        case "tput":
+            // Capabilities that reset or reprogram the terminal, and `-S` (capabilities from stdin).
+            let refused: Set<String> = ["init", "reset", "rs1", "rs2", "rs3", "is1", "is2", "is3", "iprog", "if", "rf", "clear",
+                                        "flash", "mc0", "mc4", "mc5", "mc5i", "mc5p", "pfkey", "pfloc", "pfx", "pfxl", "smcup", "rmcup"]
+            var i = 0, after = false
+            while i < args.count {
+                let arg = args[i]
+                if arg == "--" { after = true; i += 1 }
+                else if !after, arg.hasPrefix("-") {
+                    if arg == "-S" || (!arg.hasPrefix("--") && arg.count > 2 && arg.contains("S")) { return true }
+                    i += arg == "-T" ? 2 : 1
+                } else { if refused.contains(arg) { return true }; i += 1 }
+            }
+            return false
+        default: return false
         }
     }
-
-    static let flagTables: [String: Flags] = {
-        let grep = Flags(short: "EFGPabcHhiIlLnoqrRsTuUvwxyzZV", shortValues: "ABCDdefm",
-                         long: ["--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--ignore-case",
-                                "--no-ignore-case", "--invert-match", "--word-regexp", "--line-regexp", "--count", "--files-with-matches",
-                                "--files-without-match", "--only-matching", "--quiet", "--silent", "--no-messages", "--byte-offset",
-                                "--with-filename", "--no-filename", "--line-number", "--initial-tab", "--null", "--null-data",
-                                "--text", "--recursive", "--dereference-recursive", "--color", "--colour", "--version", "--help",
-                                "--line-buffered", "--binary", "--label"],
-                         longValues: ["--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context",
-                                      "--include", "--exclude", "--exclude-dir", "--exclude-from", "--binary-files", "--devices",
-                                      "--directories", "--color", "--colour", "--label"])
-        let sum = Flags(short: "bctwz", long: ["--binary", "--check", "--tag", "--text", "--zero", "--ignore-missing", "--quiet",
-                                                "--status", "--strict", "--warn"])
-        return [
-            "grep": grep, "egrep": grep, "fgrep": grep,
-            "rg": Flags(short: "iSsvwxFPclLnNHIoqUzaRuh.0", shortValues: "eEfgtTmABCMjrd",
-                        long: ["--ignore-case", "--smart-case", "--case-sensitive", "--invert-match", "--word-regexp",
-                               "--line-regexp", "--fixed-strings", "--pcre2", "--count", "--count-matches", "--files",
-                               "--files-with-matches", "--files-without-match", "--line-number", "--no-line-number",
-                               "--with-filename", "--no-filename", "--only-matching", "--quiet", "--multiline",
-                               "--multiline-dotall", "--hidden", "--no-ignore", "--no-ignore-vcs", "--follow", "--text",
-                               "--json", "--vimgrep", "--heading", "--no-heading", "--sort-files", "--stats", "--trim",
-                               "--null", "--column", "--byte-offset", "--no-messages", "--unrestricted", "--search-zip",
-                               "--type-list", "--version", "--help", "--debug", "--files-without-match", "--crlf",
-                               "--passthru", "--no-config", "--one-file-system", "--glob-case-insensitive"],
-                        longValues: ["--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count",
-                                     "--after-context", "--before-context", "--context", "--max-columns", "--threads",
-                                     "--replace", "--max-depth", "--max-filesize", "--sort", "--sortr", "--color",
-                                     "--colors", "--encoding", "--context-separator", "--field-match-separator", "--path-separator"]),
-            "fd": fdFlags, "fdfind": fdFlags,
-            "file": Flags(short: "bciIkLhNrsz0E", long: ["--brief", "--mime", "--mime-type", "--mime-encoding", "--keep-going",
-                                                         "--dereference", "--no-dereference", "--no-pad", "--raw", "--special-files",
-                                                         "--uncompress", "--print0", "--version", "--help"]),
-            "sort": Flags(short: "bcCdfghiMmnrRsuVz", shortValues: "kt",
-                          long: ["--ignore-leading-blanks", "--check", "--dictionary-order", "--ignore-case", "--general-numeric-sort",
-                                 "--human-numeric-sort", "--ignore-nonprinting", "--month-sort", "--merge", "--numeric-sort",
-                                 "--reverse", "--random-sort", "--stable", "--unique", "--version-sort", "--zero-terminated"],
-                          longValues: ["--key", "--field-separator"]),
-            "tree": Flags(short: "adlfxpsugDFqNQrtvUCnAShJ", shortValues: "LPI",
-                          long: ["--noreport", "--dirsfirst", "--gitignore", "--prune", "--du", "--si", "--version", "--help"],
-                          longValues: ["--filelimit", "--charset", "--sort", "--timefmt"]),
-            "which": Flags(short: "as"),
-            "base64": Flags(short: "dD", shortValues: "ibw", long: ["--decode", "--ignore-garbage"],
-                            longValues: ["--input", "--wrap", "--break"]),
-            "sha256sum": sum, "sha1sum": sum, "md5sum": sum, "sha512sum": sum,
-            "hostname": Flags(short: "fsdiI", positional: false),
-            "date": Flags(short: "uRIjn", shortValues: "drfvz",
-                          long: ["--utc", "--universal", "--rfc-email", "--iso-8601", "--rfc-3339"],
-                          longValues: ["--date", "--reference", "--iso-8601", "--rfc-3339"]),
-        ]
-    }()
-
-    static let fdFlags = Flags(short: "HIsiglLapu0", shortValues: "dtEecS",
-                               long: ["--hidden", "--no-ignore", "--no-ignore-vcs", "--case-sensitive", "--ignore-case",
-                                      "--glob", "--regex", "--fixed-strings", "--absolute-path", "--list-details", "--follow",
-                                      "--full-path", "--print0", "--unrestricted", "--version", "--help", "--prune", "--quiet"],
-                               longValues: ["--max-depth", "--min-depth", "--exact-depth", "--type", "--extension", "--exclude",
-                                            "--color", "--size", "--changed-within", "--changed-before", "--max-results", "--owner",
-                                            "--search-path", "--base-directory"])
 
     // MARK: Special rules
 
@@ -249,10 +239,24 @@ enum ReadOnlyCommands {
 
     /// Flags only: no input or output file (Claude Code 2.1.319 refuses `uniq a.txt` too).
     static func uniq(_ args: [String]) -> Bool {
-        Flags(short: "cdDiuz", shortValues: "fsw",
-              long: ["--count", "--repeated", "--all-repeated", "--ignore-case", "--unique", "--zero-terminated", "--group"],
-              longValues: ["--skip-fields", "--skip-chars", "--check-chars"]).allows(args)
-            && positionals(args, values: ["-f", "-s", "-w"]).isEmpty
+        let flags: Set<String> = ["-c", "--count", "-d", "--repeated", "-D", "-u", "--unique", "-i", "--ignore-case",
+                                  "-z", "--zero-terminated"]
+        let values: Set<String> = ["-f", "--skip-fields", "-s", "--skip-chars", "-w", "--check-chars"]
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            i += 1
+            if flags.contains(arg) { continue }
+            let name = String(arg.split(separator: "=", maxSplits: 1).first ?? "")
+            guard values.contains(name) else { return false }
+            let value: String
+            if arg.contains("=") { value = String(arg.dropFirst(name.count + 1)) } else {
+                guard i < args.count else { return false }
+                value = args[i]; i += 1
+            }
+            guard !value.isEmpty, value.allSatisfy(\.isNumber) else { return false }
+        }
+        return true
     }
 
     /// A filter and files: no module loading or reading of filter files, and no environment access.
@@ -278,46 +282,6 @@ enum ReadOnlyCommands {
             out.append(arg)
         }
         return out
-    }
-
-    /// `xargs` with its listed flags, running a read-only command (or `echo`, its default).
-    static func xargs(_ args: [String]) -> String? {
-        let values: Set<Character> = ["I", "n", "P", "L", "s", "E", "d"], alone: Set<Character> = ["0", "t", "r", "x"]
-        var i = 0
-        while i < args.count, args[i].hasPrefix("-"), args[i].count > 1 {
-            let letters = Array(args[i].dropFirst())
-            i += 1
-            guard let letter = letters.first else { return nil }
-            if values.contains(letter) { if letters.count == 1 { guard i < args.count else { return nil }; i += 1 }; continue }
-            guard letters.allSatisfy(alone.contains) else { return nil }
-        }
-        if i == args.count { return "xargs" }
-        return readOnly(Array(args[i...])).map { "xargs " + $0 }
-    }
-
-    /// Read-only sed: no in-place editing, and a script of printing commands only (no `w`, `e`, `r`).
-    static func sed(_ args: [String]) -> Bool {
-        var scripts: [String] = [], files = false, i = 0
-        while i < args.count {
-            let arg = args[i]
-            i += 1
-            switch arg {
-            case "-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended", "-s", "--separate", "-u", "--unbuffered", "-z", "--null-data":
-                continue
-            case "-e", "--expression":
-                guard i < args.count else { return false }
-                scripts.append(args[i]); i += 1
-            default:
-                if arg.hasPrefix("--expression=") { scripts.append(String(arg.dropFirst(13))); continue }
-                if arg.hasPrefix("-") && arg != "-" {
-                    // A cluster like `-nE`; `-i`, `-f` and anything unknown refuse.
-                    guard arg.dropFirst().allSatisfy({ "nEsurz".contains($0) }) else { return false }
-                    continue
-                }
-                if scripts.isEmpty && !files { scripts.append(arg); files = true } // the first word is the script
-            }
-        }
-        return !scripts.isEmpty && scripts.allSatisfy(sedScript)
     }
 
     /// A sed script made of addresses and the commands p d q Q = l n N g G h H x z D P, s///flags and y///.
@@ -363,198 +327,158 @@ enum ReadOnlyCommands {
         return true
     }
 
+
+    // MARK: xargs, sed
+
+    /// Claude Code's targets for `xargs`: only these, themselves read-only.
+    static let xargsTargets: Set<String> = ["echo", "printf", "wc", "grep", "egrep", "fgrep", "head", "tail"]
+
+    /// `xargs` with its listed flags, then a listed target that is read-only with its arguments.
+    static func xargs(_ args: [String]) -> String? {
+        guard let table = flagTables["xargs"] else { return nil }
+        var i = 0
+        while i < args.count, args[i].hasPrefix("-"), args[i] != "--" {
+            let name = String(args[i].split(separator: "=", maxSplits: 1)[0])
+            guard let kind = table[name] else { return nil }
+            i += kind == .none || args[i].contains("=") ? 1 : 2
+        }
+        if i < args.count, args[i] == "--" { i += 1 }
+        guard flags(Array(args[..<min(i, args.count)]), table, command: "xargs") else { return nil }
+        if i >= args.count { return "xargs" }
+        guard xargsTargets.contains(args[i]), let target = readOnly(Array(args[i...])) else { return nil }
+        return "xargs " + target
+    }
+
+    /// Read-only sed: the table's flags (no `-i`, no `-f`), and printing scripts only (no `w`, `e`, `r`).
+    static func sed(_ args: [String]) -> Bool {
+        var scripts: [String] = [], i = 0, first: String?
+        while i < args.count {
+            let arg = args[i]
+            i += 1
+            if arg == "-e" || arg == "--expression" { if i < args.count { scripts.append(args[i]); i += 1 }; continue }
+            if arg.hasPrefix("--expression=") { scripts.append(String(arg.dropFirst(13))); continue }
+            if arg == "-l" || arg == "--line-length" { i += 1; continue }
+            if arg.hasPrefix("-") && arg != "-" { continue }
+            if first == nil { first = arg }
+        }
+        if scripts.isEmpty, let first { scripts.append(first) }
+        return !scripts.isEmpty && scripts.allSatisfy(sedScript)
+    }
+
     // MARK: git, gh, docker
 
-    /// Formatting and selection flags shared by git's diff, log and show. Left out on purpose: `--output` (writes a
-    /// file), `--ext-diff` (runs a program), `--exec`.
-    static let gitDiffFlags: Set<String> = [
-        "-p", "-u", "--patch", "-s", "--no-patch", "--raw", "--patch-with-raw", "--stat", "--numstat", "--shortstat",
-        "--dirstat", "--summary", "--name-only", "--name-status", "--check", "--full-index", "--binary", "--abbrev",
-        "--color", "--no-color", "--color-words", "--color-moved", "--word-diff", "--word-diff-regex", "-w",
-        "--ignore-all-space", "-b", "--ignore-space-change", "--ignore-blank-lines", "--ignore-space-at-eol",
-        "--ignore-cr-at-eol", "--minimal", "--patience", "--histogram", "--diff-algorithm", "--unified", "-U",
-        "--function-context", "-W", "--find-renames", "-M", "--find-copies", "-C", "--no-renames", "--relative",
-        "--no-relative", "-R", "--text", "-a", "--exit-code", "--quiet", "--cached", "--staged", "--merge-base",
-        "--no-index", "--no-ext-diff", "--no-textconv", "--src-prefix", "--dst-prefix", "--no-prefix", "-z",
-        "--diff-filter", "-S", "-G", "--pickaxe-all", "--pickaxe-regex", "--compact-summary", "--submodule",
-        "--ignore-submodules", "--line-prefix", "--ita-invisible-in-index", "-O", "--skip-to", "--rotate-to",
-        "-l", "--break-rewrites", "-B", "-D", "--irreversible-delete", "--anchored", "--indent-heuristic",
-        "--no-indent-heuristic", "--default-prefix", "--dd", "-m", "-c", "--cc", "--first-parent", "--merges",
-        "--no-merges", "--remerge-diff",
-    ]
-
-    static let gitLogFlags: Set<String> = gitDiffFlags.union([
-        "--oneline", "--graph", "--decorate", "--no-decorate", "--decorate-refs", "--decorate-refs-exclude", "--all",
-        "--branches", "--tags", "--remotes", "--glob", "--exclude", "-n", "--max-count", "--skip", "--since", "--after",
-        "--until", "--before", "--author", "--committer", "--grep", "--all-match", "--invert-grep", "-i",
-        "--regexp-ignore-case", "-E", "--extended-regexp", "-F", "--fixed-strings", "-P", "--perl-regexp", "--format",
-        "--pretty", "--date", "--reverse", "--follow", "--no-walk", "--topo-order", "--date-order",
-        "--author-date-order", "--ancestry-path", "--simplify-by-decoration", "--full-history", "--left-right",
-        "--cherry-pick", "--cherry-mark", "--cherry", "--boundary", "--source", "--use-mailmap", "--mailmap",
-        "--abbrev-commit", "--no-abbrev-commit", "--parents", "--children", "--relative-date", "--show-signature",
-        "--notes", "--no-notes", "--show-notes", "-L", "--max-parents", "--min-parents", "--walk-reflogs", "-g",
-        "--expand-tabs", "--no-expand-tabs", "--encoding", "-t", "-r", "--root", "--show-linear-break", "--log-size",
-        "--count", "--objects", "--in-commit-order", "--not", "--stdin", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9",
-    ])
-
-    /// Flags for subcommands that only read. Positional words (revisions, paths) are allowed unless said otherwise.
-    static let gitTables: [String: Set<String>] = [
-        "status": ["-s", "--short", "-b", "--branch", "--porcelain", "--long", "-v", "--verbose", "-u", "-uno", "-unormal",
-                   "-uall", "--untracked-files", "--ignored", "--ignore-submodules", "--column", "--no-column",
-                   "--ahead-behind", "--no-ahead-behind", "--renames", "--no-renames", "--find-renames", "-z", "--show-stash"],
-        "diff": gitDiffFlags,
-        "log": gitLogFlags,
-        "show": gitLogFlags,
-        "shortlog": gitLogFlags.union(["-s", "--summary", "-e", "--email", "--group", "-c", "--committer", "-w"]),
-        "blame": ["-L", "-l", "-t", "-s", "-e", "--show-email", "-w", "-M", "-C", "-p", "--porcelain", "--line-porcelain",
-                  "--incremental", "-f", "--show-name", "-n", "--show-number", "-c", "--root", "--since", "--date",
-                  "--abbrev", "--color-lines", "--color-by-age", "--ignore-rev", "--first-parent", "--reverse", "--progress",
-                  "--no-progress", "-b", "--minimal"],
-        "rev-parse": ["--abbrev-ref", "--symbolic-full-name", "--symbolic", "--short", "--verify", "-q", "--quiet",
-                      "--show-toplevel", "--show-prefix", "--show-cdup", "--git-dir", "--git-common-dir", "--absolute-git-dir",
-                      "--is-inside-work-tree", "--is-inside-git-dir", "--is-bare-repository", "--is-shallow-repository",
-                      "--all", "--branches", "--tags", "--remotes", "--default", "--sq", "--not", "--show-object-format",
-                      "--path-format", "--git-path", "--show-superproject-working-tree", "--local-env-vars", "--since", "--until"],
-        "rev-list": gitLogFlags,
-        "merge-base": ["--all", "--octopus", "--independent", "--is-ancestor", "--fork-point"],
-        "describe": ["--tags", "--all", "--long", "--abbrev", "--always", "--exact-match", "--contains", "--candidates",
-                     "--match", "--exclude", "--first-parent", "--dirty", "--broken"],
-        "cat-file": ["-t", "-s", "-e", "-p", "--batch-check", "--batch", "--textconv", "--filters", "--follow-symlinks",
-                     "--batch-all-objects", "--unordered", "--use-mailmap", "--buffer", "-Z"],
-        "for-each-ref": ["--count", "--sort", "--format", "--color", "--shell", "--perl", "--python", "--tcl",
-                         "--points-at", "--merged", "--no-merged", "--contains", "--no-contains", "--ignore-case",
-                         "--omit-empty", "--exclude", "--include-root-refs"],
-        "ls-files": ["-c", "--cached", "-d", "--deleted", "-m", "--modified", "-o", "--others", "-i", "--ignored", "-s",
-                     "--stage", "-u", "--unmerged", "-k", "--killed", "-z", "--directory", "--no-empty-directory",
-                     "--exclude-standard", "-x", "--exclude", "--error-unmatch", "--full-name", "--recurse-submodules",
-                     "--abbrev", "--debug", "--eol", "--deduplicate", "-t", "-v", "-f", "--format", "--sparse"],
-        "grep": ["-i", "--ignore-case", "-I", "-w", "--word-regexp", "-v", "--invert-match", "-n", "--line-number",
-                 "--column", "-l", "--files-with-matches", "-L", "--files-without-match", "-c", "--count", "-h", "-H",
-                 "--full-name", "-E", "--extended-regexp", "-G", "--basic-regexp", "-F", "--fixed-strings", "-P",
-                 "--perl-regexp", "-e", "--and", "--or", "--not", "--all-match", "-q", "--quiet", "-A", "-B", "-C",
-                 "--after-context", "--before-context", "--context", "-p", "--show-function", "-W", "--function-context",
-                 "--cached", "--untracked", "--no-index", "--recurse-submodules", "--max-depth", "-r", "--recursive",
-                 "--no-recursive", "-z", "--null", "-o", "--only-matching", "--break", "--heading", "--color",
-                 "--no-color", "-a", "--text", "--threads", "-m", "--max-count", "--exclude-standard", "--no-exclude-standard"],
-        "reflog": gitLogFlags,
-        "remote": ["-v", "--verbose"],
-        "tag": ["-l", "--list", "-n", "--sort", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
-                "--format", "--column", "--no-column", "-i", "--ignore-case", "--color"],
-        "branch": ["-a", "--all", "-r", "--remotes", "-l", "--list", "-v", "-vv", "--verbose", "--show-current",
-                   "--contains", "--no-contains", "--merged", "--no-merged", "--sort", "--format", "--points-at",
-                   "--color", "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--abbrev", "--no-abbrev"],
-        "ls-remote": ["--heads", "--tags", "--branches", "--refs", "-q", "--quiet", "--exit-code", "--get-url", "--sort",
-                      "--symref", "-h", "-t", "-b"],
-    ]
-
-    /// `git` flags that change what runs or where: none is allowed before the subcommand except `--no-pager`
-    /// (Claude Code 2.1.319 refuses `git -C . status` too).
-    static func git(_ args: [String]) -> String? {
-        var args = args[...]
-        while let first = args.first, first.hasPrefix("-") {
-            if first == "--no-pager" || first == "-P" { args = args.dropFirst() }
-            else { return nil }
+    /// The table for `git <sub>` (or `git config --get`, `git stash list`…): the longest key the words start with.
+    private static func table(_ prefix: String, _ args: [String]) -> (name: String, rest: [String], table: [String: Value])? {
+        for count in stride(from: min(2, args.count), through: 1, by: -1) {
+            let name = ([prefix] + args.prefix(count)).joined(separator: " ")
+            if let table = flagTables[name] { return (name, Array(args.dropFirst(count)), table) }
         }
-        guard let sub = args.first else { return nil }
-        var rest = Array(args.dropFirst())
-        var name = "git " + sub
-        switch sub {
-        case "stash":
-            guard let verb = rest.first, ["list", "show"].contains(verb) else { return nil }
-            rest.removeFirst()
-            name += " " + verb
-            return gitFlags(rest, gitLogFlags) ? name : nil
-        case "worktree":
-            guard rest.first == "list", rest.dropFirst().allSatisfy({ ["--porcelain", "-v", "--verbose", "-z"].contains($0) }) else { return nil }
-            return name + " list"
-        case "config":
-            let reads: Set<String> = ["--get", "--get-all", "--get-regexp", "--list", "-l", "--get-urlmatch"]
-            let scopes: Set<String> = ["--global", "--local", "--system", "--worktree", "--show-origin", "--show-scope",
-                                       "--name-only", "-z", "--null", "--includes", "--no-includes", "--type", "--bool", "--int", "--path"]
-            guard rest.contains(where: reads.contains),
-                  rest.allSatisfy({ !$0.hasPrefix("-") || reads.contains($0) || scopes.contains(String($0.split(separator: "=")[0])) }),
-                  !rest.contains(where: { $0.hasPrefix("--file") || $0 == "-f" || $0 == "--blob" })
-            else { return nil }
+        return nil
+    }
+
+    /// `~user` expansions, and `~` with braces: they read outside what the command names.
+    private static func tilde(_ args: [String]) -> Bool {
+        args.contains { $0.range(of: #"(^|[=:])~"#, options: .regularExpression) != nil || ($0.contains("~") && $0.contains("{")) }
+    }
+
+    /// git formats that run gpg (`%G…`, `%(signature)`), and `--pretty` names from config.
+    private static func gitFormatDanger(_ args: [String]) -> Bool {
+        let builtIn: Set<String> = ["oneline", "short", "medium", "full", "fuller", "email", "raw", "reference", "mboxrd"]
+        for (i, arg) in args.enumerated() {
+            if arg.range(of: #"%[-+ ]?G|%\(\*?signature"#, options: .regularExpression) != nil { return true }
+            for flag in ["--format", "--pretty", "--sort", "--group"] {
+                var value: String?
+                if arg == flag, i + 1 < args.count { value = args[i + 1] } else if arg.hasPrefix(flag + "=") { value = String(arg.dropFirst(flag.count + 1)) }
+                guard let value else { continue }
+                if tilde([value]) || value.contains("signature") { return true }
+                if flag == "--format" || flag == "--pretty", !value.isEmpty, !value.contains("%"),
+                   !value.hasPrefix("format:"), !value.hasPrefix("tformat:"), !builtIn.contains(value) { return true }
+            }
+        }
+        return false
+    }
+
+    /// Only `--no-pager` before the subcommand: `-c`, `-C`, `--git-dir` and the rest change what runs or where.
+    static func git(_ args: [String]) -> String? {
+        var args = args
+        while args.first == "--no-pager" { args.removeFirst() }
+        guard let sub = args.first, !sub.hasPrefix("-"), !tilde(args), !gitFormatDanger(args),
+              let (name, rest, table) = table("git", args), flags(rest, table, command: "git") else { return nil }
+        switch name {
+        case "git remote":
+            return rest.allSatisfy { $0 == "-v" || $0 == "--verbose" } ? name : nil
+        case "git remote show":
+            // One remote, named plainly, with `-n` (no network).
+            let split = rest.firstIndex(of: "--")
+            let before = split.map { Array(rest[..<$0]) } ?? rest, after = split.map { Array(rest[($0 + 1)...]) } ?? []
+            let names = before.filter { $0 != "-n" } + after
+            guard names.count == 1, before.contains("-n"),
+                  names[0].range(of: #"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$"#, options: .regularExpression) != nil else { return nil }
             return name
-        case "remote":
-            if rest.isEmpty || rest.allSatisfy({ ["-v", "--verbose"].contains($0) }) { return name }
-            if let verb = rest.first, ["show", "get-url"].contains(verb), rest.count >= 2,
-               rest.dropFirst().allSatisfy({ !$0.hasPrefix("-") || ["-n", "--push", "--all"].contains($0) }) { return name + " " + verb }
-            return nil
-        case "reflog":
-            if rest.first == "show" { rest.removeFirst() }
-            else if let verb = rest.first, !verb.hasPrefix("-"), ["expire", "delete", "exists", "drop"].contains(verb) { return nil }
-            return gitFlags(rest, gitLogFlags) ? name : nil
-        case "branch", "tag":
-            guard let table = gitTables[sub], gitFlags(rest, table) else { return nil }
-            // A name without `--list` creates a branch or tag; values of these flags are revisions.
-            let listing = rest.contains("-l") || rest.contains("--list")
-            let takesValue: Set<String> = ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"]
-            var previous = ""
-            for arg in rest {
-                defer { previous = arg }
-                if arg.hasPrefix("-") { continue }
-                if takesValue.contains(previous) || listing { continue }
-                if sub == "tag", previous == "-n" { continue }
-                return nil
+        case "git reflog":
+            if let verb = rest.first, !verb.hasPrefix("-"), !["show", "list"].contains(verb) { return nil }
+            return rest.contains(where: ["expire", "delete", "exists", "drop", "write"].contains) ? nil : name
+        case "git branch", "git tag":
+            // A name without `--list` (or `-l` in a cluster) creates one; these flags' values are revisions.
+            let takesValue: Set<String> = name == "git tag"
+                ? ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "-n"]
+                : ["--contains", "--no-contains", "--points-at", "--sort", "--merged", "--no-merged"]
+            var listing = false, i = 0, after = false
+            while i < rest.count {
+                let arg = rest[i]
+                if arg == "--", !after { after = true; i += 1; continue }
+                if !after, arg.hasPrefix("-") {
+                    if arg == "--list" || arg == "-l" || (!arg.hasPrefix("--") && arg.count > 2 && !arg.contains("=") && arg.dropFirst().contains("l")) { listing = true }
+                    // `--merged` takes an optional revision on branch: one that follows is that revision.
+                    i += arg.contains("=") ? 1 : takesValue.contains(arg) && i + 1 < rest.count && !rest[i + 1].hasPrefix("-") ? 2 : 1
+                } else {
+                    if !listing { return nil }
+                    i += 1
+                }
             }
             return name
-        case "ls-remote":
-            guard let table = gitTables[sub], gitFlags(rest, table), !rest.contains(where: { !$0.hasPrefix("-") }) else { return nil }
+        case "git ls-remote":
+            // No remote named: only the configured one. A value flag's value isn't a remote.
+            var i = 0
+            while i < rest.count {
+                let arg = rest[i]
+                if !arg.hasPrefix("-") { return nil }
+                i += !arg.contains("=") && (table[arg] ?? .none) != .none ? 2 : 1
+            }
             return name
         default:
-            guard let table = gitTables[sub], gitFlags(rest, table) else { return nil }
             return name
         }
     }
 
-    /// Every flag is in `table`, by its name before `=` or, for a short flag with its value attached (`-n5`,
-    /// `-U3`, `-uno`), by its first letter.
-    static func gitFlags(_ args: [String], _ table: Set<String>) -> Bool {
-        let refused = ["--output", "--ext-diff", "--exec", "--open-files-in-pager", "--upload-pack", "--server-option"]
-        var afterDashes = false
-        for arg in args {
-            if afterDashes || !arg.hasPrefix("-") || arg == "-" { continue }
-            if arg == "--" { afterDashes = true; continue }
-            if refused.contains(where: { arg.hasPrefix($0) }) || arg.hasPrefix("-O") && arg.count > 2 { return false }
-            let name = String(arg.split(separator: "=", maxSplits: 1)[0])
-            if table.contains(name) { continue }
-            if !arg.hasPrefix("--"), arg.count > 2, table.contains(String(arg.prefix(2))) {
-                // `-n5` is `-n 5`; a cluster like `-pv` needs each letter listed.
-                let rest = arg.dropFirst(2)
-                if rest.allSatisfy(\.isNumber) || ["-U", "-M", "-C", "-B", "-u", "-n", "-L", "-S", "-G", "-O"].contains(String(arg.prefix(2))) { continue }
-                if rest.allSatisfy({ table.contains("-" + String($0)) }) { continue }
-            }
-            if arg.range(of: #"^-\d+$"#, options: .regularExpression) != nil, table.contains("-n") { continue }
-            return false
-        }
-        return true
-    }
-
-    /// gh subcommands that only read. Flags: anything but `--web` (opens a browser); `gh api` isn't here.
-    static let ghReads: Set<String> = [
-        "pr view", "pr list", "pr diff", "pr checks", "pr status", "issue view", "issue list", "issue status",
-        "repo view", "run list", "run view", "auth status", "release list", "release view", "workflow list",
-        "workflow view", "label list", "search repos", "search issues", "search prs", "search commits", "search code",
-    ]
-
+    /// gh views, without a value that points elsewhere (`host/owner/repo`, a URL, `user@host`).
     static func gh(_ args: [String]) -> String? {
-        guard args.count >= 2 else { return nil }
-        let name = args[0] + " " + args[1]
-        guard ghReads.contains(name), !args.contains(where: { ["-w", "--web"].contains($0) || $0.hasPrefix("--web=") }) else { return nil }
-        // `run view --log` and the rest only print; `--exit-status`-like flags only change the exit code.
-        return "gh " + name
+        guard let (name, rest, table) = table("gh", args), name.split(separator: " ").count == 3,
+              flags(rest, table, command: "gh") else { return nil }
+        for arg in rest {
+            var value = arg
+            if arg.hasPrefix("-") {
+                guard let equals = arg.firstIndex(of: "=") else { continue }
+                value = String(arg[arg.index(after: equals)...])
+            }
+            if value.contains("://") || value.contains("@") || value.filter({ $0 == "/" }).count >= 2 { return nil }
+        }
+        return name
     }
 
+    /// `docker logs` and `docker inspect`, without options that pick another daemon.
     static func docker(_ args: [String]) -> String? {
-        guard let sub = args.first else { return nil }
-        let table: Flags
-        switch sub {
-        case "logs": table = Flags(short: "ft", shortValues: "n", long: ["--follow", "--timestamps", "--details"],
-                                   longValues: ["--since", "--until", "--tail"])
-        case "inspect": table = Flags(short: "s", shortValues: "f", long: ["--size"], longValues: ["--format", "--type"])
-        default: return nil
+        guard let (name, rest, table) = table("docker", args), flags(rest, table, command: "docker"), !tilde(rest) else { return nil }
+        let host = ["-H", "-c", "-r", "--host", "--context", "--config", "--tlscacert", "--tlscert", "--tlskey", "--url",
+                    "--connection", "--identity", "--remote", "--module", "--out"]
+        let letters = Set(host.filter { $0.count == 2 }.map { $0.last! })
+        for arg in rest {
+            if host.contains(where: { arg == $0 || arg.hasPrefix($0 + "=") || ($0.count == 2 && arg.count > 2 && arg.hasPrefix($0)) }) { return nil }
+            if arg.hasPrefix("-"), !arg.hasPrefix("--") {
+                let cluster = arg.dropFirst().prefix { $0.isLetter }
+                if cluster.count >= 2, cluster.contains(where: letters.contains) { return nil }
+            }
         }
-        return table.allows(Array(args.dropFirst())) ? "docker " + sub : nil
+        return name
     }
 }

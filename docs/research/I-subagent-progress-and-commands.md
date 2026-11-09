@@ -202,18 +202,38 @@ allowed-flag tables for `git` read subcommands, `gh` views, `docker logs/inspect
 (no `-i`, no `w`/`e`), `sort` (no `-o`), `grep`/`rg`, checksums, `tree`, `date`, `hostname`, `which`, `ps`, `lsof`,
 `pgrep`, `tput`, `fd`, `netstat`/`ss`; and whole-command rules: every part of a compound command must be
 read-only, and substitution, subshells, redirects to files (other than `2>&1`) and control flow never are.
-lastdrop's `ReadOnlyCommands` implements these rules in its own code. The per-command flag tables are lastdrop's own,
-written from each tool's manual and kept narrower: the raw tables couldn't be read in this session (auto mode
-refused reading the bundle regions), so a flag lastdrop doesn't list goes to the judge rather than being guessed.
-Deliberate differences: lastdrop refuses any `$` (Claude Code ran `echo $HOME`), `git -C`, and `printf` with
-`\x`/octal escapes; it accepts `2>/dev/null` and `>/dev/null` as harmless.
+lastdrop's `ReadOnlyCommands` implements these rules in its own code. The per-command flag tables (73 commands,
+1,747 flags, each with the value it takes) are transcribed as data from the bundle into `ReadOnlyFlagTables.swift`,
+generated from the parent session's extraction (`tables.py` → `claude-tables.json`; the internal `aki` and `help`
+entries left out). lastdrop follows Claude Code's flag rule: a value flag takes `=value` or the next word (not a flag;
+a string value not starting with `-`; digits for a number), short clusters only of flags without values, `git -20`
+and `grep -A3`. It also follows Claude Code's extra checks: git `--format`/`--pretty` values that run gpg or name a
+config format, `git branch`/`git tag` only when listing, `git remote show -n <name>`, `git reflog` without
+expire/delete, `gh` values pointing at another host (`://`, `@`, two slashes), `docker` daemon options, `date`
+words only `+FORMAT`, `hostname` flags only, `tput` without reset capabilities or `-S`, and `xargs` targets limited
+to echo, printf, wc, grep, egrep, fgrep, head and tail.
+
+A unit test checks the transcription against the tables themselves: 1,744 of the 1,747 allowed flags are read-only
+in lastdrop, and none of 39,015 other flag uses is (every long flag seen in any table plus every `-a`…`-Z`, `-0`…`-9`,
+on each table command, with and without a value; `git -<digits>` is Claude Code's own rule). The three refused:
+`date --iso-8601 x` and `git branch --abbrev 5`, which Claude Code's extra checks refuse too, and an unquoted
+`xargs -I {}`, which lastdrop's parser takes for a group (`-I '{}'` passes).
+
+Deliberate differences: lastdrop refuses any `$` (Claude Code ran `echo $HOME`), and `printf` with `\x`/octal
+escapes; it accepts `2>/dev/null` and `>/dev/null` as harmless.
+
+The first version (6d387b5) used hand-written flag tables instead. Comparing it with Claude Code's tables found two
+real gaps, both fixed by the transcription: `git cat-file --textconv`/`--filters` were allowed (they can run
+programs the repo configures), and `ps`, `netstat`, `lsof`, `pgrep` and `ss` took any arguments (`ss -K` kills
+sockets). It was also looser on `gh` flags and on git log-like flags, and sent 196 of Claude Code's allowed flag uses
+to the judge.
 
 **Black-box check.** Claude Code 2.1.319, `claude -p --permission-mode dontAsk --setting-sources project --settings
 '{"permissions":{"allow":[]}}' --output-format json --model haiku`, one fresh copy of a scratch git repo per probe
 (`--setting-sources project` rather than `user`, because the user's settings hold a `Bash(codex exec:*)` rule, hooks
 and plugins). `dontAsk` runs only what needs no approval and denies the rest; "denied" means the command came back
-in `permission_denials`. 50 of 51 agree with lastdrop's list; the one difference (`echo $HOME`) is lastdrop being
-stricter.
+in `permission_denials`. 50 of 51 agree with lastdrop's list, before and after the tables were transcribed; the
+one difference (`echo $HOME`) is lastdrop being stricter.
 
 | # | Command | Claude Code 2.1.319 (`dontAsk`) | lastdrop |
 | --- | --- | --- | --- |

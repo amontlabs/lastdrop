@@ -93,7 +93,7 @@ final class AntigravityBackendTests: XCTestCase {
         var job = job(directory: folder.path)
         job.permissionMode = "auto"
         let log = Log()
-        let result = await AntigravityBackend.run(job, log.events, executable: executable, rules: PermissionRules(), judge: { _ in
+        let result = await AntigravityBackend.run(job, log.events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge, judge: { _ in
             XCTFail("nothing to judge"); return .init(allow: false)
         })
         XCTAssertFalse(result.isError, result.text)
@@ -132,7 +132,7 @@ final class AntigravityBackendTests: XCTestCase {
         var rules = PermissionRules()
         rules.add(["allow": ["Bash(git status:*)"], "deny": ["Bash(rm *)"]])
         let log = Log()
-        let result = await AntigravityBackend.run(job, log.events, executable: executable, rules: rules, judge: { _ in
+        let result = await AntigravityBackend.run(job, log.events, executable: executable, rules: rules, judgeModel: CommandJudge.defaultJudge, judge: { _ in
             XCTFail("the rules decide"); return .init(allow: false)
         })
         XCTAssertFalse(result.isError, result.text)
@@ -165,7 +165,7 @@ final class AntigravityBackendTests: XCTestCase {
         job.permissionMode = "acceptEdits"
         job.prompt = "Build the package and run its tests."
         let prompts = Prompts()
-        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judge: { prompt in
+        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge, judge: { prompt in
             prompts.add(prompt)
             if prompt.contains("\"CommandLine\":\"swift build\"") { return .init(allow: true, risk: "low", authorization: "high", rationale: "Builds.") }
             if prompt.contains("swift test") { return .init(allow: false, failure: "timed out") }
@@ -224,7 +224,7 @@ final class AntigravityBackendTests: XCTestCase {
         var rules = PermissionRules()
         rules.add(["allow": ["Bash(swift build)"]])
         let prompts = Prompts()
-        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: rules, judge: { prompt in
+        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: rules, judgeModel: CommandJudge.defaultJudge, judge: { prompt in
             prompts.add(prompt); return .init(allow: true, risk: "low", authorization: "medium", rationale: "Reads.")
         })
         XCTAssertFalse(result.isError, result.text)
@@ -243,7 +243,7 @@ final class AntigravityBackendTests: XCTestCase {
         job.permissionMode = "bypassPermissions"
         var rules = PermissionRules()
         rules.add(["deny": ["Bash(rm *)"]])
-        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: rules, judge: { _ in
+        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: rules, judgeModel: CommandJudge.defaultJudge, judge: { _ in
             XCTFail("no judge in bypass"); return .init(allow: false)
         })
         XCTAssertEqual(result.text, "Cleaned.")
@@ -257,7 +257,7 @@ final class AntigravityBackendTests: XCTestCase {
         let executable = try fakeAgent(in: folder, turns: Array(repeating: turn, count: 6))
         var job = job(directory: folder.path)
         job.permissionMode = "auto"
-        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judge: { _ in
+        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge, judge: { _ in
             .init(allow: false, risk: "high", authorization: "low", rationale: "Deploys.")
         })
         XCTAssertTrue(result.isError)
@@ -278,7 +278,7 @@ final class AntigravityBackendTests: XCTestCase {
         job.prompt = "Run the tests."
         let prompts = Prompts()
         let judge: @Sendable (String) async -> CommandJudge.Verdict = { prompts.add($0); return .init(allow: true) }
-        let first = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judge: judge)
+        let first = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge, judge: judge)
         XCTAssertEqual(first.text, "First.")
         var next = job
         next.cwd = "/does-not-exist"
@@ -286,7 +286,7 @@ final class AntigravityBackendTests: XCTestCase {
         next.prompt = "Now lint."
         next.resume = entry(directory: folder.path, session: session)
         next.resume?.model = "gemini-3.8-flash-high"
-        let second = await AntigravityBackend.run(next, Log().events, executable: executable, rules: PermissionRules(), judge: judge)
+        let second = await AntigravityBackend.run(next, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge, judge: judge)
         XCTAssertFalse(second.isError, second.text)
         XCTAssertEqual(second.text, "Second.")
         XCTAssertEqual(second.sessionID, session)
@@ -306,15 +306,15 @@ final class AntigravityBackendTests: XCTestCase {
         let executable = try fakeAgent(in: folder, turns: [[["text": "ok"]]])
         var job = job(directory: folder.path)
         job.definition.model = "gemini-3.8-flash"
-        let base = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules())
+        let base = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         XCTAssertFalse(base.isError, base.text)
         XCTAssertEqual(base.model, "gemini-3.8-flash-medium")
         job.effort = "max"
-        let effort = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules())
+        let effort = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         XCTAssertTrue(effort.isError && effort.unavailable, effort.text)
         XCTAssertTrue(effort.text.contains("does not offer effort max"), effort.text)
         job.definition.model = "missing-model-low"
-        let missing = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules())
+        let missing = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         XCTAssertTrue(missing.isError && missing.unavailable && missing.modelUnavailable, missing.text)
         XCTAssertTrue(missing.failedToStart)
     }
@@ -334,7 +334,7 @@ final class AntigravityBackendTests: XCTestCase {
             DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: emergency)
         }
         let start = Date()
-        let result = await AntigravityBackend.run(job(directory: folder.path), events, executable: executable, rules: PermissionRules())
+        let result = await AntigravityBackend.run(job(directory: folder.path), events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         log.emergency?.cancel()
         await fulfillment(of: [reported], timeout: 1)
         XCTAssertLessThan(Date().timeIntervalSince(start), 4)
@@ -347,7 +347,7 @@ final class AntigravityBackendTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         let executable = try fakeAgent(in: folder, earlyFailure: true)
         let log = Log()
-        let result = await AntigravityBackend.run(job(directory: folder.path), log.events, executable: executable, rules: PermissionRules())
+        let result = await AntigravityBackend.run(job(directory: folder.path), log.events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         XCTAssertTrue(result.isError)
         XCTAssertTrue(result.text.contains("sign-in"), result.text)
         XCTAssertTrue(result.unavailable)
@@ -359,7 +359,7 @@ final class AntigravityBackendTests: XCTestCase {
         let folder = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
         let executable = try fakeAgent(in: folder, turns: [[["error": "RESOURCE_EXHAUSTED: quota exceeded"]]])
-        let result = await AntigravityBackend.run(job(directory: folder.path), Log().events, executable: executable, rules: PermissionRules())
+        let result = await AntigravityBackend.run(job(directory: folder.path), Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         XCTAssertTrue(result.isError)
         XCTAssertTrue(result.limitReached, result.text)
         XCTAssertTrue(result.failedToStart)
@@ -375,7 +375,7 @@ final class AntigravityBackendTests: XCTestCase {
         let executable = try fakeAgent(in: agent, turns: [[["text": "ok"]]])
         var job = job(directory: folder.path)
         job.worktree = true
-        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules())
+        let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
         XCTAssertFalse(result.isError, result.text)
         let worktree = try XCTUnwrap(result.directory)
         XCTAssertEqual(URL(fileURLWithPath: worktree).resolvingSymlinksInPath().path, folder.resolvingSymlinksInPath().path + "/.claude/worktrees/agent-test")
