@@ -183,6 +183,8 @@ final class AppModel {
         if SubagentInstaller.oldIsInstalled() && !SubagentInstaller.isInstalled() { setAgents(true) }
         // This version's plugin, the first time it runs.
         if SubagentInstaller.isStale() { updatePlugin() }
+        // The wrapper T3 Code points at, kept current with where this app's executable is.
+        Task.detached { ThreadLauncher.writeWrapper() }
         refreshLocalChecks()
         loop = Task { [weak self] in
             while !Task.isCancelled {

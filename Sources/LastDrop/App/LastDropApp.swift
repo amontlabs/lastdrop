@@ -3,6 +3,11 @@ import AppKit
 @main
 enum Entry {
     static func main() {
+        // First of all, before any other flag check: T3's own arguments are full of flags (`--print`,
+        // `--verbose`), and the launcher must never be mistaken for one of them.
+        if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--claude-thread" {
+            ThreadLauncher.main(Array(CommandLine.arguments.dropFirst(2)))
+        }
         Rename.migrate()
         if CommandLine.arguments.contains("--agent-key") { EndpointProfile.keyMain() }
         if CommandLine.arguments.contains("--print") { printUsage(); return }
