@@ -140,6 +140,11 @@ final class ClaudeMappingTests: XCTestCase {
         XCTAssertEqual(creds?.accessToken, "t")
         XCTAssertEqual(creds?.plan, "Max")
         XCTAssertNil(ClaudeProvider.credentials(from: "{}"))
+
+        let profile = try! JSONSerialization.jsonObject(with: Data(#"{"organization":{"plan_display_name":"Ultra","rate_limit_tier":"default_claude_max_20x"}}"#.utf8)) as! [String: Any]
+        XCTAssertEqual(ClaudeProvider.planDisplayName(fromProfile: profile), "Ultra")
+        XCTAssertNil(ClaudeProvider.planDisplayName(fromProfile: ["organization": ["plan_display_name": " "]]))
+        XCTAssertNil(ClaudeProvider.planDisplayName(fromProfile: [:]))
     }
 }
 
