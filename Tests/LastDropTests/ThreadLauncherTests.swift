@@ -114,12 +114,64 @@ final class ThreadLauncherTests: LastDropTestCase {
         XCTAssertEqual(decision.account, "A")
     }
 
-    func testAnUnreadableAccountCountsAsFull() {
+    func testAnUnreadableAccountDoesNotEndAWarmStay() {
         let decision = decide(["--resume", "X"], sessions: ["X": "A"],
                               candidates: [candidate("A", nil, nil), candidate("B", 10, 10)],
                               transcript: transcript(age: 10 * 60))
+        XCTAssertEqual(decision.action, .stay)
+        XCTAssertEqual(decision.account, "A")
+    }
+
+    func testAnUnreadableAccountIsNeverADestination() {
+        let decision = decide(["--resume", "X"], sessions: ["X": "A"],
+                              candidates: [candidate("A", 10, 10), candidate("B", nil, nil)],
+                              transcript: transcript(age: 2 * 3600))
+        XCTAssertEqual(decision.account, "A")
+    }
+
+    func testARecentLimitReachedAnswerCountsAsFull() {
+        let decision = ThreadLauncher.decide(["--resume", "X"], ledger: ledger(sessions: ["X": "A"]),
+                                             candidates: [candidate("A", 10, 10), candidate("B", 10, 10)],
+                                             transcript: transcript(age: 60), now: now,
+                                             isFull: { $0 == "A" }, newSessionID: { "m" })
         XCTAssertEqual(decision.action, .move)
         XCTAssertEqual(decision.account, "B")
+    }
+
+    // MARK: An account that is gone
+
+    func testAWarmThreadLeavesAnAccountThatIsNoLongerSignedIn() {
+        let decision = decide(["--resume", "X"], sessions: ["X": "Gone"],
+                              candidates: [candidate("A", 10, 10), candidate("B", 0, 0)],
+                              transcript: transcript(age: 60))
+        XCTAssertEqual(decision.action, .move)
+        XCTAssertEqual(decision.account, "B")
+        XCTAssertTrue(decision.reason.contains("gone"))
+    }
+
+    func testAThreadOnAGoneAccountFallsBackToMainWhenNobodyHasRoom() {
+        let decision = decide(["--resume", "X"], sessions: ["X": "Gone"],
+                              candidates: [candidate("A", 100, 100)], transcript: transcript(age: 60))
+        XCTAssertEqual(decision.action, .move)
+        XCTAssertEqual(decision.account, "main")
+    }
+
+    // MARK: A conversation that was never written
+
+    func testAMissingCurrentConversationFallsBackToTheThreadsOwnId() {
+        // The fork to "C" failed before claude wrote C.jsonl: the thread resumes X again, and may retry the move.
+        let view = ThreadLauncher.Ledger(currentSession: { $0 == "X" ? "C" : $0 },
+                                         account: { ["C": "B", "X": "A"][$0] },
+                                         transcriptExists: { $0 != "C" })
+        let decision = ThreadLauncher.decide(["--resume", "X"], ledger: view,
+                                             candidates: [candidate("A", 10, 10), candidate("B", 0, 0)],
+                                             transcript: transcript(age: 10 * 60), now: now)
+        XCTAssertEqual(decision.args, ["--resume", "X"])
+        XCTAssertEqual(decision.account, "A")
+        XCTAssertEqual(decision.session, "X")
+        // An existing current conversation is still used.
+        let present = ThreadLauncher.Ledger(currentSession: { _ in "C" }, account: { _ in "B" }, transcriptExists: { _ in true })
+        XCTAssertEqual(present.resolvedSession(ofThread: "X"), "C")
     }
 
     func testResumeSessionAtNeverMoves() {
@@ -253,7 +305,89 @@ final class ThreadLauncherTests: LastDropTestCase {
         XCTAssertEqual(ThreadLauncher.transcript(ofConversation: "missing"), .cold)
     }
 
+    func testSyntheticAnswersDoNotCountAsWarm() {
+        let lines = [json(["type": "assistant", "timestamp": stamp(-7200)]),
+                     json(["type": "assistant", "isApiErrorMessage": true, "timestamp": stamp(-60)]),
+                     json(["type": "assistant", "message": ["model": "<synthetic>"], "timestamp": stamp(-30)])]
+        let transcript = ThreadLauncher.parseTail(Data(lines.joined(separator: "\n").utf8))
+        XCTAssertEqual(transcript.lastAssistantAt, now.addingTimeInterval(-7200))
+    }
+
+    func testAUserLineAfterTheLastAnswerKeepsTheThreadWarm() {
+        let lines = [json(["type": "assistant", "timestamp": stamp(-7200)]),
+                     json(["type": "user", "timestamp": stamp(-60)])]
+        let parsed = ThreadLauncher.parseTail(Data(lines.joined(separator: "\n").utf8))
+        XCTAssertEqual(parsed.lastActivityAt, now.addingTimeInterval(-60))
+        let decision = decide(["--resume", "X"], sessions: ["X": "A"],
+                              candidates: [candidate("A", 10, 10), candidate("B", 0, 0)], transcript: parsed)
+        XCTAssertEqual(decision.action, .stay)
+    }
+
+    func testAnAnswerBeyondAHugeToolResultIsFoundBySearchingFurtherBack() throws {
+        try FileManager.default.createDirectory(at: projects.appendingPathComponent("p"), withIntermediateDirectories: true)
+        let huge = String(repeating: "x", count: 2 * 1024 * 1024)
+        let lines = [json(["type": "assistant", "timestamp": stamp(-30)]),
+                     json(["type": "attachment", "content": huge])]
+        try Data(lines.joined(separator: "\n").utf8).write(to: projects.appendingPathComponent("p").appendingPathComponent("big.jsonl"))
+        XCTAssertEqual(ThreadLauncher.transcript(ofConversation: "big").lastAssistantAt, now.addingTimeInterval(-30))
+    }
+
+    // MARK: Launching rules
+
+    func testOnlyConversationsChooseAnAccount() {
+        XCTAssertFalse(ThreadLauncher.startsConversation(["--version"]))
+        XCTAssertFalse(ThreadLauncher.startsConversation(["auth", "status"]))
+        XCTAssertFalse(ThreadLauncher.startsConversation(["mcp", "list"]))
+        XCTAssertTrue(ThreadLauncher.startsConversation(["--resume", "X"]))
+        XCTAssertTrue(ThreadLauncher.startsConversation(["--session-id=Y"]))
+        XCTAssertTrue(ThreadLauncher.startsConversation(["-p", "hi"]))
+        XCTAssertTrue(ThreadLauncher.startsConversation(["--output-format", "stream-json"]))
+    }
+
+    func testTheUsersOwnAuthOrProfileIsLeftAlone() {
+        XCTAssertNil(ThreadLauncher.userAuthOverride(["PATH": "/bin", "ANTHROPIC_API_KEY": ""]))
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"] {
+            XCTAssertEqual(ThreadLauncher.userAuthOverride([key: "1"]), key)
+        }
+        XCTAssertNil(ThreadLauncher.userAuthOverride(["CLAUDE_CODE_USE_BEDROCK": "0"]))
+    }
+
     // MARK: The wrapper script
+
+    private func runScript(_ script: String, home: URL, path: String) throws -> (status: Int32, out: String) {
+        let file = home.appendingPathComponent("wrapper")
+        try Data(script.utf8).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        let process = Process()
+        process.executableURL = file
+        process.arguments = ["--version"]
+        process.environment = ["HOME": home.path, "PATH": path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        return (process.terminationStatus, out)
+    }
+
+    func testTheWrapperFallsBackToTheRealClaudeWhenLastdropIsGone() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-tl-home-\(UUID().uuidString)")
+        let bin = home.appendingPathComponent(".local/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let script = ThreadLauncher.wrapperScript(executable: "/nonexistent/lastdrop")
+        // No claude anywhere: an error, 127.
+        XCTAssertEqual(try runScript(script, home: home, path: "/usr/bin:/bin").status, 127)
+        // A claude in ~/.local/bin runs with T3's arguments.
+        let claude = bin.appendingPathComponent("claude")
+        try Data("#!/bin/sh\necho fake-claude \"$@\"\n".utf8).write(to: claude)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        let ran = try runScript(script, home: home, path: "/usr/bin:/bin")
+        XCTAssertEqual(ran.status, 0)
+        XCTAssertEqual(ran.out, "fake-claude --version\n")
+    }
 
     func testTheWrapperScriptExecsTheLauncherAndIsRewrittenOnlyWhenItDiffers() throws {
         let bin = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-tl-bin-\(UUID().uuidString)")
@@ -262,7 +396,7 @@ final class ThreadLauncherTests: LastDropTestCase {
         ThreadLauncher.writeWrapper(executable: "/apps/lastdrop it's/App")
         let wrapper = ThreadLauncher.wrapperPath
         let script = try String(contentsOf: wrapper, encoding: .utf8)
-        XCTAssertEqual(script, "#!/bin/sh\nexec '/apps/lastdrop it'\\''s/App' --claude-thread \"$@\"\n")
+        XCTAssertTrue(script.contains("if [ -x '/apps/lastdrop it'\\''s/App' ]; then exec '/apps/lastdrop it'\\''s/App' --claude-thread \"$@\"; fi"))
         let mode = try FileManager.default.attributesOfItem(atPath: wrapper.path)[.posixPermissions] as? Int
         XCTAssertEqual(mode, 0o755)
         // An unchanged wrapper keeps its file: T3 may run it while the app rewrites it.
