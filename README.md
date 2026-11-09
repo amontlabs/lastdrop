@@ -97,8 +97,10 @@ what runs where.
 the account with the most room. A running thread stays on its account while its prompt cache is warm, and
 moves only when that costs nothing: its cache has expired, or it was just compacted. When its account runs
 out, lastdrop ends that thread's Claude between turns and notifies you, and your next message continues on
-another account. To turn it on, use the switch in **Settings → Agents → T3 Code threads** (or the T3 Code step in setup). It sets T3 Code's
-**Settings → Providers → Claude → Binary path**.
+another account. To turn it on, use the switch in **Settings → Agents → T3 Code threads**
+(or the T3 Code step in setup). It sets T3 Code's **Settings → Providers → Claude → Binary path** for you,
+asks before replacing a path you set yourself, and puts it back when you turn it off. The path is also there
+to copy by hand.
 
 **Save Claude usage.** Adds a prompt that encourages Claude to delegate implementation, exploration, reviews
 and research. **Edit…** shows it and lets you change it.
