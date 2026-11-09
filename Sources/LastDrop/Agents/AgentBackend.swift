@@ -45,6 +45,8 @@ struct AgentEvents: Sendable {
     /// A transcript entry: `["kind": "text", "text"]`, `["kind": "tool", "id", "summary", "input"]` or
     /// `["kind": "result", "id", "text", "isError"]`, long texts cut as `SubagentRunner.transcriptItem` cuts them.
     var item: @Sendable ([String: Any]) -> Void
+    /// A line for the agent's log only, such as why a command was allowed or refused.
+    var note: @Sendable (String) -> Void = { _ in }
 }
 
 /// Runs agents on one provider.

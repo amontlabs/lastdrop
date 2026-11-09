@@ -459,6 +459,7 @@ enum AntigravityBackend: AgentBackend {
 
         private func record(_ decision: Decision, cached: Bool) -> Decision {
             events.step(decision.step)
+            events.note(decision.allow ? decision.step : "Declined: " + (decision.declined ?? decision.step))
             lock.withLock {
                 if decision.allow { refusalsInARow = 0; return }
                 denials += 1

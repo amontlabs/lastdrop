@@ -400,7 +400,8 @@ enum AgentRun {
                     log(agentID, "Started \(attempt.name) on \(place) (\(model)): \(request.description ?? "")")
                 },
                 step: { step(agentID, $0) },
-                item: { item(agentID, $0) })
+                item: { item(agentID, $0) },
+                note: { log(agentID, "• " + $0) })
             var result = await backends(attempt.provider).run(job, events)
             anyStarted = anyStarted || launch.started
             last = result

@@ -30,6 +30,8 @@ struct PermissionRules: Sendable, Equatable {
         var files = [config + "/settings.json", "/Library/Application Support/ClaudeCode/managed-settings.json"]
         var roots = [cwd]
         if let root = gitRoot(cwd), root != cwd { roots.append(root) }
+        // In a linked worktree, the main checkout's untracked settings.local.json applies too.
+        if let main = mainCheckout(cwd), !roots.contains(main) { roots.append(main) }
         for root in roots { files += [root + "/.claude/settings.json", root + "/.claude/settings.local.json"] }
         var rules = PermissionRules()
         for file in files {
@@ -56,6 +58,15 @@ struct PermissionRules: Sendable, Equatable {
         let parameters = ["run_in_background", "timeout", "description", "dangerouslyDisableSandbox", "command"]
         if let colon = spec.firstIndex(of: ":"), parameters.contains(spec[..<colon].trimmingCharacters(in: .whitespaces)) { return nil }
         return spec.isEmpty ? nil : spec
+    }
+
+    /// The main checkout of a linked worktree, from its `.git` file ("gitdir: <main>/.git/worktrees/<name>").
+    private static func mainCheckout(_ directory: String) -> String? {
+        guard let root = gitRoot(directory),
+              let text = try? String(contentsOfFile: root + "/.git", encoding: .utf8),
+              let gitdir = text.split(separator: "\n").first(where: { $0.hasPrefix("gitdir: ") })?.dropFirst(8),
+              let range = gitdir.range(of: "/.git/worktrees/") else { return nil }
+        return String(gitdir[..<range.lowerBound])
     }
 
     private static func gitRoot(_ directory: String) -> String? {

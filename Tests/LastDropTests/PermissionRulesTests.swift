@@ -104,6 +104,11 @@ final class PermissionRulesTests: XCTestCase {
         XCTAssertEqual(rules.allow, ["git status", "npm test *"])
         XCTAssertEqual(rules.deny, ["rm *"])
         XCTAssertEqual(rules.ask, ["git push *"])
+        // An agent's worktree also reads the main checkout's untracked local settings.
+        let worktree = home.appendingPathComponent("repo/.claude/worktrees/agent-x")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        try "gitdir: \(home.path)/repo/.git/worktrees/agent-x\n".write(to: worktree.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(PermissionRules.load(cwd: worktree.path, environment: [:], home: home.path).ask, ["git push *"])
         // CLAUDE_CONFIG_DIR replaces ~/.claude for user settings.
         let other = PermissionRules.load(cwd: "/nonexistent", environment: ["CLAUDE_CONFIG_DIR": home.appendingPathComponent("repo/.claude").path], home: home.path)
         XCTAssertEqual(other.allow, [])
