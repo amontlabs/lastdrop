@@ -173,6 +173,10 @@ enum AntigravityBackend: AgentBackend {
                 return Decision(allow: true, step: "Allowed by your rule \(used.joined(separator: ", ")): \(action.label)")
             default: break
             }
+            // Claude Code's own read-only list: these never wait for the judge, in plan mode too.
+            if let names = ReadOnlyCommands.check(command) {
+                return Decision(allow: true, step: "Allowed as read-only (\(names.joined(separator: ", "))): \(action.label)")
+            }
         } else if policy == .readOnly, ["edit", "delete", "move"].contains(action.kind) {
             return Decision(allow: false, declined: "\(action.label) (read-only agent)", step: "Declined (read-only agent): \(action.label)")
         }
@@ -209,9 +213,10 @@ enum AntigravityBackend: AgentBackend {
         return what + " " + then
     }
 
-    /// The executable seam lets tests run a fake ACP agent; `judge` replaces the reviewer process.
+    /// The executable seam lets tests run a fake ACP agent; `judge` replaces the reviewer process, and `judgeModel`
+    /// the judge chosen in Settings → Agents.
     static func run(_ job: AgentJob, _ events: AgentEvents, executable: String,
-                    rules: PermissionRules? = nil,
+                    rules: PermissionRules? = nil, judgeModel: AgentJudge? = nil,
                     judge: (@Sendable (String) async -> CommandJudge.Verdict)? = nil) async -> SubagentRunner.Result {
         var directory = job.resume?.directory ?? job.cwd
         let policy = policy(job)
@@ -222,8 +227,10 @@ enum AntigravityBackend: AgentBackend {
         if state.context.requests.count > 10 { state.context.requests.removeFirst(state.context.requests.count - 10) }
         let rules = rules ?? PermissionRules.load(cwd: job.cwd)
         let judges = JudgeProcesses()
+        let judgeModel = judgeModel ?? AgentCatalog.load().judge(.antigravity) ?? CommandJudge.defaultJudge
         let judge: @Sendable (String) async -> CommandJudge.Verdict = judge ?? { prompt in
-            await CommandJudge.judge(prompt, executable: executable, onProcess: { judges.add($0) }, onExit: { judges.remove($0) })
+            await CommandJudge.judge(prompt, executable: executable, with: judgeModel,
+                                     onProcess: { judges.add($0) }, onExit: { judges.remove($0) })
         }
         let policyText: @Sendable () throws -> String = { try CommandJudge.policy(readOnly: policy == .readOnly) }
         var client: ACPClient?
@@ -276,6 +283,9 @@ enum AntigravityBackend: AgentBackend {
             }
             state.sessionID = sessionID
             let offered = parseModels(acp: session)
+            // A judge the account can't run refuses what it would judge, with that reason: never another model.
+            state.judgeProblem = CommandJudge.problem(judgeModel, offered: offered)
+            if let problem = state.judgeProblem { events.note("Command judge: " + problem) }
             let model = job.resume?.model ?? job.definition.model
             let selected = try slug(model: model, effort: job.resume?.effort ?? job.effort, models: offered)
             do { _ = try await connection.call("session/set_model", ["sessionId": sessionID, "modelId": selected]) } catch {
@@ -360,6 +370,12 @@ enum AntigravityBackend: AgentBackend {
         var model: String?
         var sessionID: String?
         var context = CommandJudge.Context()
+        /// Why the chosen judge can't run on this account; set once the session lists its models.
+        var judgeProblem: String? {
+            get { lock.withLock { _judgeProblem } }
+            set { lock.withLock { _judgeProblem = newValue } }
+        }
+        private var _judgeProblem: String?
 
         private let lock = NSLock()
         private var tools: [String: String] = [:]          // toolCallId → name
@@ -449,14 +465,18 @@ enum AntigravityBackend: AgentBackend {
 
         func decide(_ action: Action, policy: Policy, rules: PermissionRules, policyText: () throws -> String,
                     judge: (String) async -> CommandJudge.Verdict) async -> Decision {
+            let problem = judgeProblem
             let input = (try? JSONSerialization.data(withJSONObject: action.input.object, options: [.sortedKeys]))
                 .map { String(decoding: $0, as: UTF8.self) } ?? action.label
             let key = action.tool + "\u{1}" + input
             if let cached = lock.withLock({ cache[key] }) { return record(cached, cached: true) }
-            if action.command != nil, policy != .bypass { events.step("Checking: \(action.label)") }
+            if let command = action.command, policy != .bypass, ReadOnlyCommands.check(command) == nil { events.step("Checking: \(action.label)") }
             let context = lock.withLock { self.context }
             let decision = await AntigravityBackend.decide(action, policy: policy, rules: rules, context: context,
-                                                           policyText: policyText, judge: judge)
+                                                           policyText: policyText, judge: { prompt in
+                if let problem { return CommandJudge.Verdict(allow: false, failure: problem) }
+                return await judge(prompt)
+            })
             lock.withLock { cache[key] = decision }
             return record(decision, cached: false)
         }

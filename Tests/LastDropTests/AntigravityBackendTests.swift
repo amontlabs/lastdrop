@@ -188,17 +188,41 @@ final class AntigravityBackendTests: XCTestCase {
         XCTAssertFalse(third.contains("fake output"), third)
     }
 
+    func testReadOnlyCommandsSkipTheJudgeAndAnUnavailableJudgeRefusesTheRest() async throws {
+        let folder = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let executable = try fakeAgent(in: folder, turns: [
+            [["command": "git status && ls -la"], ["command": "swift build"]],
+            [["text": "Looked around."]],
+        ])
+        var job = job(directory: folder.path)
+        job.permissionMode = "auto"
+        let log = Log()
+        let prompts = Prompts()
+        // The fake session offers only gemini-3.8-flash: this judge can't run, and nothing replaces it.
+        let result = await AntigravityBackend.run(job, log.events, executable: executable, rules: PermissionRules(),
+                                                  judgeModel: AgentJudge(model: "gemini-9-gone", effort: "low"), judge: { prompt in
+            prompts.add(prompt); return .init(allow: true)
+        })
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(log.steps.contains("Allowed as read-only (git status, ls): git status && ls -la"), "\(log.steps)")
+        XCTAssertFalse(log.steps.contains("Checking: git status && ls -la"), "\(log.steps)")
+        XCTAssertEqual(prompts.all.count, 0)
+        XCTAssertEqual(result.declined.count, 1)
+        XCTAssertTrue(result.declined[0].contains("the command judge gemini-9-gone · low is not available"), result.declined[0])
+    }
+
     func testAReadOnlyAgentRefusesEditsAndTellsTheJudge() async throws {
         let folder = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
         let executable = try fakeAgent(in: folder, turns: [
             [["tool": "write_file", "kind": "edit", "ask": true, "input": ["Path": "/w/a.txt", "Content": "x"]]],
-            [["command": "git status"], ["text": "Plan: nothing to change."]],
+            [["command": "swift build"], ["text": "Plan: nothing to change."]],
         ])
         var job = job(directory: folder.path)
         job.role = "Plan"
         var rules = PermissionRules()
-        rules.add(["allow": ["Bash(git status)"]])
+        rules.add(["allow": ["Bash(swift build)"]])
         let prompts = Prompts()
         let result = await AntigravityBackend.run(job, Log().events, executable: executable, rules: rules, judge: { prompt in
             prompts.add(prompt); return .init(allow: true, risk: "low", authorization: "medium", rationale: "Reads.")

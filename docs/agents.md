@@ -49,7 +49,8 @@ tells the plugin the app speaks this design.
 ## Changing the list from an agent
 
 `lastdrop --agents` changes the list without Settings: `list`, `models <provider>`, `set` (JSON on stdin, added or
-replaced by name), `remove <name>` and `saving on|off`, with `--help` for the details. It prints JSON, or a reason on
+replaced by name), `remove <name>`, `saving on|off` and `judge <provider> <model> [effort]` (or `judge <provider>
+default`; see How commands are checked), with `--help` for the details. It prints JSON, or a reason on
 stderr with exit code 1. `set` makes Settings' checks and also refuses a model or effort the provider's live list
 doesn't have. A provider whose list fails leaves a warning, and its ids are taken as they are, as Settings lets you
 type them. Sign-ins and API keys stay in Settings.
@@ -251,9 +252,9 @@ The session's mode, as each provider runs it. A headless run can't ask anyone, s
 
 | Session mode | Claude accounts, Z.ai, OpenRouter | Codex | Antigravity |
 | --- | --- | --- | --- |
-| `default`, `auto` | `auto` | workspace-write + `auto_review` | accept-edits; commands: rules, then judge |
-| `acceptEdits` | `acceptEdits` | workspace-write | accept-edits; commands: rules, then judge |
-| `plan` (and Explore/Plan roles) | `plan` | read-only | plan; edits refused; commands: deny rules, then judge (read-only) |
+| `default`, `auto` | `auto` | workspace-write + `auto_review` | accept-edits; commands: rules, read-only list, then judge |
+| `acceptEdits` | `acceptEdits` | workspace-write | accept-edits; commands: rules, read-only list, then judge |
+| `plan` (and Explore/Plan roles) | `plan` | read-only | plan; edits refused; commands: deny rules, read-only list, then judge (read-only) |
 | `bypassPermissions` | `bypassPermissions` | full access | accept-edits; everything allowed |
 
 On Antigravity `acceptEdits` works like `auto`: Claude Code would prompt for commands there, and nobody can be
@@ -265,8 +266,9 @@ Each provider judges its own agents. Nobody is asked and nothing is bypassed.
 
 - **Claude accounts:** Claude Code's auto mode, with the user's rules.
 - **Z.ai and OpenRouter:** Claude Code's client-side auto mode check (`CLAUDE_CODE_AUTO_MODE_SERVER=0`), with
-  Anthropic's instructions and the user's rules, judged through the same endpoint by `glm-5.3` on Z.ai and the
-  agent's own model on OpenRouter (`CLAUDE_CODE_AUTO_MODE_MODEL`). See Limits.
+  Anthropic's instructions and the user's rules, judged through the same endpoint by the provider's command judge
+  (`CLAUDE_CODE_AUTO_MODE_MODEL`): `glm-5.3` on Z.ai and the agent's own model on OpenRouter unless the user chose
+  another. Claude Code's own read-only commands (`ls`, `git status`, …) never reach this check. See Limits.
 - **Codex:** its own `auto_review` reviewer. Requests it would still ask a person about are declined and reported.
 - **Antigravity:** `agy acp` sends each action that needs approval as `session/request_permission` before it
   runs. lastdrop answers:
@@ -278,9 +280,21 @@ Each provider judges its own agents. Nobody is asked and nothing is bypassed.
      compound command, even inside `$(…)` or a loop. Allow needs every part covered and stays conservative: a
      substitution, subshell, redirect to a file, control flow, a leading `VAR=` or an exec wrapper is never
      allowed by a pattern and goes to the judge.
-  2. Otherwise the judge: Codex's open-source reviewer policy (`codex-rs/prompts/templates/guardian`, Apache 2.0,
-     shipped in `Resources/CodexGuardian` with its licence and NOTICE), asked of `gemini-3.8-flash` at low effort
-     through the user's own Antigravity plan: `agy -p … --mode plan --disable-slash-commands --print-timeout 120s`
+  2. Claude Code's read-only commands (`ReadOnlyCommands`), in every mode but bypass, plan included: allowed
+     without the judge, logged as `Allowed as read-only (git status, ls): …`. The list was read from Claude Code
+     2.1.319 (the commands it runs without any check) and checked black-box with its `dontAsk` mode (research I §9);
+     lastdrop implements it with its own rules and flag tables. Plain readers (`ls`, `cat`, `head`, `wc`, `diff`,
+     `stat`, `du`, …) take any arguments; `pwd`, `whoami` none; `echo`, `printf`, `cd`, `find` (no `-exec`,
+     `-delete`, `-fprint…`), `jq` (no `-f`, `env`, `import`), `test` and `uniq` (flags only) have special rules;
+     `git` (status, diff, log, show, blame, rev-parse, branch/tag listing, config `--get`, …), `gh` views,
+     `docker logs/inspect`, `grep`, `rg`, `sed` (printing scripts only, no `-i`), `sort` (no `-o`), `xargs` (a
+     read-only target), `fd` (no `-x`), `tree` (no `-o`), `date` (no setting) and a few more take only listed
+     flags. Any `$`, backtick, redirect to a file (`2>&1` and `>/dev/null` are fine), subshell, brace, background
+     `&`, control flow or leading `VAR=` makes the command not read-only; a compound command is read-only only
+     when every part is. Unknown flags go to the judge: the list errs toward asking.
+  3. Otherwise the judge: Codex's open-source reviewer policy (`codex-rs/prompts/templates/guardian`, Apache 2.0,
+     shipped in `Resources/CodexGuardian` with its licence and NOTICE), asked of the command judge (default
+     `gemini-3.8-flash` at low effort) through the user's own Antigravity plan: `agy -p … --mode plan --disable-slash-commands --print-timeout 120s`
      from an empty folder. It reads the agent's role and task (the main agent's prompt, and follow-ups) as
      trusted, the agent's earlier tool calls (inputs only), and the planned action with its folder. Tool outputs
      and the agent's own words are left out. It answers `{risk_level, user_authorization, outcome, rationale}`;
@@ -290,6 +304,18 @@ Each provider judges its own agents. Nobody is asked and nothing is bypassed.
   refusal is final, and to name in its report what it needed and why. `agy` ends its turn at a refusal, so
   lastdrop continues it with the reason (up to four times; the last asks for the report). Each decision is a live
   step and a `•` line in the agent's log. A check takes about 5 s (up to about 20 s).
+
+**The command judge** is a per-provider setting in Settings → Agents (Command judges) and `lastdrop --agents judge`,
+stored in the catalog as `judges: {"zai": {"model": "glm-5.4"}, "antigravity": {"model": …, "effort": …}}`. Z.ai takes
+a model from its list (default `glm-5.3`), OpenRouter a model id from its live list (default: each agent's own
+model), Antigravity a model and effort from `agy`'s list (default `gemini-3.8-flash`, low). Both places check the
+choice against the provider's live list like any agent model. A strong model is the default on purpose: on
+2026-11-09 `glm-5.3-flash` allowed an SSH-key upload that `glm-5.3` blocked. A judge the provider doesn't serve is
+never replaced: on Antigravity every command that needs the judge is refused with "the command judge … is not
+available on this Antigravity account" (checked against the session's model list at start, and on `agy`'s own
+error); on Z.ai and OpenRouter Claude Code's check fails with its own error. Older catalogs decode to the defaults,
+an entry this version can't read is skipped, and the key is left out while empty. An older app rewriting the catalog
+drops `judges` (its encoder doesn't know it), which puts the defaults back.
 
 ## Limits
 

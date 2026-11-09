@@ -82,3 +82,37 @@ final class CommandJudgeTests: XCTestCase {
         XCTAssertEqual(missing.failure, "could not start agy")
     }
 }
+
+final class CommandJudgeSettingTests: XCTestCase {
+    func testTheJudgeRunsTheConfiguredModelAndEffort() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-judge-setting-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let args = folder.appendingPathComponent("args").path
+        let path = folder.appendingPathComponent("agy").path
+        try ("#!/bin/zsh\nprintf '%s\\n' \"$@\" > \(args); print '{\"outcome\":\"allow\",\"risk_level\":\"low\",\"user_authorization\":\"high\",\"rationale\":\"ok\"}'")
+            .write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+        _ = await CommandJudge.judge("P", executable: path, with: AgentJudge(model: "gemini-4-argon", effort: "high"))
+        var lines = try String(contentsOfFile: args, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(Array(lines[4...7]), ["--model", "gemini-4-argon", "--effort", "high"])
+        _ = await CommandJudge.judge("P", executable: path, with: AgentJudge(model: "gemini-4-argon"))
+        lines = try String(contentsOfFile: args, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines[4...6], ["--model", "gemini-4-argon", "--disable-slash-commands"], "no effort, no --effort")
+        // A model agy won't run is named as unavailable, never replaced.
+        try "#!/bin/zsh\nprint -u2 'Unknown model ID: nope'; exit 1".write(toFile: path, atomically: true, encoding: .utf8)
+        let missing = await CommandJudge.judge("P", executable: path, with: AgentJudge(model: "nope", effort: "low"))
+        XCTAssertFalse(missing.allow)
+        XCTAssertTrue(missing.failure?.hasPrefix("the command judge nope · low is not available") ?? false, missing.summary)
+    }
+
+    func testTheJudgeIsCheckedAgainstTheSessionsModels() {
+        let offered = [AgentModel(id: "gemini-3.8-flash", name: "Flash", efforts: ["low", "high"], defaultEffort: nil)]
+        XCTAssertNil(CommandJudge.problem(AgentJudge(model: "gemini-3.8-flash", effort: "low"), offered: offered))
+        XCTAssertNil(CommandJudge.problem(AgentJudge(model: "gemini-3.8-flash"), offered: offered))
+        XCTAssertNotNil(CommandJudge.problem(AgentJudge(model: "gemini-3.8-flash", effort: "max"), offered: offered))
+        XCTAssertNotNil(CommandJudge.problem(AgentJudge(model: "gone"), offered: offered))
+        XCTAssertNil(CommandJudge.problem(AgentJudge(model: "gone"), offered: []), "an empty list can't say no")
+        XCTAssertEqual(CommandJudge.defaultJudge, AgentJudge(model: "gemini-3.8-flash", effort: "low"))
+    }
+}

@@ -12,8 +12,16 @@ enum AgentsCommand {
     lastdrop --agents set                   Add an agent, or replace the one with its name, from JSON on stdin
     lastdrop --agents remove <name>         Remove an agent
     lastdrop --agents saving on|off         Save Claude usage: ask Claude to delegate to these agents first
+    lastdrop --agents judge <provider> <model> [effort]
+                                            The model that checks the provider's agents' commands
+    lastdrop --agents judge <provider> default
+                                            Back to the default judge
 
     Providers: \(AgentProvider.allCases.map(\.rawValue).joined(separator: ", "))
+
+    Judges: zai (default glm-5.3), openrouter (default: each agent's own model), antigravity (default
+    gemini-3.8-flash low; the only one that takes an effort). A weak judge lets risky commands through.
+    A judge the provider doesn't serve isn't replaced: the agents' checked commands fail with that reason.
 
     set reads this, with models in the order they're tried (effort and enabled are optional):
     {
@@ -40,6 +48,29 @@ enum AgentsCommand {
     private struct Listing: Encodable {
         var agents: [Entry]
         var saveClaude: Bool
+        var judges: [String: Judge]
+    }
+
+    /// A provider's command judge as `list` and `judge` print it. No model means each agent's own model.
+    private struct Judge: Encodable {
+        var model: String?
+        var effort: String?
+        var isDefault: Bool
+
+        private enum CodingKeys: String, CodingKey { case model, effort, isDefault = "default" }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(model ?? "the agent's own model", forKey: .model)
+            try c.encodeIfPresent(effort, forKey: .effort)
+            try c.encode(isDefault, forKey: .isDefault)
+        }
+    }
+
+    private struct JudgeSaved: Encodable {
+        var provider: String
+        var judge: Judge
+        var warnings: [String]
     }
 
     private struct Saved: Encodable {
@@ -80,7 +111,7 @@ enum AgentsCommand {
             return help
         case ("list", 1):
             let catalog = AgentCatalog.load(from: url)
-            return try text(Listing(agents: catalog.agents.map(entry), saveClaude: catalog.saveClaude))
+            return try text(Listing(agents: catalog.agents.map(entry), saveClaude: catalog.saveClaude, judges: judges(catalog)))
         case ("models", 2):
             return try text(try await models(provider(args[1])))
         case ("set", 1):
@@ -94,9 +125,45 @@ enum AgentsCommand {
         case ("saving", 2) where ["on", "off"].contains(args[1]):
             try change(url) { $0.saveClaude = args[1] == "on" }
             return try text(Saving(saveClaude: args[1] == "on"))
+        case ("judge", 3), ("judge", 4):
+            return try await judge(provider(args[1]), args[2], effort: args.count == 4 ? args[3] : nil, models: models, url: url)
         default:
             throw Failure("Unknown command: \(args.joined(separator: " ")). See --agents --help.")
         }
+    }
+
+    private static func judges(_ catalog: AgentCatalog) -> [String: Judge] {
+        Dictionary(uniqueKeysWithValues: AgentProvider.judged.map { provider in
+            let judge = catalog.judge(provider)
+            return (provider.rawValue, Judge(model: judge?.model, effort: judge?.effort, isDefault: catalog.judges[provider] == nil))
+        })
+    }
+
+    /// Sets or resets a provider's judge, checked against the provider's live list as `set` checks models.
+    private static func judge(_ provider: AgentProvider, _ model: String, effort: String?,
+                              models: (AgentProvider) async throws -> [AgentModel], url: URL) async throws -> String {
+        guard AgentProvider.judged.contains(provider) else {
+            throw Failure(AgentCatalog.problem(judge: AgentJudge(model: model), for: provider) ?? "No judge for \(provider.displayName).")
+        }
+        var warnings: [String] = []
+        let chosen: AgentJudge?
+        if model == "default" {
+            guard effort == nil else { throw Failure("judge \(provider.rawValue) default takes no effort.") }
+            chosen = nil
+        } else {
+            let judge = AgentJudge(model: model, effort: effort)
+            if let problem = AgentCatalog.problem(judge: judge, for: provider) { throw Failure(problem) }
+            warnings = try await check([AgentFallback(provider: provider, model: model, effort: effort)], models: models)
+            chosen = judge
+        }
+        var saved = AgentCatalog()
+        try change(url) { catalog in
+            catalog.judges[provider] = chosen
+            saved = catalog
+        }
+        let judge = saved.judge(provider)
+        return try text(JudgeSaved(provider: provider.rawValue,
+                                   judge: Judge(model: judge?.model, effort: judge?.effort, isDefault: chosen == nil), warnings: warnings))
     }
 
     private static func set(_ data: Data, models: (AgentProvider) async throws -> [AgentModel], url: URL) async throws -> String {

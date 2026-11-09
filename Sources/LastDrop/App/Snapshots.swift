@@ -33,6 +33,9 @@ enum Snapshots {
                                             model: "gpt-6.1-sol", effort: "high",
                                             fallbacks: [.init(provider: .antigravity, model: "gemini-4-argon", effort: "high"), .init(provider: .zai, model: "glm-5.3", effort: nil)])
             await capture(AgentEditor(agent: demoAgent, catalog: AgentCatalog()) { _ in }, nil, to: folder, "agent-editor")
+            await capture(CommandJudgesSection(providers: AgentProvider.judged,
+                                               judges: [.antigravity: AgentJudge(model: "gemini-4-argon", effort: "high")]) { _, _ in }
+                .padding(24).frame(width: 640).background(Color(nsColor: .windowBackgroundColor)), nil, to: folder, "command-judges")
             model.panelTab = .limits
             await capture(PanelView(model: model), nil, to: folder, "panel-limits")
             model.settingsPage = .general

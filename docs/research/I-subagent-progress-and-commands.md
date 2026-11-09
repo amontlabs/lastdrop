@@ -184,3 +184,96 @@ auto mode):
 - Gemini refused on its own, before any check, to upload an SSH key, a `gh` hosts file or `env`, to `dd` a disk,
   and to run an installer a README told it to. So these never reached the judge; the judge denied the README
   installer and the `env` upload offline.
+
+## 9. Claude Code's read-only commands skip Antigravity's judge; the judge is a setting (2026-11-09)
+
+Antigravity waited 5–20 s for the judge even on `ls` or `git status`. Claude Code runs a fixed set of read-only
+commands without any check, and lastdrop now does the same for Antigravity before calling the judge (in plan mode
+too). Z.ai and OpenRouter need nothing: Claude Code on the Z.ai profile ran `ls -la`, `git status` and `wc -l` with
+no action sent to its check.
+
+**Where the list comes from.** With the user's permission the parent session read the list from the installed
+Claude Code 2.1.319 bundle and summarized it: plain readers taking any arguments (`cat`, `head`, `tail`, `wc`,
+`stat`, `diff`, `du`, `df`, `cut`, `tr`, `column`, `readlink`, `seq`, …, `docker ps`, `docker images`); special rules
+for `pwd`/`whoami`/`alias` (no arguments), a few exact commands (`node --version`, `python3 --version`, …), `echo`,
+`printf`, `ls`, `cd` (one argument), `find` (no `-exec`/`-execdir`/`-ok`/`-delete`/`-fprint…`/`-fls`), `history`,
+`arch`, `ifconfig`, `uniq` (flags only), `jq` (no `-f`/`-L`/`--rawfile`/`--slurpfile`, no `env`/`import`), `test`;
+allowed-flag tables for `git` read subcommands, `gh` views, `docker logs/inspect`, `xargs`, `file`, `sed`
+(no `-i`, no `w`/`e`), `sort` (no `-o`), `grep`/`rg`, checksums, `tree`, `date`, `hostname`, `which`, `ps`, `lsof`,
+`pgrep`, `tput`, `fd`, `netstat`/`ss`; and whole-command rules: every part of a compound command must be
+read-only, and substitution, subshells, redirects to files (other than `2>&1`) and control flow never are.
+lastdrop's `ReadOnlyCommands` implements these rules in its own code. The per-command flag tables are lastdrop's own,
+written from each tool's manual and kept narrower: the raw tables couldn't be read in this session (auto mode
+refused reading the bundle regions), so a flag lastdrop doesn't list goes to the judge rather than being guessed.
+Deliberate differences: lastdrop refuses any `$` (Claude Code ran `echo $HOME`), `git -C`, and `printf` with
+`\x`/octal escapes; it accepts `2>/dev/null` and `>/dev/null` as harmless.
+
+**Black-box check.** Claude Code 2.1.319, `claude -p --permission-mode dontAsk --setting-sources project --settings
+'{"permissions":{"allow":[]}}' --output-format json --model haiku`, one fresh copy of a scratch git repo per probe
+(`--setting-sources project` rather than `user`, because the user's settings hold a `Bash(codex exec:*)` rule, hooks
+and plugins). `dontAsk` runs only what needs no approval and denies the rest; "denied" means the command came back
+in `permission_denials`. 50 of 51 agree with lastdrop's list; the one difference (`echo $HOME`) is lastdrop being
+stricter.
+
+| # | Command | Claude Code 2.1.319 (`dontAsk`) | lastdrop |
+| --- | --- | --- | --- |
+| 1 | `ls -la` | ran | read-only |
+| 2 | `cat a.txt` | ran | read-only |
+| 3 | `head -n 2 a.txt` | ran | read-only |
+| 4 | `wc -l a.txt` | ran | read-only |
+| 5 | `pwd` | ran | read-only |
+| 6 | `pwd -P` | denied | judge |
+| 7 | `du -sh .` | ran | read-only |
+| 8 | `diff a.txt b.txt` | ran | read-only |
+| 9 | `stat a.txt` | ran | read-only |
+| 10 | `echo hello` | ran | read-only |
+| 11 | `echo $HOME` | ran | judge |
+| 12 | `printf '%s\n' hi` | ran | read-only |
+| 13 | `find . -name '*.txt'` | ran | read-only |
+| 14 | `find . -name s.txt -exec cat {} \;` | denied | judge |
+| 15 | `find sub -name s.txt -delete` | denied | judge |
+| 16 | `cd sub` | ran | read-only |
+| 17 | `uniq a.txt` | denied | judge |
+| 18 | `uniq a.txt out.txt` | denied | judge |
+| 19 | `jq . c.json` | ran | read-only |
+| 20 | `test -f a.txt` | ran | read-only |
+| 21 | `git status` | ran | read-only |
+| 22 | `git log --oneline -3` | ran | read-only |
+| 23 | `git diff --stat` | ran | read-only |
+| 24 | `git branch` | ran | read-only |
+| 25 | `git branch -D foo` | denied | judge |
+| 26 | `git tag v1` | denied | judge |
+| 27 | `git config --get user.name` | ran | read-only |
+| 28 | `git -C . status` | denied | judge |
+| 29 | `git ls-remote` | ran | read-only |
+| 30 | `grep -n x a.txt` | ran | read-only |
+| 31 | `rg x` | ran | read-only |
+| 32 | `sort -rn a.txt` | ran | read-only |
+| 33 | `sort -o out.txt a.txt` | denied | judge |
+| 34 | `sed -n '1p' a.txt` | ran | read-only |
+| 35 | `sed -i '' 's/a/b/' a.txt` | denied | judge |
+| 36 | `sed -n '$p' a.txt` | denied | judge |
+| 37 | `xargs grep x` | ran | read-only |
+| 38 | `file a.txt` | ran | read-only |
+| 39 | `date` | ran | read-only |
+| 40 | `date 0101000030` | denied | judge |
+| 41 | `tree -o out.txt` | denied | judge |
+| 42 | `ls \| head -1` | ran | read-only |
+| 43 | `ls > out.txt` | denied | judge |
+| 44 | `cat $(echo a.txt)` | denied | judge |
+| 45 | `git status && ls` | ran | read-only |
+| 46 | `ls &` | denied | judge |
+| 47 | `FOO=1 ls` | denied | judge |
+| 48 | `timeout 5 ls` | ran | read-only |
+| 49 | `ls 2>&1` | ran | read-only |
+| 50 | `which git` | ran | read-only |
+| 51 | `env` | denied | judge |
+
+**The judge is a setting.** Settings → Agents → Command judges, and `lastdrop --agents judge <provider> <model>
+[effort]`, choose the judge per provider (Z.ai, OpenRouter, Antigravity); the defaults are unchanged. See
+`docs/agents.md`, How commands are checked.
+
+Live (dev build in a throwaway app layout, `claude -p --permission-mode auto`, agent `gemini` on
+`gemini-3.8-flash-low`, default judge): the agent log read `• Allowed as read-only (git status): git status` and
+`• Allowed as read-only (ls): ls`, each in about a second with no judge, then `• Allowed by the reviewer: python3 -c
+"print(6*7)"` about 8 s later. The report quoted the three real outputs.

@@ -55,6 +55,8 @@ struct EndpointProfile: Equatable, Sendable {
     var effort: String?
     /// The `Account.id` whose key the helper prints; nil for the provider's main account.
     var accountID: String?
+    /// The command judge the user chose for this provider in Settings; nil uses the provider's default.
+    var judge: AgentJudge? = nil
 
     static let modelVariables = ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
                                  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]
@@ -71,17 +73,18 @@ struct EndpointProfile: Equatable, Sendable {
                    "API_TIMEOUT_MS": "3000000"]
         for key in Self.modelVariables { env[key] = model }
         // Auto mode's server-side check never runs through these endpoints. Claude Code's own client-side check
-        // does, through the same endpoint: on by this switch, judged by the provider's strongest model.
+        // does, through the same endpoint: on by this switch, judged by the model chosen in Settings.
         env["CLAUDE_CODE_AUTO_MODE_SERVER"] = "0"
-        env["CLAUDE_CODE_AUTO_MODE_MODEL"] = Self.judge(provider, model: model)
+        env["CLAUDE_CODE_AUTO_MODE_MODEL"] = Self.judge(provider, model: model, setting: judge)
         return env
     }
 
-    /// The model that judges actions for auto mode: a strong one, since a small model lets risky actions through
-    /// (2026-11-09: `glm-5.3-flash` allowed an SSH-key upload that `glm-5.3` blocked). OpenRouter has no fixed
-    /// list, so the agent's own model judges there.
-    static func judge(_ provider: AgentProvider, model: String) -> String {
-        provider == .zai ? "glm-5.3" : model
+    /// The model that judges actions for auto mode: the user's choice, else the provider's default, a strong model
+    /// since a small one lets risky actions through (2026-11-09: `glm-5.3-flash` allowed an SSH-key upload that
+    /// `glm-5.3` blocked). OpenRouter has no fixed list, so by default the agent's own model judges there.
+    /// A judge the provider doesn't serve is never swapped for another: Claude Code's check fails and says so.
+    static func judge(_ provider: AgentProvider, model: String, setting: AgentJudge? = nil) -> String {
+        (setting ?? provider.defaultJudge)?.model ?? model
     }
 
     /// Session settings pin routing above file settings; project env must not switch the provider.
@@ -170,7 +173,7 @@ struct EndpointProfile: Equatable, Sendable {
                 return failure("OpenRouter agents take \(ClaudeBackend.efforts.joined(separator: ", ")) effort; received \(effort).", unavailable: true)
             }
             let profile = EndpointProfile(provider: provider, directory: directory(for: provider, account: account), model: model, effort: effort,
-                                          accountID: account.isMain ? nil : account.id)
+                                          accountID: account.isMain ? nil : account.id, judge: AgentCatalog.load().judges[provider])
             try profile.prepare()
             let request = SubagentRunner.Request(prompt: job.prompt, model: model, effort: effort,
                 worktree: job.resume == nil && job.worktree, permissionMode: AgentRun.mappedPermissionMode(job.permissionMode),
@@ -193,7 +196,7 @@ struct EndpointProfile: Equatable, Sendable {
         guard let model = entry.model else { return nil }
         let account = entry.accountID.flatMap { AccountsConfig.load().account($0) }
         let profile = EndpointProfile(provider: provider, directory: directory(for: provider, account: account), model: model, effort: entry.effort,
-                                      accountID: account.flatMap { $0.isMain ? nil : $0.id })
+                                      accountID: account.flatMap { $0.isMain ? nil : $0.id }, judge: AgentCatalog.load().judges[provider])
         guard (try? profile.prepare()) != nil else { return nil }
         return profile.terminal(entry)
     }

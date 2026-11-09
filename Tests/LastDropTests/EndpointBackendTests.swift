@@ -36,6 +36,17 @@ final class EndpointBackendTests: XCTestCase {
         XCTAssertTrue(flash.arguments.joined().contains("CLAUDE_CODE_AUTO_MODE_SERVER"))
     }
 
+    func testAutoModeUsesTheJudgeChosenInSettings() {
+        var zai = EndpointProfile(provider: .zai, directory: "/tmp/zai", model: "glm-5.3-flash", effort: nil)
+        zai.judge = AgentJudge(model: "glm-5.4")
+        XCTAssertEqual(zai.environment["CLAUDE_CODE_AUTO_MODE_MODEL"], "glm-5.4")
+        var routed = EndpointProfile(provider: .openrouter, directory: "/tmp/or", model: "provider/model", effort: nil)
+        routed.judge = AgentJudge(model: "other/strong")
+        XCTAssertEqual(routed.environment["CLAUDE_CODE_AUTO_MODE_MODEL"], "other/strong", "a fixed OpenRouter judge")
+        XCTAssertEqual(EndpointProfile.judge(.openrouter, model: "provider/model"), "provider/model")
+        XCTAssertEqual(EndpointProfile.judge(.zai, model: "glm-5.3-flash"), "glm-5.3")
+    }
+
     func testOpenRouterModelsRequireToolsAndDecodeReasoning() throws {
         let root: [String: Any] = ["data": [
             ["id": "plain", "supported_parameters": ["temperature"]],

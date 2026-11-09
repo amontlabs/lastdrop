@@ -6,8 +6,8 @@ import Foundation
 /// Like Codex's reviewer it sees the task (trusted), the agent's earlier tool calls (inputs only) and the planned
 /// action; tool outputs and the agent's own text are left out as untrusted. Anything but a clear answer denies.
 enum CommandJudge {
-    static let model = "gemini-3.8-flash"
-    static let effort = "low"
+    /// The judge when the user chose none in Settings → Agents.
+    static var defaultJudge: AgentJudge { AgentProvider.antigravity.defaultJudge! }
     /// `--print-timeout` for `agy`; the process is killed 30 s after it if it hasn't ended.
     static let timeout: TimeInterval = 120
 
@@ -85,6 +85,19 @@ enum CommandJudge {
             .replacingOccurrences(of: "{{ extra_policy }}", with: extra)
     }
 
+    /// Why no command can be judged: the chosen judge can't run. Commands that need the judge are refused with it.
+    static func unavailable(_ judge: AgentJudge) -> String {
+        "the command judge \(judge.summary) is not available on this Antigravity account; choose another in lastdrop's Settings → Agents"
+    }
+
+    /// The reason the judge can't run on an account offering `models`, else nil. An empty list can't say no.
+    static func problem(_ judge: AgentJudge, offered models: [AgentModel]) -> String? {
+        guard !models.isEmpty else { return nil }
+        guard let model = models.first(where: { $0.id == judge.model }) else { return unavailable(judge) }
+        if let effort = judge.effort, !model.efforts.isEmpty, !model.efforts.contains(effort) { return unavailable(judge) }
+        return nil
+    }
+
     struct Failure: LocalizedError {
         var errorDescription: String?
         init(_ message: String) { errorDescription = message }
@@ -135,9 +148,10 @@ enum CommandJudge {
                        authorization: object.string("user_authorization") ?? "", rationale: object.string("rationale") ?? "")
     }
 
-    /// Runs the judge. Every failure is a deny with its reason.
+    /// Runs the judge with `with`'s model and effort (no `--effort` when it has none). Every failure is a deny with
+    /// its reason; a model `agy` won't run is named as such, never swapped for another.
     /// `onProcess` gets the judge's pid when it starts and `onExit` once it has been reaped.
-    static func judge(_ prompt: String, executable: String, onProcess: @escaping @Sendable (Int32) -> Void = { _ in },
+    static func judge(_ prompt: String, executable: String, with judge: AgentJudge = defaultJudge, onProcess: @escaping @Sendable (Int32) -> Void = { _ in },
                       onExit: @escaping @Sendable (Int32) -> Void = { _ in }) async -> Verdict {
         let empty = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-judge-\(UUID().uuidString)")
         do { try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true) } catch {
@@ -146,8 +160,8 @@ enum CommandJudge {
         defer { try? FileManager.default.removeItem(at: empty) }
         let process = Process(), output = Pipe(), errors = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["-p", prompt, "--mode", "plan", "--model", model, "--effort", effort,
-                             "--disable-slash-commands", "--print-timeout", "\(Int(timeout))s"]
+        process.arguments = ["-p", prompt, "--mode", "plan", "--model", judge.model] + (judge.effort.map { ["--effort", $0] } ?? [])
+            + ["--disable-slash-commands", "--print-timeout", "\(Int(timeout))s"]
         process.currentDirectoryURL = empty
         var environment = ProcessInfo.processInfo.environment
         environment[AgentRun.nestedMarker] = "1"
@@ -170,6 +184,10 @@ enum CommandJudge {
             if process.terminationReason == .uncaughtSignal { verdict.failure = "timed out" }
             else if process.terminationStatus != 0 {
                 let detail = (diagnostics.isEmpty ? stdout : diagnostics).trimmingCharacters(in: .whitespacesAndNewlines).suffix(200)
+                if AntigravityBackend.modelUnavailable(String(detail)) {
+                    verdict.failure = unavailable(judge) + " (\(detail.replacingOccurrences(of: "\n", with: " ")))"
+                    return verdict
+                }
                 verdict.failure = "agy exited with status \(process.terminationStatus)" + (detail.isEmpty ? "" : " (\(detail.replacingOccurrences(of: "\n", with: " ")))")
             }
         }
