@@ -599,10 +599,15 @@ enum AntigravityBackend: AgentBackend {
             || lower.contains("upgrade your subscription"))
     }
 
-    /// A whole reply that is just a quota notice (short, so a real report that merely discusses quotas isn't taken for one).
+    /// A whole reply that is just a quota notice (short, and reading like one: a real report that merely
+    /// mentions quotas or rate limits in prose isn't taken for a notice).
     static func isLimitNotice(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.count <= 600 && mentionsLimit(trimmed)
+        guard trimmed.count <= 600 else { return false }
+        if trimmed.hasPrefix("⚠") { return true }
+        let lower = trimmed.lowercased()
+        let phrases = ["quota reached", "upgrade your subscription", "resets in", "usage limit reached"]
+        return phrases.contains(where: lower.contains) || (lower.contains("hit your") && lower.contains("limit"))
     }
 
     static func failure(_ text: String, directory: String, unavailable: Bool = false) -> SubagentRunner.Result {

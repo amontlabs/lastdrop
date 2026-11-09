@@ -344,6 +344,9 @@ final class ThreadLauncherTests: LastDropTestCase {
         XCTAssertTrue(ThreadLauncher.startsConversation(["--session-id=Y"]))
         XCTAssertTrue(ThreadLauncher.startsConversation(["-p", "hi"]))
         XCTAssertTrue(ThreadLauncher.startsConversation(["--output-format", "stream-json"]))
+        XCTAssertTrue(ThreadLauncher.startsConversation(["--output-format", "stream-json", "--input-format", "stream-json"]))
+        XCTAssertTrue(ThreadLauncher.startsConversation(["--output-format=stream-json"]))
+        XCTAssertFalse(ThreadLauncher.startsConversation(["mcp", "get", "stream-json-server"]))
     }
 
     func testTheUsersOwnAuthOrProfileIsLeftAlone() {

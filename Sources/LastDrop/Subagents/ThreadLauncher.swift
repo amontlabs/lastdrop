@@ -332,8 +332,14 @@ enum ThreadLauncher {
     /// run exactly as asked.
     static func startsConversation(_ args: [String]) -> Bool {
         let parsed = parse(args)
-        return parsed.resume != nil || parsed.sessionID != nil
-            || args.contains { $0 == "-p" || $0 == "--print" || $0.contains("stream-json") }
+        if parsed.resume != nil || parsed.sessionID != nil { return true }
+        if args.contains(where: { $0 == "-p" || $0 == "--print" }) { return true }
+        func streamJSON(_ name: String) -> Bool {
+            if let i = args.firstIndex(of: name), i + 1 < args.count { return args[i + 1] == "stream-json" }
+            if let i = args.firstIndex(where: { $0.hasPrefix(name + "=") }) { return String(args[i].dropFirst(name.count + 1)) == "stream-json" }
+            return false
+        }
+        return streamJSON("--output-format") || streamJSON("--input-format")
     }
 
     /// How long all the usage readings together may take before claude runs as asked.

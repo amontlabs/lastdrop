@@ -375,7 +375,11 @@ final class AntigravityBackendTests: LastDropTestCase {
         XCTAssertTrue(result.limitReached, result.text)
         XCTAssertTrue(result.failedToStart, "no work was done, so the chain moves on")
         XCTAssertTrue(AntigravityBackend.mentionsLimit(notice))
+        XCTAssertTrue(AntigravityBackend.isLimitNotice(notice))
         XCTAssertFalse(AntigravityBackend.isLimitNotice(String(repeating: "Notes on quota reached in the API docs. ", count: 30)))
+        // A real report that merely mentions a limit in prose is no notice.
+        XCTAssertFalse(AntigravityBackend.isLimitNotice("Fixed the rate limit handling in the client."))
+        XCTAssertFalse(AntigravityBackend.isLimitNotice("Fixed issue with resource_exhausted error when quota exceeded on batch jobs"))
     }
 
     func testWorktreeIsNamedLikeClaudeCodesAndUsedByTheChild() async throws {
