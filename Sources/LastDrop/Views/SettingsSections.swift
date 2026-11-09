@@ -275,7 +275,7 @@ struct AccountLimitsSection: View {
     private func threshold(_ title: String, _ key: KeyPath<AccountsConfig, Double>, set: @escaping (Double) -> Void) -> some View {
         Picker(title, selection: Binding(get: { model.accountsConfig[keyPath: key] }, set: set)) {
             // Stored as the share used, shown as what's left.
-            ForEach([0.5, 0.75, 0.9, 0.95], id: \.self) { Text("\(Int(((1 - $0) * 100).rounded()))% left").tag($0) }
+            ForEach([0.5, 0.75, 0.9, 0.95, 1], id: \.self) { Text("\(Int(((1 - $0) * 100).rounded()))% left").tag($0) }
         }
         .labelsHidden()
         .fixedSize()
