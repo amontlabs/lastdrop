@@ -365,6 +365,19 @@ final class AntigravityBackendTests: LastDropTestCase {
         XCTAssertTrue(result.failedToStart)
     }
 
+    func testAQuotaNoticeAsTheReplyIsALimitNotAReport() async throws {
+        let notice = "⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 25h54m55s."
+        let folder = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let executable = try fakeAgent(in: folder, turns: [[["text": notice]]])
+        let result = await AntigravityBackend.run(job(directory: folder.path), Log().events, executable: executable, rules: PermissionRules(), judgeModel: CommandJudge.defaultJudge)
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.limitReached, result.text)
+        XCTAssertTrue(result.failedToStart, "no work was done, so the chain moves on")
+        XCTAssertTrue(AntigravityBackend.mentionsLimit(notice))
+        XCTAssertFalse(AntigravityBackend.isLimitNotice(String(repeating: "Notes on quota reached in the API docs. ", count: 30)))
+    }
+
     func testWorktreeIsNamedLikeClaudeCodesAndUsedByTheChild() async throws {
         let folder = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
