@@ -54,12 +54,15 @@ enum T3Settings {
     }
 
     /// The parsed file; an empty one when there is none (T3 hasn't saved a setting yet), nil when it is broken.
-    private static func read() -> [String: Any]? {
+    private static func read() -> [String: Any]? { snapshot().root }
+
+    /// The file's bytes (nil when there is none) with what they parse to (nil when broken).
+    private static func snapshot() -> (data: Data?, root: [String: Any]?) {
         guard let data = try? Data(contentsOf: settingsFile.resolvingSymlinksInPath()) else {
-            return FileManager.default.fileExists(atPath: settingsFile.path) ? nil : [:]
+            return (nil, FileManager.default.fileExists(atPath: settingsFile.path) ? nil : [:])
         }
-        if data.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x09 || $0 == 0x0D }) { return [:] }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        if data.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x09 || $0 == 0x0D }) { return (data, [:]) }
+        return (data, (try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
     }
 
     private static func binaryPath(in root: [String: Any]) -> String? {
@@ -76,26 +79,31 @@ enum T3Settings {
     /// with `replacingElsewhere`; the wrapper script is written first, so T3 never points at a file that isn't there.
     static func enable(replacingElsewhere: Bool = false, wrapper: String = ThreadLauncher.wrapperPath.path) throws {
         guard isInstalled else { throw Failure.notInstalled }
-        guard var root = read() else { throw Failure.unreadable }
-        let current = binaryPath(in: root).flatMap { $0.isEmpty ? nil : $0 }
-        if current == wrapper { return }
-        if let current, !replacingElsewhere { throw Failure.elsewhere(current) }
-        ThreadLauncher.writeWrapper()
-        // The backup comes first: a crash between the two writes must lose nothing.
-        guard saveBackup(previous: current) else { throw Failure.cannotWrite }
-        setBinaryPath(wrapper, in: &root)
-        try write(root)
+        var wrapperWritten = false
+        try edit { root in
+            let current = binaryPath(in: root).flatMap { $0.isEmpty ? nil : $0 }
+            if current == wrapper { return false }
+            if let current, !replacingElsewhere { throw Failure.elsewhere(current) }
+            if !wrapperWritten { ThreadLauncher.writeWrapper(); wrapperWritten = true }
+            // The backup comes first: a crash between the two writes must lose nothing.
+            guard saveBackup(previous: current) else { throw Failure.cannotWrite }
+            setBinaryPath(wrapper, in: &root)
+            return true
+        }
     }
 
     /// Puts back what T3 had before (nothing, or the user's own path). Does nothing when T3's setting no longer
     /// points at the wrapper: it isn't ours to remove then.
     static func disable(wrapper: String = ThreadLauncher.wrapperPath.path) throws {
         guard isInstalled else { return }
-        guard var root = read() else { throw Failure.unreadable }
-        guard binaryPath(in: root) == wrapper else { return }
-        setBinaryPath(loadBackup(), in: &root)
-        try write(root)
-        try? FileManager.default.removeItem(at: backupFile)
+        var changed = false
+        try edit { root in
+            guard binaryPath(in: root) == wrapper else { return false }
+            setBinaryPath(loadBackup(), in: &root)
+            changed = true
+            return true
+        }
+        if changed { try? FileManager.default.removeItem(at: backupFile) }
     }
 
     /// `nil` removes the key, and the instance when that leaves nothing but its driver (as T3's own file has it).
@@ -109,16 +117,66 @@ enum T3Settings {
         if instances.isEmpty { root.removeValue(forKey: "providerInstances") } else { root["providerInstances"] = instances }
     }
 
-    /// Replaces the file in one atomic rename, following a symlink to where the file really is.
+    /// Reads, lets `change` edit the parsed file (it returns false to leave it alone), and writes it. T3 may save
+    /// its own settings in between, so the file is read again right before the replace: if it changed, the edit is
+    /// done again on the new content, once more; a third change fails rather than overwrite T3's.
+    private static func edit(_ change: (inout [String: Any]) throws -> Bool) throws {
+        for attempt in 0..<3 {
+            let before = snapshot()
+            guard var root = before.root else { throw Failure.unreadable }
+            guard try change(&root) else { return }
+            if snapshot().data == before.data {
+                try write(root)
+                return
+            }
+            if attempt == 2 { throw Failure.cannotWrite }
+        }
+    }
+
+    /// Replaces the file in one atomic rename, following a symlink to where the file really is, and keeping its
+    /// permissions (T3 keeps it private). Keys sorted and indented by two, as T3 writes it, without escaping `/`.
     private static func write(_ root: [String: Any]) throws {
         let target = settingsFile.resolvingSymlinksInPath()
-        guard let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
+        guard let raw = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
             throw Failure.cannotWrite
         }
+        let data = tightenColons(raw) + Data("\n".utf8)
+        let fm = FileManager.default
+        let mode = (try? fm.attributesOfItem(atPath: target.path))?[.posixPermissions] as? NSNumber
         do {
-            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try (data + Data("\n".utf8)).write(to: target, options: .atomic)
+            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let temp = target.deletingLastPathComponent().appendingPathComponent(".\(target.lastPathComponent).lastdrop-\(UUID().uuidString)")
+            try data.write(to: temp)
+            do {
+                try fm.setAttributes([.posixPermissions: mode ?? NSNumber(value: 0o600)], ofItemAtPath: temp.path)
+                if fm.fileExists(atPath: target.path) {
+                    _ = try fm.replaceItemAt(target, withItemAt: temp)
+                } else {
+                    try fm.moveItem(at: temp, to: target)
+                }
+            } catch {
+                try? fm.removeItem(at: temp)
+                throw error
+            }
         } catch { throw Failure.cannotWrite }
+    }
+
+    /// Foundation writes `"key" : value`; T3 (JSON.stringify) writes `"key": value`. Only outside strings.
+    static func tightenColons(_ data: Data) -> Data {
+        var out = [UInt8](), inString = false, escaped = false
+        out.reserveCapacity(data.count)
+        let bytes = [UInt8](data)
+        for (i, byte) in bytes.enumerated() {
+            if inString {
+                if escaped { escaped = false } else if byte == 0x5C { escaped = true } else if byte == 0x22 { inString = false }
+            } else if byte == 0x22 {
+                inString = true
+            } else if byte == 0x20, i + 1 < bytes.count, bytes[i + 1] == 0x3A, out.last == 0x22 {
+                continue
+            }
+            out.append(byte)
+        }
+        return Data(out)
     }
 
     // MARK: The backup

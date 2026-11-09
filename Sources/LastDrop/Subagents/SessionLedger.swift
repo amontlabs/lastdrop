@@ -29,6 +29,18 @@ enum SessionLedger {
         var session: String
         var thread: String
         var at: Date
+        /// When the process started, so a reused pid isn't taken for it. Nil in entries written before this was
+        /// kept (or without it): `addLive` fills it in, and an unknown one is checked by the process's name instead.
+        var startedAt: Date?
+
+        init(pid: Int32, account: String, session: String, thread: String, at: Date, startedAt: Date? = nil) {
+            self.pid = pid
+            self.account = account
+            self.session = session
+            self.thread = thread
+            self.at = at
+            self.startedAt = startedAt
+        }
     }
 
     struct Store: Codable, Equatable, Sendable {
@@ -48,14 +60,38 @@ enum SessionLedger {
 
     // MARK: Sessions
 
-    /// Notes that `session` runs on `account`. A session already noted keeps its first account and start.
-    static func record(session: String, account: String, forkedAt: Date? = nil, at: Date = Date()) {
+    /// The most sessions kept, and the age under which none is ever dropped (see `prune`).
+    static let maxSessions = 20_000
+    static let keepNewerThan: TimeInterval = 30 * 86_400
+
+    /// Notes that `session` runs on `account`. A session already noted keeps its first account and start, except
+    /// that a fresh (not forked) record replaces one whose conversation has no transcript lines yet: T3 restarts a
+    /// thread nobody answered with `--session-id X` on another account, and the old record would misattribute it.
+    /// `replace: true` forces it. Past `maxSessions` the oldest are dropped.
+    static func record(session: String, account: String, forkedAt: Date? = nil, at: Date = Date(), replace: Bool = false) {
         guard !session.isEmpty else { return }
         withStore { store in
-            if store.sessions[session] == nil {
-                store.sessions[session] = Session(account: account, startedAt: at, forkedAt: forkedAt)
+            if let existing = store.sessions[session] {
+                guard replace || (forkedAt == nil && existing.account != account && !hasTranscriptLines(session)) else { return }
             }
+            store.sessions[session] = Session(account: account, startedAt: at, forkedAt: forkedAt)
+            prune(&store, now: at)
         }
+    }
+
+    /// Stats needs a session's account only until its transcript is indexed, so the ledger keeps at most
+    /// `maxSessions`, dropping the oldest `startedAt` first and never a session newer than 30 days.
+    static func prune(_ store: inout Store, now: Date = Date()) {
+        guard store.sessions.count > maxSessions else { return }
+        let cutoff = now.addingTimeInterval(-keepNewerThan)
+        let old = store.sessions.filter { $0.value.startedAt < cutoff }.sorted { $0.value.startedAt < $1.value.startedAt }
+        for (id, _) in old.prefix(store.sessions.count - maxSessions) { store.sessions.removeValue(forKey: id) }
+    }
+
+    /// Whether the session's transcript in `~/.claude/projects` already has a line.
+    static func hasTranscriptLines(_ session: String) -> Bool {
+        guard let url = SessionTransfer.transcript(session, in: SessionTransfer.mainProjects) else { return false }
+        return ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0) > 0
     }
 
     static func session(_ id: String) -> Session? { withStore { $0.sessions[id] } }
@@ -83,6 +119,8 @@ enum SessionLedger {
     // MARK: Live processes
 
     static func addLive(_ entry: Live) {
+        var entry = entry
+        if entry.startedAt == nil { entry.startedAt = processStart(entry.pid) }
         withStore { store in
             store.live.removeAll { $0.pid == entry.pid || !isAlive($0.pid) }
             store.live.append(entry)
@@ -98,6 +136,29 @@ enum SessionLedger {
     }
 
     static func removeLive(pid: Int32) { withStore { $0.live.removeAll { $0.pid == pid } } }
+
+    /// When the process `pid` started, nil if it isn't there.
+    static func processStart(_ pid: Int32) -> Date? {
+        var info = proc_bsdinfo()
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000)
+    }
+
+    /// The path of the process's executable, nil if it isn't there.
+    static func processPath(_ pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// True when `pid` is still the process the entry recorded, not another that reused the pid: the start time
+    /// when known, else an executable whose path mentions claude (or the node/bun it runs on).
+    static func isSameProcess(_ entry: Live) -> Bool {
+        guard let started = processStart(entry.pid) else { return false }
+        if let recorded = entry.startedAt { return abs(started.timeIntervalSince(recorded)) < 2 }
+        let path = (processPath(entry.pid) ?? "").lowercased()
+        return path.contains("claude") || path.hasSuffix("/node") || path.hasSuffix("/bun")
+    }
 
     static func isAlive(_ pid: Int32) -> Bool { pid > 0 && (kill(pid, 0) == 0 || errno == EPERM) }
 

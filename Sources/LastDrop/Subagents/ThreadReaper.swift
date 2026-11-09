@@ -9,7 +9,13 @@ enum ThreadReaper {
 
     /// True when the LAST line of type "user" or "assistant" in a transcript tail is a limit notice:
     /// `isApiErrorMessage == true` or `message.model == "<synthetic>"`, and its text content mentions "limit" (case-insensitive).
-    static func isLimitNotice(tail: Data) -> Bool {
+    static func isLimitNotice(tail: Data) -> Bool { limit(tail: tail) == .account }
+
+    enum Limit: Equatable { case none, account, model }
+
+    /// `.account` for a limit on the whole account (session, weekly, usage), `.model` for one on a single model
+    /// ("You've hit your Opus limit"), which says nothing about the account's room for the others.
+    static func limit(tail: Data) -> Limit {
         let lines = tail.split(separator: 0x0A, omittingEmptySubsequences: true)
         for line in lines.reversed() {
             guard let event = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
@@ -18,14 +24,18 @@ enum ThreadReaper {
 
             let isApiError = event["isApiErrorMessage"] as? Bool == true
             let isSynthetic = event.dict("message")?.string("model") == "<synthetic>"
-            guard isApiError || isSynthetic else { return false }
+            guard isApiError || isSynthetic else { return .none }
 
             // A usage limit ("You've hit your session limit", "Claude AI usage limit reached"), not a passing
             // rate limit (429), which Claude Code retries and which says nothing about the account's room.
             let text = extractText(from: event)
-            return text.range(of: #"hit your .*limit|usage limit|limit reached|(session|weekly|opus|sonnet) limit"#, options: [.regularExpression, .caseInsensitive]) != nil
+            guard text.range(of: #"hit your .*limit|usage limit|limit reached|(session|weekly|opus|sonnet|haiku|fable) limit"#, options: [.regularExpression, .caseInsensitive]) != nil
+            else { return .none }
+            let wholeAccount = text.range(of: #"session limit|usage limit|weekly limit"#, options: [.regularExpression, .caseInsensitive]) != nil
+            let aModel = text.range(of: #"opus|sonnet|haiku|fable"#, options: [.regularExpression, .caseInsensitive]) != nil
+            return aModel && !wholeAccount ? .model : .account
         }
-        return false
+        return .none
     }
 
     /// Extracts plain text from the message content of an event.
@@ -54,8 +64,20 @@ enum ThreadReaper {
                   let modifiedAt = attrs[.modificationDate] as? Date,
                   modifiedAt > entry.at else { continue }
 
-            guard let tail = readTail(of: transcriptURL, maxLength: 256 * 1024),
-                  isLimitNotice(tail: tail) else { continue }
+            guard let tail = readTail(of: transcriptURL, maxLength: 256 * 1024) else { continue }
+            let kind = limit(tail: tail)
+            if kind == .model {
+                // One model is out, not the account: the process and the account stay as they are.
+                SubagentLog.write("reaper: thread process \(entry.pid) (session \(entry.session)) on \(entry.account) hit a model-specific limit; leaving it")
+                continue
+            }
+            guard kind == .account else { continue }
+            // The pid may have been reused by another process since: only the one the launcher started is signalled.
+            guard SessionLedger.isSameProcess(entry) else {
+                SubagentLog.write("reaper: pid \(entry.pid) is no longer the thread process of session \(entry.session); not signalling it")
+                SessionLedger.removeLive(pid: entry.pid)
+                continue
+            }
 
             SubagentLog.write("reaper: thread process \(entry.pid) (session \(entry.session)) on \(entry.account) hit usage limit; ending process")
             AgentRegistry.markFull(entry.account)
