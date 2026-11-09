@@ -146,10 +146,11 @@ struct PlanSize: Equatable, Sendable {
         self.weekly = weekly
     }
 
-    /// From the plan name lastdrop shows ("Pro", "Max 5x", "Max 20x"). Unknown plans count as Pro.
+    /// From the plan name lastdrop shows: claude.ai's current names ("Pro", "Max", "Ultra"), or Claude Code's
+    /// older ones when the profile can't be read ("Max 5x", "Max 20x"). Unknown plans count as Pro.
     init(plan: String?) {
         switch plan?.lowercased().replacingOccurrences(of: " ", with: "") {
-        case "max20x": self.init(session: 20, weekly: 10)
+        case "ultra", "max20x": self.init(session: 20, weekly: 10)
         case "max5x", "max": self.init(session: 5, weekly: 5)
         default: self.init()
         }
