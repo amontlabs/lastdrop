@@ -505,6 +505,17 @@ async function* live<T>(work: (report: (text: string) => void) => Promise<T>, sh
   }
 }
 
+/**
+ * An added agent's spawn with its name as the subagent's model. Claude Code stamps each of the subagent's
+ * messages with its step model, and hosts (T3 Code) label the subagent by it; lastdrop answers every step,
+ * so the name only labels and never reaches a model. `tool.call` can't pass it: the Agent tool's schema
+ * allows Claude's models only, while `agent.spawn` takes any id. A resumed agent keeps it; the engine
+ * refuses a hook's model on a resume.
+ */
+function labelled<E extends { model?: string }>(e: E, agent: unknown): E {
+  return typeof agent === 'string' && agent !== '' ? { ...e, model: agent } : e
+}
+
 /** Where an added agent ran and what it could not do, for the report's first lines; a reroute gets only its worktree. */
 function header(request: Request, line: Line): string {
   const where = line.worktreePath ? `Worktree: ${String(line.worktreePath)}${line.worktreeBranch ? ` (branch ${String(line.worktreeBranch)})` : ''}.` : ''
@@ -1147,7 +1158,7 @@ export const register: Register = on => {
     const pending = new Promise<void>(resolve => { ready = resolve })
     spawning.add(pending)
     try {
-      const result = await next(e)
+      const result = await next(labelled(e, claim.agent))
       if (result.deny !== undefined || !result.agentId) return result
       const route: Route = { request, description: e.description, toolUseId: e.tool_use_id, ran: false, cursor: 0,
                              handback: e.permissionMode === 'auto' }

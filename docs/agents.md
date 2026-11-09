@@ -95,7 +95,12 @@ once.
 
 The plugin then passes the call to the engine without `model` and without worktree isolation, so the engine
 validates it and creates its own task. The call's arguments in the transcript are not changed: the model's
-`model: "sol"` stays. `agent.spawn` claims the task, and `turn.step` runs `lastdrop --agent-run` and serves the
+`model: "sol"` stays. `agent.spawn` claims the task and sets the subagent's model to the agent's name
+(`sol`). The Agent tool's schema refuses that name after `tool.call`, but `agent.spawn` takes any id. Claude
+Code stamps every message of the subagent with its step model, even one a hook answered alone (it ignores
+`usage.model`), and hosts label the subagent by it: without the name, T3 showed the parent's `claude-opus-5-5`
+on each flash and gemini subagent. No request is ever made with the name, since lastdrop answers every step. A
+resumed agent keeps it; the engine refuses a hook's model on a resume. `turn.step` runs `lastdrop --agent-run` and serves the
 report. While the run works, the turn streams each of its steps as thinking ("Bash: swift test"), shown live and
 not recorded, and the report follows in the next block. Claude Code stops a subagent whose stream shows nothing
 for ten minutes ("Agent stalled", shown as `[Request interrupted by user for tool use]`), so during a long step the

@@ -531,6 +531,17 @@ test('Claude models and calls without a model stay native', async ($, on) => {
   expect(e.nativeInputs.map(i => i.model)).toEqual(['sonnet', 'opus', 'haiku', 'fable', undefined, undefined])
 })
 
+test('an added agent spawns under its own name as the model, so hosts never label it as Claude', async ($, on) => {
+  let spawns = 0
+  const e = engine([$, on], { catalog: CATALOG, spawnId: () => `new-${++spawns}` })
+  await e.launch({ model: 'sol' })
+  await e.launch({ model: 'sonnet', tool_use_id: 'toolu_2' })
+  await e.launch({ tool_use_id: 'toolu_3' })
+  expect(e.spawned.map(s => s.model)).toEqual(['sol', 'sonnet', undefined])
+  expect(e.calls.find(c => c.flag === '--agent-route')?.request.model).toBeUndefined()
+  expect(e.calls.find(c => c.flag === '--agent-route')?.request.agent).toBe('sol')
+})
+
 test('Explore and Plan pass their role; other types pass none', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
