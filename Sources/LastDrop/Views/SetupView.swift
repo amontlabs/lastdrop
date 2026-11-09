@@ -41,6 +41,7 @@ struct SetupView: View {
                         AgentsSwitchSection(model: model)
                         if model.agentsEnabled {
                             SuggestedAgentsSection(model: model)
+                            SaveClaudeSection()
                             AgentsSections(model: model)
                         }
                     case .t3:

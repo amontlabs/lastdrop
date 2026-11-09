@@ -186,26 +186,7 @@ private struct ColumnMenu<Items: View, Label: View>: View {
     }
 }
 
-/// Settings → Agents → Command judges: the model that checks each judged provider's agents' commands.
-struct CommandJudgesSection: View {
-    let providers: [AgentProvider]
-    let judges: [AgentProvider: AgentJudge]
-    let save: (AgentProvider, AgentJudge?) -> Void
-
-    var body: some View {
-        PageSection("Command judges") {
-            Caption(JudgeRow.about).padding(.bottom, 4)
-            Nest {
-                ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
-                    if index > 0 { RowDivider() }
-                    JudgeRow(provider: provider, chosen: judges[provider]) { save(provider, $0) }
-                }
-            }
-        }
-    }
-}
-
-/// One provider's command judge: the default or a model from the provider's live list, and Antigravity's effort.
+/// One provider's command judge, a row under its accounts in Settings → Accounts: the default or a model from the provider's live list, and Antigravity's effort.
 /// A judge the provider no longer offers stays chosen and is flagged: lastdrop never swaps in another model.
 struct JudgeRow: View {
     let provider: AgentProvider
@@ -246,8 +227,12 @@ struct JudgeRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Image(nsImage: Logos.colored(provider.usageID, size: 13)).frame(width: 22)
-                Text(provider.displayName).frame(width: 96, alignment: .leading)
+                RowIcon(name: "checkmark.shield")
+                HStack(spacing: 5) {
+                    Text("Command judge")
+                    InfoTip(Self.about)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 Group {
                     if models.isEmpty {
                         TextField("Judge model", text: $typed, prompt: Text(defaultName))
@@ -263,7 +248,7 @@ struct JudgeRow: View {
                         }
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: 220, alignment: .leading)
                 Group {
                     if !efforts.isEmpty {
                         ColumnMenu {
@@ -274,6 +259,8 @@ struct JudgeRow: View {
                         } label: {
                             Text(current?.effort?.capitalized ?? "Auto")
                         }
+                    } else {
+                        Color.clear
                     }
                 }
                 .frame(width: 76, alignment: .leading)

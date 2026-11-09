@@ -24,6 +24,17 @@ enum Snapshots {
                 model.settingsPage = page
                 await capture(windowed(SettingsView(model: model)), WindowPresenter.size, titled: "lastdrop", to: folder, "settings-\(page.rawValue)")
             }
+            // The long pages whole, taller than the window.
+            for page in [SettingsPage.accounts, .claude, .agents] {
+                model.settingsPage = page
+                await capture(windowed(SettingsView(model: model)), NSSize(width: WindowPresenter.size.width, height: 1100), titled: "lastdrop", to: folder, "settings-\(page.rawValue)-tall")
+            }
+            model.previewAgents(false)
+            for page in [SettingsPage.agents, .claude] {
+                model.settingsPage = page
+                await capture(windowed(SettingsView(model: model)), WindowPresenter.size, titled: "lastdrop", to: folder, "settings-\(page.rawValue)-off")
+            }
+            model.previewAgents(true)
             model.settingsPage = .accounts
             model.claudeError = "Claude Code refused: plugin lastdrop@lastdrop not found in marketplace."
             await capture(windowed(SettingsView(model: model)), WindowPresenter.size, titled: "lastdrop", to: folder, "settings-repair")
@@ -33,9 +44,6 @@ enum Snapshots {
                                             model: "gpt-6.1-sol", effort: "high",
                                             fallbacks: [.init(provider: .antigravity, model: "gemini-4-argon", effort: "high"), .init(provider: .zai, model: "glm-5.3", effort: nil)])
             await capture(AgentEditor(agent: demoAgent, catalog: AgentCatalog()) { _ in }, nil, to: folder, "agent-editor")
-            await capture(CommandJudgesSection(providers: AgentProvider.judged,
-                                               judges: [.antigravity: AgentJudge(model: "gemini-4-argon", effort: "high")]) { _, _ in }
-                .padding(24).frame(width: 640).background(Color(nsColor: .windowBackgroundColor)), nil, to: folder, "command-judges")
             model.panelTab = .limits
             await capture(PanelView(model: model), nil, to: folder, "panel-limits")
             model.settingsPage = .general

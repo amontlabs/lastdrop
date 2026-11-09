@@ -432,6 +432,9 @@ final class AppModel {
         stats.loadDemo()
     }
 
+    /// Snapshots only: shows Settings with agents off or on, without touching the plugin.
+    func previewAgents(_ on: Bool) { agentsEnabled = on }
+
     /// Drops what a removed account showed.
     func forgetUsage(_ account: Account) { states[account.id] = nil }
 

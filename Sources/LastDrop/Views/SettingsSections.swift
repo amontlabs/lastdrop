@@ -23,6 +23,7 @@ struct AccountsSections: View {
     @State private var connecting: ProviderID?
     @State private var renaming: AccountInfo?
     @State private var newName = ""
+    @State private var catalog = AgentCatalog.load()
 
     var body: some View {
         let others = ProviderID.allCases.filter { !model.connectedProviders.contains($0) }
@@ -37,6 +38,13 @@ struct AccountsSections: View {
                             NestLabel(text: provider.displayName, info: accounts.count > 1 && model.showsAgents ? footer(provider) : nil)
                             ForEach(Array(accounts.enumerated()), id: \.element.id) { index, info in
                                 row(info, index: index, count: accounts.count)
+                            }
+                            // Agents run on the provider's accounts, so the judge that checks their commands sits with them.
+                            if model.agentsEnabled, let judged = AgentProvider.judged.first(where: { $0.usageID == provider }) {
+                                RowDivider()
+                                JudgeRow(provider: judged, chosen: catalog.judges[judged]) { judge in
+                                    do { try AgentCatalog.update { $0.judges[judged] = judge }; catalog = AgentCatalog.load() } catch {}
+                                }
                             }
                         }
                     }
@@ -55,6 +63,7 @@ struct AccountsSections: View {
                 }
             }
         }
+        .keepingCatalog($catalog)
         .sheet(item: $connecting) { provider in AddAccountSheet(model: model, provider: provider) }
         .alert("Rename account", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Name", text: $newName)
@@ -163,28 +172,72 @@ struct AgentsSwitchSection: View {
     }
 }
 
-/// Save Claude usage, then the agents list with its editor.
-struct AgentsSections: View {
+/// The Agents page while the switch is off: why it is empty, and the way to the switch.
+struct AgentsOffSection: View {
     @Bindable var model: AppModel
+
+    var body: some View {
+        PageSection {
+            Row(icon: "sparkle", color: ProviderID.claude.brandColors[0], title: "Agents need Agents in Claude Code",
+                detail: "Turn it on to use your other plans as agents.") {
+                Button("Open Claude") { model.settingsPage = .claude }
+            }
+        }
+    }
+}
+
+/// Save Claude usage and its prompt.
+struct SaveClaudeSection: View {
     @State private var catalog = AgentCatalog.load()
-    @State private var editing: AgentDefinition?
     @State private var editingPrompt = false
     @State private var error: String?
 
     var body: some View {
-        Group {
-            PageSection {
-                Row(icon: "leaf.fill", color: .green, title: "Save Claude usage",
-                    info: catalog.enabled.isEmpty ? "Add an agent first." : SaveClaudeToggle.about) {
-                    RowSwitch(label: "Save Claude usage", isOn: Binding(get: { catalog.saveClaude }, set: { on in change { $0.saveClaude = on } }))
-                        .disabled(catalog.enabled.isEmpty && !catalog.saveClaude)
-                }
-                RowDivider()
-                Row(icon: "text.quote", title: "Prompt", detail: catalog.saveClaudeText == nil ? "Default" : "Custom") {
-                    Button("Edit…") { editingPrompt = true }
-                }
+        PageSection {
+            Row(icon: "leaf.fill", color: .green, title: "Save Claude usage",
+                info: catalog.enabled.isEmpty ? "Add an agent first." : SaveClaudeToggle.about,
+                detail: error, detailColor: .red) {
+                RowSwitch(label: "Save Claude usage", isOn: Binding(get: { catalog.saveClaude }, set: { on in
+                    do { try AgentCatalog.update { $0.saveClaude = on }; catalog = AgentCatalog.load(); error = nil } catch {
+                        self.error = "Couldn't save: \(error.localizedDescription)"
+                    }
+                }))
+                .disabled(catalog.enabled.isEmpty && !catalog.saveClaude)
             }
-            .sheet(isPresented: $editingPrompt) { SavingInstructionEditor(catalog: catalog) { catalog = AgentCatalog.load() } }
+            RowDivider()
+            Row(icon: "text.quote", title: "Prompt", detail: catalog.saveClaudeText == nil ? "Default" : "Custom") {
+                Button("Edit…") { editingPrompt = true }
+            }
+        }
+        .keepingCatalog($catalog)
+        .sheet(isPresented: $editingPrompt) { SavingInstructionEditor(catalog: catalog) { catalog = AgentCatalog.load() } }
+    }
+}
+
+/// Keeps a view's copy of the agents list current: it changes in this process and in `lastdrop --agents`.
+private struct CatalogObserver: ViewModifier {
+    @Binding var catalog: AgentCatalog
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .agentCatalogChanged)) { _ in catalog = AgentCatalog.load() }
+            .onReceive(DistributedNotificationCenter.default().publisher(for: .agentCatalogChanged)) { _ in catalog = AgentCatalog.load() }
+    }
+}
+
+extension View {
+    func keepingCatalog(_ catalog: Binding<AgentCatalog>) -> some View { modifier(CatalogObserver(catalog: catalog)) }
+}
+
+/// The agents list with its editor.
+struct AgentsSections: View {
+    @Bindable var model: AppModel
+    @State private var catalog = AgentCatalog.load()
+    @State private var editing: AgentDefinition?
+    @State private var error: String?
+
+    var body: some View {
+        Group {
             PageSection("Your agents",
                         info: "Extra models for the Agent tool, run on your other plans. Claude Code passes the name as model and picks one by its description. Changes apply from the next prompt.") {
                 Button("New agent…") { editing = AgentDefinition(name: "", description: "", provider: .codex, model: "") }
@@ -196,16 +249,8 @@ struct AgentsSections: View {
                 }
                 if let error { Text(error).font(.caption).foregroundStyle(.red).padding(.top, 6) }
             }
-            if !judgedProviders.isEmpty {
-                CommandJudgesSection(providers: judgedProviders, judges: catalog.judges) { provider, judge in
-                    change { $0.judges[provider] = judge }
-                }
-            }
-            T3ThreadsSection()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .agentCatalogChanged)) { _ in catalog = AgentCatalog.load() }
-        // `lastdrop --agents` is another process.
-        .onReceive(DistributedNotificationCenter.default().publisher(for: .agentCatalogChanged)) { _ in catalog = AgentCatalog.load() }
+        .keepingCatalog($catalog)
         .sheet(item: $editing) { agent in
             AgentEditor(agent: agent, catalog: catalog) { saved in
                 change { next in
@@ -213,11 +258,6 @@ struct AgentsSections: View {
                 }
             }
         }
-    }
-
-    /// Providers with a judge the user can set: connected ones, and any already set.
-    private var judgedProviders: [AgentProvider] {
-        AgentProvider.judged.filter { !model.accounts($0.usageID).isEmpty || catalog.judges[$0] != nil }
     }
 
     private func row(_ agent: AgentDefinition) -> some View {

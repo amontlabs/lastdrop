@@ -94,15 +94,16 @@ struct MainWindowView: View {
 }
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case accounts, agents, general
+    case accounts, claude, agents, general
     var id: String { rawValue }
 
     /// The pages at the top of the sidebar; General sits at its bottom.
-    static let main: [SettingsPage] = [.accounts, .agents]
+    static let main: [SettingsPage] = [.accounts, .claude, .agents]
 
     var title: String {
         switch self {
         case .accounts: "Accounts"
+        case .claude: "Claude"
         case .agents: "Agents"
         case .general: "General"
         }
@@ -112,7 +113,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var about: String {
         switch self {
         case .accounts: "Your plans, what each shows in the menu bar, and when it notifies you."
-        case .agents: "In Claude Code: subagents on your other Claude accounts, and agents on your other plans."
+        case .claude: "How lastdrop works with Claude Code: subagents and T3 Code threads on the Claude account with room, and saving usage."
+        case .agents: "Extra models Claude Code can call, run on your other plans."
         case .general: "Opening lastdrop at login, and its new releases from GitHub."
         }
     }
@@ -120,10 +122,14 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .accounts: "person.2"
-        case .agents: "sparkle"
+        case .claude: "sparkle"
+        case .agents: "person.crop.rectangle.stack"
         case .general: "gearshape"
         }
     }
+
+    /// The provider whose mark stands in for the icon.
+    var logo: ProviderID? { self == .claude ? .claude : nil }
 }
 
 /// Settings: an inset sidebar on glass, and the page beside it.
@@ -152,13 +158,18 @@ struct SettingsView: View {
             } content: {
                 AccountsSections(model: model)
             }
-        case .agents:
-            Page(title: "Agents", info: SettingsPage.agents.about) {
+        case .claude:
+            Page(title: "Claude", info: SettingsPage.claude.about) {
                 AgentsSwitchSection(model: model)
+                T3ThreadsSection()
                 if model.agentsEnabled {
-                    AgentsSections(model: model)
+                    SaveClaudeSection()
                     AccountLimitsSection(model: model)
                 }
+            }
+        case .agents:
+            Page(title: "Agents", info: SettingsPage.agents.about) {
+                if model.agentsEnabled { AgentsSections(model: model) } else { AgentsOffSection(model: model) }
             }
         case .general:
             Page(title: "General", info: SettingsPage.general.about) {
@@ -196,10 +207,15 @@ struct SettingsView: View {
     private func sidebarButton(_ page: SettingsPage) -> some View {
         Button { model.settingsPage = page } label: {
             HStack(spacing: 8) {
-                Image(systemName: page.icon)
-                    .font(.system(size: 13))
-                    .foregroundStyle(page == model.settingsPage ? Color.accentColor : .secondary)
-                    .frame(width: 18)
+                Group {
+                    if let logo = page.logo {
+                        Image(nsImage: Logos.image(logo)).renderingMode(.template).resizable().scaledToFit().frame(width: 13, height: 13)
+                    } else {
+                        Image(systemName: page.icon).font(.system(size: 13))
+                    }
+                }
+                .foregroundStyle(page == model.settingsPage ? Color.accentColor : .secondary)
+                .frame(width: 18)
                 Text(page.title)
                 Spacer(minLength: 0)
             }
