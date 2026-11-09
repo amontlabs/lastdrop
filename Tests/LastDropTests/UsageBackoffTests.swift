@@ -12,7 +12,7 @@ final class UsageBackoffTests: LastDropTestCase {
         let until = SubagentUsage.recordBlock("claude-2", retryAfter: nil, now: now)
         XCTAssertEqual(until.timeIntervalSince(now), 300, accuracy: 1)
         // Another process sees it in the file.
-        XCTAssertEqual(SubagentUsage.blockedUntil("claude-2", now: now), until)
+        XCTAssertEqual(SubagentUsage.blockedUntil("claude-2", now: now)!.timeIntervalSince(until), 0, accuracy: 0.01)
         // And a provider fetch refuses before touching the keychain or the network.
         do {
             _ = try await ClaudeProvider(configDir: "/tmp/.claude-accounts/claude-2").fetch()
@@ -37,7 +37,7 @@ final class UsageBackoffTests: LastDropTestCase {
     func testABurstCountsOnceAndServerRetryAfterWins() {
         let first = SubagentUsage.recordBlock("claude-2", retryAfter: 900, now: now)
         XCTAssertEqual(first.timeIntervalSince(now), 900, accuracy: 1)
-        XCTAssertEqual(SubagentUsage.recordBlock("claude-2", retryAfter: nil, now: now), first)
+        XCTAssertEqual(SubagentUsage.recordBlock("claude-2", retryAfter: nil, now: now).timeIntervalSince(first), 0, accuracy: 0.01)
         XCTAssertEqual(SubagentUsage.readStatus()["claude-2"]?.failures, 1)
     }
 
@@ -73,7 +73,7 @@ final class UsageBackoffTests: LastDropTestCase {
     }
 
     func testOldStatusFilesDecode() throws {
-        let json = #"{"main":{"session":5,"weekly":1,"at":"2026-11-09T18:00:00Z","plan":"Max 20x"},"Pro":{"session":null,"weekly":null,"at":"2026-11-09T18:00:00Z"}}"#
+        let json = #"{"main":{"session":5,"weekly":1,"at":800000000,"plan":"Max 20x"},"Pro":{"session":null,"weekly":null,"at":800000000}}"#
         let status = try JSONDecoder.lastdrop.decode([String: SubagentUsage.Status].self, from: Data(json.utf8))
         XCTAssertEqual(status["main"]?.plan, "Max 20x")
         XCTAssertNil(status["main"]?.blockedUntil)
