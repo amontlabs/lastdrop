@@ -70,7 +70,18 @@ struct EndpointProfile: Equatable, Sendable {
                    "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                    "API_TIMEOUT_MS": "3000000"]
         for key in Self.modelVariables { env[key] = model }
+        // Auto mode's server-side check never runs through these endpoints. Claude Code's own client-side check
+        // does, through the same endpoint: on by this switch, judged by the provider's strongest model.
+        env["CLAUDE_CODE_AUTO_MODE_SERVER"] = "0"
+        env["CLAUDE_CODE_AUTO_MODE_MODEL"] = Self.judge(provider, model: model)
         return env
+    }
+
+    /// The model that judges actions for auto mode: a strong one, since a small model lets risky actions through
+    /// (2026-11-09: `glm-5.3-flash` allowed an SSH-key upload that `glm-5.3` blocked). OpenRouter has no fixed
+    /// list, so the agent's own model judges there.
+    static func judge(_ provider: AgentProvider, model: String) -> String {
+        provider == .zai ? "glm-5.3" : model
     }
 
     /// Session settings pin routing above file settings; project env must not switch the provider.

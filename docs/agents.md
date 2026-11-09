@@ -256,11 +256,13 @@ Antigravity plan mode, and the Claude-runner providers (Claude accounts, Z.ai, O
   them (its turn ends at the denial, so lastdrop continues the conversation once with a short prompt).
   `agy` does accept per-session allow rules (`--settings '{"permissions":{"allow":["command(<exact command>)"]}}'`),
   which lastdrop doesn't turn on by itself.
-- On Z.ai and OpenRouter, auto mode can't approve anything: its safety check runs on Anthropic's servers, and
-  Claude Code asks the endpoint it talks to, which doesn't serve it (Claude Code 2.1.319 has no local check to
-  fall back on). With nobody to ask, every command that needs approval is refused ("Auto mode is unavailable:
-  its safety check does not run for this session"). lastdrop leaves this as it is rather than bypass a safety
-  check.
+- On Z.ai and OpenRouter, auto mode's server-side check can't run (the endpoint doesn't serve it), so the profile
+  sets `CLAUDE_CODE_AUTO_MODE_SERVER=0`: Claude Code then judges actions with its own client-side check, with
+  Anthropic's instructions and the user's rules, through the same endpoint. `CLAUDE_CODE_AUTO_MODE_MODEL` picks the
+  judge: `glm-5.3` on Z.ai whatever the agent's model (`glm-5.3-flash` let an SSH-key upload through that `glm-5.3`
+  blocked), the agent's own model on OpenRouter. Each judged action sends the whole policy to the provider and takes
+  a few seconds. Claude Code made this check opt-in in 2.1.319; if a later version drops it, these agents' commands
+  are refused again, as before. Evidence: research I, section 6.
 - During an update, an older runner that is still running can strip `role` and the worktree fields from the
   ledger once, so a follow-up to a read-only agent started before the update may lose its read-only role. A brief,
   transient limit.
