@@ -8,6 +8,7 @@ struct ClaudeProvider: UsageProvider {
     var configDir: String?
 
     private static let usageURL = "https://api.anthropic.com/api/oauth/usage"
+    private static let profileURL = "https://api.anthropic.com/api/oauth/profile"
 
     struct Credentials { var accessToken: String; var expiresAt: Date?; var plan: String? }
 
@@ -28,7 +29,8 @@ struct ClaudeProvider: UsageProvider {
         // After a successful usage fetch, so the token is known to work; a failure only costs the badge.
         let token = creds.accessToken
         let resets = await Self.resetCache.value(configDir ?? "main") { try await Self.resetGrants(accessToken: token) }
-        var snapshot = UsageSnapshot(title: "Claude", plan: creds.plan, windows: windows)
+        let plan = await Self.planCache.value(configDir ?? "main") { try await Self.planDisplayName(accessToken: token) }
+        var snapshot = UsageSnapshot(title: "Claude", plan: plan ?? creds.plan, windows: windows)
         snapshot.resets = resets
         snapshot.credits = credits
         return snapshot
@@ -37,6 +39,26 @@ struct ClaudeProvider: UsageProvider {
     /// Reset grants are asked for at most once an hour per account: asking on every refresh got
     /// OpenUsage sustained 429s on the usage endpoint.
     private static let resetCache = HourlyCache<LimitResets>()
+
+    /// The plan's current name ("Ultra") is asked for at most once an hour per account.
+    private static let planCache = HourlyCache<String>()
+
+    /// The plan name claude.ai shows. Claude Code's keychain login only keeps internal ids
+    /// ("max", "default_claude_max_20x"), which no longer match the names Anthropic sells the plans under.
+    static func planDisplayName(accessToken: String) async throws -> String? {
+        let headers = ["Authorization": "Bearer \(accessToken)", "Accept": "application/json",
+                       "anthropic-beta": "oauth-2025-04-20", "User-Agent": "lastdrop"]
+        let (body, http) = try await HTTP.json(HTTP.request(profileURL, headers: headers))
+        guard (200..<300).contains(http.statusCode), let root = body as? [String: Any] else { throw ProviderError.http(http.statusCode) }
+        return planDisplayName(fromProfile: root)
+    }
+
+    /// `{"organization": {"plan_display_name": "Ultra", …}}`; nil when missing or blank.
+    static func planDisplayName(fromProfile root: [String: Any]) -> String? {
+        guard let name = root.dict("organization")?.string("plan_display_name")?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+        return name
+    }
 
     /// Anthropic's one-off usage-limit resets: the usage endpoint with `cedar_ember=1` adds a
     /// `cedar_ember` block (as Claude Code and OpenUsage read it).
@@ -130,7 +152,7 @@ struct ClaudeProvider: UsageProvider {
                            plan: planName(type: oauth.string("subscriptionType"), tier: oauth.string("rateLimitTier")))
     }
 
-    /// "max" + "default_claude_max_20x" → "Max 20x"; "pro" → "Pro".
+    /// Fallback when the profile can't be read: "max" + "default_claude_max_20x" → "Max 20x"; "pro" → "Pro".
     static func planName(type: String?, tier: String?) -> String? {
         guard let type = type?.trimmingCharacters(in: .whitespacesAndNewlines), !type.isEmpty else { return nil }
         let name = type.prefix(1).uppercased() + type.dropFirst()
