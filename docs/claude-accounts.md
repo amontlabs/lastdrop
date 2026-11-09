@@ -5,6 +5,57 @@ Claude app copy per account. Current: [subagents on accounts with
 room](#current-design-2026-10-27-subagents-on-accounts-with-room). The rest of this document is the research
 and the earlier designs, kept for reference; their code is in git history.
 
+## T3 Code threads on accounts with room (2026-11-09)
+
+lastdrop chooses the account for each T3 Code thread too, not only for subagents. T3's Claude provider has
+a **Binary path** setting. It points to `~/Library/Application Support/lastdrop/bin/claude-thread`, a
+wrapper that runs `lastdrop --claude-thread <T3's arguments>`. The launcher (`ThreadLauncher`) chooses the
+account, sets `CLAUDE_CONFIG_DIR` to it (none for Main), and `execve`s the real `claude`. T3 keeps every
+Claude-only feature, because it still talks to Claude Code. A generic ACP provider would have lost idle
+compaction, limit display, forks and steering.
+
+**When it chooses.** T3 starts a thread's Claude on a new thread, after Stop, and after 30 idle minutes
+(`ProviderSessionManager`, T3 0.1.7). Each start asks one question: *is this conversation's cache still warm
+on its account, and does that account have room?* If yes, the thread stays. If not, it goes to the best account:
+- A new thread (`--session-id`) goes to the best account.
+- A cold one (last answer more than 55 minutes ago; the cache lasts an hour on subscriptions) may move.
+- A just-compacted one may move. T3's idle compaction runs about two minutes before the cache expires, so it
+  stays and uses the warm cache, and the next start moves it.
+- `--resume-session-at` never moves: its message ids belong to the conversation's own lineage.
+
+**Best account for a thread.** `SubagentAccounts.pickForThread` gives the most room in Pro-sized windows:
+`min(5h size × 5h left, weekly size × weekly left)`. `PlanSize`: Pro 1/1, Max 5x 5/5, Max 20x 20/10. Only
+accounts below 80% of their 5-hour window and 95% of their week are considered, so a long conversation
+doesn't start on an account's last points; if none is, the roomiest account not at a limit. Subagents pick
+differently (`SubagentAccounts.pick`): the smallest plan with room first, never the session's own account,
+because they're short and move by themselves at a limit.
+
+**Moving keeps no session id across accounts.** Every request carries the session id
+(`x-claude-code-session-id`, `metadata.user_id.session_id`). A thread that moves continues as
+`--resume <current> --fork-session --session-id <new>`, so each account only sees its own ids. T3 keeps its
+own id forever and ignores the one Claude reports, so `SessionLedger` maps T3's id to the conversation it
+continues in now. A subagent that moves at its limit forks the same way (`AgentRun.carryOn`).
+
+**One conversations folder.** Before resuming, T3 checks that `<its id>.jsonl` exists in `~/.claude/projects`.
+So every account folder's `projects` is now a link to `~/.claude/projects` (`ClaudeSignIn.shareConversations`,
+run at launch). A folder's old conversations are kept as `projects-before-sharing`. Stats used to tell the
+account by folder; it now reads it from `SessionLedger` (`~/Library/Application Support/lastdrop/sessions.json`),
+and skips a fork's lines from before `forkedAt`, which its parent counts.
+
+**At a limit.** The launcher records each thread's process (`SessionLedger.live`). Every 20 seconds the app
+(`ThreadReaper`) looks at those threads' transcripts. When one ends with a usage-limit notice, the app marks the
+account full, ends that process with SIGTERM, and posts a notification. The notice is written when the turn
+ends, so the process is between turns, which T3 handles cleanly. The next message starts Claude again, and the
+launcher moves the thread. Waiting for the reset is just not sending.
+
+**Known limit.** A fork gives every copied message a new id. Rewinding or forking a moved thread from a turn
+before the move may not find that turn.
+
+Checked: T3's handling of the binary path, process exits and session ids, read in its source (0.1.7). Live,
+with Haiku: `--resume X --fork-session --session-id N` on another account continues the conversation under
+exactly `N`, and the launcher starts and resumes a thread. A live move between accounts is still to check once
+the shared folder is in place.
+
 ## Current design (2026-10-27): subagents on accounts with room
 
 The app copies below were also replaced. Each account is now a Claude Code sign-in (`CLAUDE_CONFIG_DIR`

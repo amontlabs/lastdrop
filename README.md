@@ -88,10 +88,17 @@ checks its own. Claude agents use Claude Code's auto mode, Codex its own reviewe
 Code permission rules, then Codex's open-source safety policy judged by Gemini on your plan. A refused command is
 named in the report, with the reason.
 
-**Claude's subagents.** They run on your other Claude account with the most usage left (down to 10% by
-default), never on the session's own account. The panel marks that account **Next**. Each one is a normal
+**Claude's subagents.** They run on your smallest other Claude account that still has room (down to 10% by
+default), never on the session's own account: a Pro's 5-hour window resets whether you used it or not. The panel marks that account **Next**. Each one is a normal
 Claude Code process with the same folder, model, permissions and MCP servers. `/agents-elsewhere` lists
 what runs where.
+
+**T3 Code threads.** lastdrop can also choose the account for each T3 Code thread. A new thread starts on
+the account with the most room. A running thread stays on its account while its prompt cache is warm, and
+moves only when that costs nothing: its cache has expired, or it was just compacted. When its account runs
+out, lastdrop ends that thread's Claude between turns and notifies you, and your next message continues on
+another account. To turn it on, copy the path from **Settings → Agents → T3 Code threads** into T3 Code's
+**Settings → Providers → Claude → Binary path**.
 
 **Save Claude usage.** Adds a prompt that encourages Claude to delegate implementation, exploration, reviews
 and research. **Edit…** shows it and lets you change it.
