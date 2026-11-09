@@ -223,7 +223,7 @@ enum AntigravityBackend: AgentBackend {
         let rules = rules ?? PermissionRules.load(cwd: job.cwd)
         let judges = JudgeProcesses()
         let judge: @Sendable (String) async -> CommandJudge.Verdict = judge ?? { prompt in
-            await CommandJudge.judge(prompt, executable: executable, onProcess: { judges.add($0) })
+            await CommandJudge.judge(prompt, executable: executable, onProcess: { judges.add($0) }, onExit: { judges.remove($0) })
         }
         let policyText: @Sendable () throws -> String = { try CommandJudge.policy(readOnly: policy == .readOnly) }
         var client: ACPClient?
@@ -343,8 +343,10 @@ enum AntigravityBackend: AgentBackend {
         private let lock = NSLock()
         private var pids: [Int32] = []
         func add(_ pid: Int32) { lock.withLock { pids.append(pid) } }
+        func remove(_ pid: Int32) { lock.withLock { pids.removeAll { $0 == pid } } }
         func stopAll() {
-            for pid in lock.withLock({ pids }) where kill(pid, 0) == 0 { kill(pid, SIGTERM) }
+            // Only processes not yet reaped are listed, so a pid can't have been reused.
+            for pid in lock.withLock({ pids }) { kill(pid, SIGTERM) }
         }
     }
 
@@ -447,7 +449,9 @@ enum AntigravityBackend: AgentBackend {
 
         func decide(_ action: Action, policy: Policy, rules: PermissionRules, policyText: () throws -> String,
                     judge: (String) async -> CommandJudge.Verdict) async -> Decision {
-            let key = [action.tool, action.label, String(describing: action.input.object["Cwd"] ?? "")].joined(separator: "\u{1}")
+            let input = (try? JSONSerialization.data(withJSONObject: action.input.object, options: [.sortedKeys]))
+                .map { String(decoding: $0, as: UTF8.self) } ?? action.label
+            let key = action.tool + "\u{1}" + input
             if let cached = lock.withLock({ cache[key] }) { return record(cached, cached: true) }
             if action.command != nil, policy != .bypass { events.step("Checking: \(action.label)") }
             let context = lock.withLock { self.context }

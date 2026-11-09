@@ -136,7 +136,9 @@ enum CommandJudge {
     }
 
     /// Runs the judge. Every failure is a deny with its reason.
-    static func judge(_ prompt: String, executable: String, onProcess: @escaping @Sendable (Int32) -> Void = { _ in }) async -> Verdict {
+    /// `onProcess` gets the judge's pid when it starts and `onExit` once it has been reaped.
+    static func judge(_ prompt: String, executable: String, onProcess: @escaping @Sendable (Int32) -> Void = { _ in },
+                      onExit: @escaping @Sendable (Int32) -> Void = { _ in }) async -> Verdict {
         let empty = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-judge-\(UUID().uuidString)")
         do { try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true) } catch {
             return Verdict(allow: false, failure: "could not make its empty folder")
@@ -160,6 +162,7 @@ enum CommandJudge {
         let stderr = Task.detached { String(decoding: (try? errors.fileHandleForReading.readToEnd()) ?? Data(), as: UTF8.self) }
         let stdout = await Task.detached { String(decoding: (try? output.fileHandleForReading.readToEnd()) ?? Data(), as: UTF8.self) }.value
         process.waitUntilExit()
+        onExit(process.processIdentifier)
         killer.cancel()
         let diagnostics = await stderr.value
         var verdict = parse(stdout)
