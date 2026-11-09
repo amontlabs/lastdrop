@@ -23,8 +23,8 @@ enum UsageFiles {
     }
 
     /// Every place on this Mac with transcripts. An account's folder outlives its removal from lastdrop, and its
-    /// past use still counts. Every account shares `~/.claude/projects`, so an account's own `projects` counts
-    /// only while it is still a real folder, and the copy kept aside at sharing counts as that account's.
+    /// past use still counts. Runs on every account use `~/.claude/projects` (the ledger says which account),
+    /// and an account's own real `projects` holds runs from before that, counted as that account's.
     static func roots(home: String = NSHomeDirectory()) -> [Root] {
         var roots = [Root(path: home + "/.claude/projects", kind: .claude, account: "claude.main"),
                      Root(path: home + "/.codex/sessions", kind: .codex, account: "codex.main"),
@@ -32,9 +32,6 @@ enum UsageFiles {
                      Root(path: home + "/.gemini/antigravity-cli/brain", kind: .antigravity, account: "antigravity.main")]
         for name in folders(home + "/.claude-accounts") {
             let dir = "\(home)/.claude-accounts/\(name)"
-            for kept in folders(dir) where kept.hasPrefix("projects-before-sharing") {
-                roots.append(Root(path: "\(dir)/\(kept)", kind: .claude, account: "claude.\(name)"))
-            }
             if isRealDirectory(dir + "/projects") {
                 roots.append(Root(path: dir + "/projects", kind: .claude, account: "claude.\(name)"))
             }

@@ -370,10 +370,10 @@ final class AgentModelsTests: LastDropTestCase {
         let path = folder.appendingPathComponent("claude")
         let script = """
         #!/bin/bash
-        echo "${CLAUDE_CONFIG_DIR:-main} $*" >> "\(folder.path)/calls"
+        echo "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-main} $*" >> "\(folder.path)/calls"
         cat > /dev/null
         echo '{"type":"system","subtype":"init","session_id":"s1","cwd":"/w","model":"claude-fable-5-1","agents":[]}'
-        case "${CLAUDE_CONFIG_DIR:-main}" in
+        case "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-main}" in
         \(refusing.map { "*/\($0)|\($0)" }.joined(separator: "|"))) echo '{"type":"result","is_error":true,"result":"Fable 5.1 requires usage credits. Switch to another model.","api_error_status":429}' ;;
         *) echo '{"type":"result","is_error":false,"result":"done","num_turns":1}' ;;
         esac

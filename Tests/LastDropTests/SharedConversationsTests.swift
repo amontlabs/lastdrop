@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-/// Every account's conversations folder points at the one shared `~/.claude/projects`, so usage has to tell the
+/// Runs on every account keep their conversations in the one `~/.claude/projects`, so usage has to tell the
 /// accounts apart through the session ledger.
 final class SharedConversationsTests: LastDropTestCase {
     private var folder: URL!
@@ -21,61 +21,11 @@ final class SharedConversationsTests: LastDropTestCase {
     private var shared: URL { home.appendingPathComponent(".claude/projects", isDirectory: true) }
     private var account: URL { home.appendingPathComponent(".claude-accounts/Work", isDirectory: true) }
 
-    private func linkPoints(_ path: URL, at target: URL) throws -> Bool {
-        try FileManager.default.destinationOfSymbolicLink(atPath: path.path) == target.path
-    }
-
     private func append(_ text: String, to path: URL) throws {
         let handle = try FileHandle(forWritingTo: path)
         defer { try? handle.close() }
         handle.seekToEndOfFile()
         handle.write(Data(text.utf8))
-    }
-
-    // MARK: Sharing the folder
-
-    func testSharingRenamesAsideAndLinks() throws {
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
-        try "kept".write(to: account.appendingPathComponent("projects/p/s.jsonl"), atomically: true, encoding: .utf8)
-        ClaudeSignIn.shareConversations(folder: account, shared: shared)
-        XCTAssertTrue(try linkPoints(account.appendingPathComponent("projects"), at: shared))
-        XCTAssertEqual(try String(contentsOf: account.appendingPathComponent("projects-before-sharing/p/s.jsonl"), encoding: .utf8), "kept")
-        // Writing through the link lands in the shared folder.
-        try FileManager.default.createDirectory(at: shared.appendingPathComponent("p"), withIntermediateDirectories: true)
-        try "new".write(to: account.appendingPathComponent("projects/p/other.jsonl"), atomically: true, encoding: .utf8)
-        XCTAssertEqual(try String(contentsOf: shared.appendingPathComponent("p/other.jsonl"), encoding: .utf8), "new")
-    }
-
-    func testSharingTwiceChangesNothing() throws {
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
-        ClaudeSignIn.shareConversations(folder: account, shared: shared)
-        ClaudeSignIn.shareConversations(folder: account, shared: shared)
-        XCTAssertTrue(try linkPoints(account.appendingPathComponent("projects"), at: shared))
-        // The first call's copy stays aside; the second makes no room for another.
-        XCTAssertTrue(FileManager.default.fileExists(atPath: account.appendingPathComponent("projects-before-sharing").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: account.appendingPathComponent("projects-before-sharing-2").path))
-    }
-
-    func testSharingKeepsATakenName() throws {
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects-before-sharing"), withIntermediateDirectories: true)
-        ClaudeSignIn.shareConversations(folder: account, shared: shared)
-        XCTAssertTrue(try linkPoints(account.appendingPathComponent("projects"), at: shared))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: account.appendingPathComponent("projects-before-sharing").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: account.appendingPathComponent("projects-before-sharing-2").path))
-    }
-
-    func testSharingAMissingFolderJustLinks() throws {
-        try FileManager.default.createDirectory(at: account, withIntermediateDirectories: true)
-        ClaudeSignIn.shareConversations(folder: account, shared: shared)
-        XCTAssertTrue(try linkPoints(account.appendingPathComponent("projects"), at: shared))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: account.appendingPathComponent("projects-before-sharing").path))
-    }
-
-    func testMainAccountIsLeftAlone() {
-        XCTAssertNil(ClaudeAccount(id: "main").cliConfigDir)
-        ClaudeSignIn.shareConversations(ClaudeAccount(id: "main"))   // must not touch anything
-        XCTAssertFalse(FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.claude/projects-before-sharing"))
     }
 
     // MARK: Roots
@@ -84,18 +34,18 @@ final class SharedConversationsTests: LastDropTestCase {
         UsageFiles.roots(home: home.path).filter { $0.kind == .claude }.map(\.path)
     }
 
-    func testRootsSkipALinkedProjectsFolder() throws {
-        try FileManager.default.createDirectory(at: shared.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects-before-sharing/p"), withIntermediateDirectories: true)
-        try FileManager.default.createSymbolicLink(at: account.appendingPathComponent("projects"), withDestinationURL: shared)
-        XCTAssertEqual(try claudeRoots(), [shared.path, account.appendingPathComponent("projects-before-sharing").path])
+    func testRootsHaveMainAndEachAccountsOwnRealProjects() throws {
+        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
+        // No migration any more: a leftover `projects-before-sharing` is no root.
+        XCTAssertEqual(try claudeRoots(), [shared.path, account.appendingPathComponent("projects").path])
     }
 
     func testRootsNeverWalkTheSameRealPathTwice() throws {
         try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: account, withIntermediateDirectories: true)
-        // Even a kept-aside folder that is a link to the shared one is walked once, as the shared root.
-        try FileManager.default.createSymbolicLink(at: account.appendingPathComponent("projects-before-sharing"), withDestinationURL: shared)
+        // An account's `projects` that is a link to the main one is walked once, as the main root.
+        try FileManager.default.createSymbolicLink(at: account.appendingPathComponent("projects"), withDestinationURL: shared)
         XCTAssertEqual(try claudeRoots(), [shared.path])
     }
 
@@ -137,8 +87,8 @@ final class SharedConversationsTests: LastDropTestCase {
 
     func testAnAccountFolderKeepsItsOwnAccount() throws {
         SessionLedger.record(session: "s1", account: "Work")
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects-before-sharing/p"), withIntermediateDirectories: true)
-        try line(id: "m1", time: "2026-10-30T16:25:03.424Z").write(to: account.appendingPathComponent("projects-before-sharing/p/s1.jsonl"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
+        try line(id: "m1", time: "2026-10-30T16:25:03.424Z").write(to: account.appendingPathComponent("projects/p/s1.jsonl"), atomically: true, encoding: .utf8)
         XCTAssertEqual(try accounts(updateRoots()), ["claude.Work"])
     }
 
@@ -152,20 +102,5 @@ final class SharedConversationsTests: LastDropTestCase {
         let usage = UsageParser.claude(path.path, from: 0, forkedAt: forked, ledger: UsageLedger())
         XCTAssertEqual(usage.rows.count, 2)
         XCTAssertEqual(UsageParser.claude(path.path, from: 0, ledger: UsageLedger()).rows.count, 3)
-    }
-
-    func testARescanAfterSharingDoesntCountTwice() throws {
-        try FileManager.default.createDirectory(at: account.appendingPathComponent("projects/p"), withIntermediateDirectories: true)
-        try line(id: "m1", time: "2026-10-30T16:25:03.424Z").write(to: account.appendingPathComponent("projects/p/s1.jsonl"), atomically: true, encoding: .utf8)
-        let db = folder.appendingPathComponent("usage.sqlite").path
-        _ = try XCTUnwrap(UsageIndex(path: db, roots: UsageFiles.roots(home: home.path), ledger: { UsageLedger() })).update()
-        // Sharing moves the folder aside: the same lines at their new path stay counted once.
-        try FileManager.default.moveItem(at: account.appendingPathComponent("projects"), to: account.appendingPathComponent("projects-before-sharing"))
-        _ = try XCTUnwrap(UsageIndex(path: db, roots: UsageFiles.roots(home: home.path), ledger: { UsageLedger() })).update()
-        let sqlite = try XCTUnwrap(SQLite(path: db))
-        let query = try XCTUnwrap(sqlite.prepare("SELECT input, output FROM usage"))
-        var rows: [String] = []
-        while query.next() { rows.append("\(query.int(0)),\(query.int(1))") }
-        XCTAssertEqual(rows, ["10,5"])
     }
 }

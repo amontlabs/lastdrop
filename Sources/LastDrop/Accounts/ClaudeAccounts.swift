@@ -49,7 +49,7 @@ struct ClaudeAccount: Codable, Hashable, Sendable, Identifiable {
 
     var isMain: Bool { id == Self.mainID }
 
-    /// `CLAUDE_CONFIG_DIR` for this account; nil for Main (the default `~/.claude`).
+    /// `CLAUDE_CONFIG_DIR` for this account (where its sign-in lives); nil for Main (the default `~/.claude`).
     var cliConfigDir: String? { Account(provider: .claude, key: id).folder }
 
     init(id: String) { self.id = id }
@@ -160,4 +160,17 @@ extension JSONDecoder {
         d.dateDecodingStrategy = .secondsSince1970
         return d
     }()
+}
+
+extension ClaudeAccount {
+    /// The environment to run claude on this account: always in the main profile (`CLAUDE_CONFIG_DIR` removed, so
+    /// settings, MCP servers and conversations come from `~/.claude`), signed in as this account through
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` (its folder is only a sign-in holder). Main uses the default sign-in.
+    func runEnvironment(from base: [String: String]) -> [String: String] {
+        var env = base
+        env.removeValue(forKey: "CLAUDE_CONFIG_DIR")
+        env.removeValue(forKey: "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        if let dir = cliConfigDir { env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = dir }
+        return env
+    }
 }

@@ -109,6 +109,7 @@ enum ClaudeBackend: AgentBackend {
                 return .init(text: "The \(entry.account) account is no longer in lastdrop.", isError: true, limitReached: false,
                              turns: 0, permissionDenials: 0)
             }
+            _ = SessionTransfer.transcriptInMain(entry.sessionID, from: account)   // an old run's session moves to ~/.claude
             AgentRegistry.setRunning(account.id)
             let req = SubagentRunner.Request(prompt: job.prompt, model: entry.model, effort: entry.effort, permissionMode: permissionMode,
                                              sessionID: entry.sessionID, resume: true, mcpConfig: job.mcpConfig,
@@ -170,7 +171,7 @@ enum ClaudeBackend: AgentBackend {
 
     static func terminal(_ entry: AgentRegistry.Entry) -> String? {
         let account = ClaudeAccount(id: entry.account)
-        let export = account.cliConfigDir.map { "export CLAUDE_CONFIG_DIR=\(ClaudeSignIn.shellQuote($0))\n" } ?? ""
+        let export = account.cliConfigDir.map { "unset CLAUDE_CONFIG_DIR\nexport CLAUDE_SECURESTORAGE_CONFIG_DIR=\(ClaudeSignIn.shellQuote($0))\n" } ?? ""
         return "\(export)cd \(ClaudeSignIn.shellQuote(entry.directory)) || exit 1\nexec claude --resume \(entry.sessionID)"
     }
 }

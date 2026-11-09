@@ -66,8 +66,7 @@ final class SubagentTests: LastDropTestCase {
         let args = SubagentRunner.arguments(.init(prompt: "x", subagentType: "Explore", model: "haiku", effort: "high", worktree: true,
                                                   permissionMode: "acceptEdits", sessionID: "s1", mcpConfig: "/m.json"))
         XCTAssertEqual(args, ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-                              "--session-id", "s1", "--agent", "Explore", "--model", "haiku", "--effort", "high", "--worktree",
-                              "--mcp-config", "/m.json"])
+                              "--session-id", "s1", "--agent", "Explore", "--model", "haiku", "--effort", "high", "--worktree"])   // no MCP copy: the main profile has the servers
         XCTAssertFalse(SubagentRunner.arguments(.init(prompt: "x", subagentType: "general-purpose", sessionID: "s")).contains("--agent"))
         XCTAssertTrue(SubagentRunner.arguments(.init(prompt: "x", sessionID: "s1", resume: true)).contains("--resume"))
         let forkArgs = SubagentRunner.arguments(.init(prompt: "x", sessionID: "s1", resume: true, forkTo: "s2"))
@@ -90,9 +89,59 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertEqual(pro["PATH"], "/bin")
         XCTAssertNil(pro["CLAUDE_CODE_ACCOUNT_UUID"])
         XCTAssertNil(pro["CLAUDECODE"])
-        XCTAssertTrue(pro["CLAUDE_CONFIG_DIR"]!.hasSuffix("/.claude-accounts/Pro"))
+        XCTAssertNil(pro["CLAUDE_CONFIG_DIR"])
+        XCTAssertTrue(pro["CLAUDE_SECURESTORAGE_CONFIG_DIR"]!.hasSuffix("/.claude-accounts/Pro"))
         XCTAssertEqual(pro[AgentRun.nestedMarker], "1")
         XCTAssertNil(SubagentRunner.environment(for: ClaudeAccount(id: "main"), from: base)["CLAUDE_CONFIG_DIR"])
+    }
+
+    func testRunEnvironmentSignsInThroughTheAccountsFolderInTheMainProfile() {
+        let base = ["PATH": "/bin", "CLAUDE_CONFIG_DIR": "/elsewhere", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/other"]
+        let pro = ClaudeAccount(id: "Pro").runEnvironment(from: base)
+        XCTAssertNil(pro["CLAUDE_CONFIG_DIR"])
+        XCTAssertEqual(pro["CLAUDE_SECURESTORAGE_CONFIG_DIR"], ClaudeAccount(id: "Pro").cliConfigDir)
+        XCTAssertEqual(pro["PATH"], "/bin")
+        let main = ClaudeAccount(id: "main").runEnvironment(from: base)
+        XCTAssertNil(main["CLAUDE_CONFIG_DIR"])
+        XCTAssertNil(main["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+    }
+
+    func testMCPConfigIsOnlyPassedToAnEndpoint() {
+        var request = SubagentRunner.Request(prompt: "go", sessionID: "s", mcpConfig: "/m.json")
+        XCTAssertFalse(SubagentRunner.arguments(request).contains("--mcp-config"))
+        request.endpoint = EndpointProfile(provider: .zai, directory: "/tmp/zai", model: "glm-5.3", effort: nil)
+        XCTAssertTrue(SubagentRunner.arguments(request).contains("--mcp-config"))
+    }
+
+    func testOwnAccountFollowsTheSecureStorageFolderFirst() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-own-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(#"{"oauthAccount":{"accountUuid":"max-uuid"}}"#.utf8).write(to: folder.appendingPathComponent(".claude.json"))
+        let env = ["CLAUDE_SECURESTORAGE_CONFIG_DIR": folder.path, "CLAUDE_CODE_ACCOUNT_UUID": "app-uuid"]
+        XCTAssertEqual(SubagentAccounts.ownAccountUUID(environment: env), "max-uuid")
+        // A folder with no sign-in falls through to the app's UUID.
+        XCTAssertEqual(SubagentAccounts.ownAccountUUID(environment: ["CLAUDE_SECURESTORAGE_CONFIG_DIR": "/nonexistent-x",
+                                                                    "CLAUDE_CODE_ACCOUNT_UUID": "app-uuid"]), "app-uuid")
+    }
+
+    func testAnOldRunsSessionIsCopiedToTheMainProjectsOnce() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-compat-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("old/projects"), main = root.appendingPathComponent("main/projects")
+        let side = old.appendingPathComponent("-w/s1/tool-results")
+        try FileManager.default.createDirectory(at: side, withIntermediateDirectories: true)
+        try Data("{\"type\":\"user\"}".utf8).write(to: old.appendingPathComponent("-w/s1.jsonl"))
+        try Data("big".utf8).write(to: side.appendingPathComponent("r.txt"))
+        let account = ClaudeAccount(id: "Old")
+        let found = SessionTransfer.transcriptInMain("s1", from: account, main: main, oldProjects: old)
+        XCTAssertEqual(found?.path, main.appendingPathComponent("-w/s1.jsonl").path)
+        XCTAssertEqual(FileManager.default.contents(atPath: main.appendingPathComponent("-w/s1/tool-results/r.txt").path), Data("big".utf8))
+        // Already there: found without copying again, and an unknown session is nil.
+        try Data("{\"type\":\"user\",\"x\":1}".utf8).write(to: main.appendingPathComponent("-w/s1.jsonl"))
+        _ = SessionTransfer.transcriptInMain("s1", from: account, main: main, oldProjects: old)
+        XCTAssertEqual(try String(contentsOf: main.appendingPathComponent("-w/s1.jsonl"), encoding: .utf8), "{\"type\":\"user\",\"x\":1}")
+        XCTAssertNil(SessionTransfer.transcriptInMain("nope", from: account, main: main, oldProjects: old))
     }
 
     func testMCPServersComeFromTheCallersConfig() {

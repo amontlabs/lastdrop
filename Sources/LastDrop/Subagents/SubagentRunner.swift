@@ -97,7 +97,8 @@ enum SubagentRunner {
         if let effort = request.effort, !effort.isEmpty { args += ["--effort", effort] }
         if request.worktree { args.append("--worktree") }
         if !request.disallowedTools.isEmpty { args += ["--disallowedTools", request.disallowedTools.joined(separator: ",")] }
-        if let mcp = request.mcpConfig { args += ["--mcp-config", mcp] }
+        // Claude accounts run in the main profile, which has the user's MCP servers; only an endpoint's own profile needs the copy.
+        if let mcp = request.mcpConfig, request.endpoint != nil { args += ["--mcp-config", mcp] }
         if let prompt = request.systemPrompt, !prompt.isEmpty { args += ["--append-system-prompt", prompt] }
         if let endpoint = request.endpoint { args += endpoint.arguments }
         return args
@@ -115,12 +116,11 @@ enum SubagentRunner {
 
     /// The calling session's environment, minus everything that ties it to that session and account.
     static func environment(for account: ClaudeAccount, from base: [String: String], endpoint: EndpointProfile? = nil) -> [String: String] {
-        var env = base.filter { key, _ in
+        var env = account.runEnvironment(from: base).filter { key, _ in
             !(key.hasPrefix("CLAUDE_CODE_") || key.hasPrefix("CLAUDE_AGENT_") || key == "CLAUDECODE"
               || key == "CLAUDE_CONFIG_DIR" || key == "CLAUDE_EFFORT" || key == "CLAUDE_PID"
               || key.hasPrefix("ANTHROPIC_") || key == "MAX_THINKING_TOKENS")
         }
-        if let dir = account.cliConfigDir { env["CLAUDE_CONFIG_DIR"] = dir }
         if let endpoint {
             env["CLAUDE_CONFIG_DIR"] = endpoint.directory
             env.merge(endpoint.environment) { _, new in new }

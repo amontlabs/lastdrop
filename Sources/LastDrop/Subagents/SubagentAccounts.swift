@@ -82,6 +82,9 @@ enum SubagentAccounts {
     /// The account the calling session runs as: the Claude app passes it to its Code-tab sessions; a
     /// terminal session is the one its config folder is signed in to.
     static func ownAccountUUID(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        // The folder a run is signed in at wins: a T3 thread on another account carries the Claude app's UUID too.
+        if let dir = environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"], !dir.isEmpty,
+           let uuid = ClaudeProvider.signedInAccount(configDir: (dir as NSString).expandingTildeInPath).uuid { return uuid }
         if let uuid = environment["CLAUDE_CODE_ACCOUNT_UUID"], !uuid.isEmpty { return uuid }
         let dir = environment["CLAUDE_CONFIG_DIR"].map { ($0 as NSString).expandingTildeInPath }
         return ClaudeProvider.signedInAccount(configDir: dir).uuid

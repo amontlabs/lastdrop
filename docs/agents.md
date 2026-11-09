@@ -355,7 +355,10 @@ drops `judges` (its encoder doesn't know it), which puts the defaults back.
 
 Two runners cover four providers.
 
-**1. Claude Code runner (exists).** Claude accounts as today, plus any Anthropic-compatible endpoint:
+**1. Claude Code runner (exists).** Claude accounts as today, plus any Anthropic-compatible endpoint. A Claude
+account's folder is only its sign-in: the run is `claude` in the main profile (`CLAUDE_CONFIG_DIR` unset) with
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` naming the folder, so settings, MCP servers (no `--mcp-config` copy) and
+sessions (`~/.claude/projects`) are the user's own. Endpoints:
 - Z.ai: `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, `ANTHROPIC_AUTH_TOKEN=<Coding Plan API key>`,
   GLM model ids for every model role. Effort maps to GLM low/high/max. Needs a Coding Plan **API key**: the
   web session lastdrop keeps can't do inference. Ask for the key in Settings first; creating it through the

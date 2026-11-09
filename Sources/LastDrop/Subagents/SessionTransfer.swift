@@ -1,10 +1,29 @@
 import Foundation
 
-/// Copies a Claude Code session from one account's folder to another's, so `--resume` on the other account
-/// continues it: what lets an agent an account stopped at its usage limit finish elsewhere.
+/// Finds a Claude Code session's transcript in `~/.claude/projects`, where every run now keeps its sessions, and
+/// brings one over from an account's own folder when an agent started before that left it there.
 enum SessionTransfer {
     static func projectsDir(_ account: ClaudeAccount) -> URL {
         URL(fileURLWithPath: account.cliConfigDir ?? NSHomeDirectory() + "/.claude").appendingPathComponent("projects")
+    }
+
+    static var mainProjects: URL { URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects") }
+
+    /// The session's transcript under `projects`, whatever the project folder.
+    static func transcript(_ sessionID: String, in projects: URL) -> URL? {
+        let fm = FileManager.default
+        guard !sessionID.isEmpty, let project = (try? fm.contentsOfDirectory(atPath: projects.path))?.first(where: {
+            fm.fileExists(atPath: projects.appendingPathComponent("\($0)/\(sessionID).jsonl").path)
+        }) else { return nil }
+        return projects.appendingPathComponent("\(project)/\(sessionID).jsonl")
+    }
+
+    /// The session's transcript in `~/.claude/projects`; one only in the old account's own folder is copied
+    /// there first (with its side folder). Nil when neither has it.
+    static func transcriptInMain(_ sessionID: String, from old: ClaudeAccount, main: URL = mainProjects, oldProjects: URL? = nil) -> URL? {
+        if let found = transcript(sessionID, in: main) { return found }
+        guard copy(sessionID, from: oldProjects ?? projectsDir(old), to: main) else { return nil }
+        return transcript(sessionID, in: main)
     }
 
     /// True once the transcript, and its side files when it has any, are in `to`'s folder for the same project.

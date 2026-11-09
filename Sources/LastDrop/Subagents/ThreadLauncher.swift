@@ -1,11 +1,12 @@
 import Foundation
 
 /// `lastdrop --claude-thread <claude args…>`: the launcher the wrapper script T3 Code points at runs, which
-/// picks the account and execs the real claude. T3 starts every thread's Claude Code itself and always resumes
+/// picks the account (claude then runs in the main profile, signed in as it through
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR`) and execs the real claude. T3 starts every thread's Claude Code itself and always resumes
 /// it with the id it knows the thread by, so this launcher is the only place accounts can be chosen: a new
 /// thread starts on the account with the most room, and a thread that continues moves only when moving costs
 /// nothing (the conversation went quiet, or was just compacted). It writes the session ledger, because the
-/// conversations folder is shared and no longer tells which account a conversation used.
+/// conversations folder is shared (`~/.claude/projects`) and doesn't tell which account a conversation used.
 enum ThreadLauncher {
     // MARK: The decision, and everything it reads
 
@@ -300,16 +301,7 @@ enum ThreadLauncher {
                                         thread: parsed.resume ?? decision.session, at: Date()))
         }
         SubagentLog.write("thread \(String((parsed.resume ?? decision.session).prefix(8))): \(decision.action.rawValue) on \(decision.account) (\(decision.reason))")
-        return Plan(args: decision.args, environment: environment(for: decision.account))
-    }
-
-    /// The environment claude runs in: this process's, with `CLAUDE_CONFIG_DIR` naming the chosen account
-    /// (gone for Main, which uses the default folder).
-    private static func environment(for accountID: String, base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
-        var environment = base
-        if let dir = ClaudeAccount(id: accountID).cliConfigDir { environment["CLAUDE_CONFIG_DIR"] = dir }
-        else { environment.removeValue(forKey: "CLAUDE_CONFIG_DIR") }
-        return environment
+        return Plan(args: decision.args, environment: ClaudeAccount(id: decision.account).runEnvironment(from: ProcessInfo.processInfo.environment))
     }
 
     /// The real claude: the native install, then PATH — but never this launcher again, which T3's

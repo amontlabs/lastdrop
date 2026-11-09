@@ -10,7 +10,7 @@ and the earlier designs, kept for reference; their code is in git history.
 lastdrop chooses the account for each T3 Code thread too, not only for subagents. T3's Claude provider has
 a **Binary path** setting. It points to `~/Library/Application Support/lastdrop/bin/claude-thread`, a
 wrapper that runs `lastdrop --claude-thread <T3's arguments>`. The launcher (`ThreadLauncher`) chooses the
-account, sets `CLAUDE_CONFIG_DIR` to it (none for Main), and `execve`s the real `claude`. T3 keeps every
+account, runs claude in the main profile signed in as it (`CLAUDE_SECURESTORAGE_CONFIG_DIR`; none for Main), and `execve`s the real `claude`. T3 keeps every
 Claude-only feature, because it still talks to Claude Code. A generic ACP provider would have lost idle
 compaction, limit display, forks and steering.
 
@@ -48,11 +48,19 @@ because they're short and move by themselves at a limit.
 own id forever and ignores the one Claude reports, so `SessionLedger` maps T3's id to the conversation it
 continues in now. A subagent that moves at its limit forks the same way (`AgentRun.carryOn`).
 
-**One conversations folder.** Before resuming, T3 checks that `<its id>.jsonl` exists in `~/.claude/projects`.
-So every account folder's `projects` is now a link to `~/.claude/projects` (`ClaudeSignIn.shareConversations`,
-run at launch). A folder's old conversations are kept as `projects-before-sharing`. Stats used to tell the
-account by folder; it now reads it from `SessionLedger` (`~/Library/Application Support/lastdrop/sessions.json`),
-and skips a fork's lines from before `forkedAt`, which its parent counts.
+**Accounts are only sign-ins.** A run on another account is claude in the main profile (`CLAUDE_CONFIG_DIR` unset)
+with `CLAUDE_SECURESTORAGE_CONFIG_DIR=~/.claude-accounts/<name>` (`ClaudeAccount.runEnvironment`). Claude Code then
+uses that folder's keychain sign-in ("Claude Code-credentials-<sha8 of the folder path>"): the request carries that
+account's token and account_uuid, while settings, MCP servers, memory and conversations come from `~/.claude`. So T3's
+check for `<its id>.jsonl` in `~/.claude/projects` passes on every account, and nothing is copied between folders.
+Stats tells the account from `SessionLedger` (`~/Library/Application Support/lastdrop/sessions.json`), and skips a
+fork's lines from before `forkedAt`, which its parent counts. A folder's own `projects` (runs from before) still
+counts as that account's. Subagents started before this change keep their session in the old account's folder;
+resuming one copies it to `~/.claude/projects` first (`SessionTransfer.transcriptInMain`).
+
+**The session's own account.** `SubagentAccounts.ownAccountUUID` reads `CLAUDE_SECURESTORAGE_CONFIG_DIR` first (the
+account signed in at that folder), then `CLAUDE_CODE_ACCOUNT_UUID`, then `CLAUDE_CONFIG_DIR`, so a T3 thread
+launched on Max routes its subagents away from Max.
 
 **At a limit.** The launcher records each thread's process (`SessionLedger.live`). Every 20 seconds the app
 (`ThreadReaper`) looks at those threads' transcripts. When one ends with a usage-limit notice, the app marks the
@@ -65,13 +73,15 @@ before the move may not find that turn.
 
 Checked: T3's handling of the binary path, process exits and session ids, read in its source (0.1.7). Live,
 with Haiku: `--resume X --fork-session --session-id N` on another account continues the conversation under
-exactly `N`, and the launcher starts and resumes a thread. A live move between accounts is still to check once
-the shared folder is in place.
+exactly `N`, and the launcher starts and resumes a thread. Also live (Claude Code 2.1.319): claude in the main profile with
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` set uses that account's sign-in and account_uuid, and changed nothing in
+`~/.claude.json` or either keychain item. Not yet exercised in this mode: a real token refresh (Claude Code does it
+itself, with its lock in the secure-storage folder, shared with `ClaudeSignIn.renew`), and a live move between accounts.
 
 ## Current design (2026-10-27): subagents on accounts with room
 
-The app copies below were also replaced. Each account is now a Claude Code sign-in (`CLAUDE_CONFIG_DIR`
-= `~/.claude-accounts/<name>`). lastdrop's plugin keeps Claude Code's built-in `Agent` tool and native
+The app copies below were also replaced. Each account is now a Claude Code sign-in held in
+`~/.claude-accounts/<name>`; runs use it through `CLAUDE_SECURESTORAGE_CONFIG_DIR` in the main profile. lastdrop's plugin keeps Claude Code's built-in `Agent` tool and native
 subagents. When another account has room (never the session's own, both thresholds respected, most room
 first), `lastdrop --agent-route` admits the call without starting a model or claiming a warm process.
 The engine still checks the call and creates its own task through `agent.spawn`'s `next(e)`. A separate
@@ -97,8 +107,8 @@ of parallel calls doesn't all land on one account's last points.
 Pro at 50% ran it to its session limit and each reported `You've hit your session limit` to the caller,
 which then asked the user whether to wait). If an account reaches its limit before any work, the agent
 starts again on the next account. If it reaches its limit partway through, the agent's Claude Code session
-is copied to the next account's folder (`projects/<folder>/<session>.jsonl` and its side files, without
-the trailing limit notice) and continued there with `--resume` and a neutral "continue" prompt. A follow-up
+has its transcript rewritten in place in `~/.claude/projects` without the trailing limit notice (a session an older
+run left in its account's folder is copied there first) and is forked and continued there with `--resume` and a neutral "continue" prompt. A follow-up
 (SendMessage) works the same way. The next account is the other account with the most room. If none
 has room, it's the session's own account, which is where a built-in subagent would have run. The same
 applies when the room an agent was admitted for is gone by the time it starts. Only when every account,

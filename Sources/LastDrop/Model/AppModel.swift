@@ -186,9 +186,6 @@ final class AppModel {
         // The wrapper T3 Code points at, kept current with where this app's executable is.
         Task.detached { ThreadLauncher.writeWrapper() }
         refreshLocalChecks()
-        // Every account reads the one shared conversations folder; renaming folders stays off the main thread.
-        let extras = claudeConfig.accounts
-        Task.detached(priority: .utility) { for account in extras { ClaudeSignIn.shareConversations(account) } }
         loop = Task { [weak self] in
             var lastReaperCheck = Date.distantPast
             while !Task.isCancelled {
