@@ -17,6 +17,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/lastdrop"
 # The Claude Code plugin that runs subagents on other accounts, a marketplace Claude Code reads in place.
 cp -R ClaudePlugin "$app/Contents/Resources/ClaudePlugin"
+# Codex's reviewer policy (Apache 2.0, with its LICENSE and NOTICE), which judges Antigravity agents' commands.
+cp -R Resources/CodexGuardian "$app/Contents/Resources/CodexGuardian"
 # Claude Code keeps its copy by version: a new version of the app is a new version of the plugin.
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$version\"/" "$app/Contents/Resources/ClaudePlugin/lastdrop/.claude-plugin/plugin.json"
 # The app icon, drawn by the app itself.

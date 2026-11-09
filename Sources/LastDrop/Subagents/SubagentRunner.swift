@@ -371,7 +371,7 @@ enum SubagentRunner {
         let usage = root.dict("usage")
         var declined: [String] = []
         for denial in root["permission_denials"] as? [[String: Any]] ?? [] {
-            let line = describe(tool: denial.string("tool_name") ?? "tool", input: denial.dict("tool_input") ?? [:])
+            let line = describe(tool: denial.string("tool_name") ?? "tool", input: denial.dict("tool_input") ?? [:]) + " (needed approval)"
             if !declined.contains(line) { declined.append(line) }
         }
         return Result(text: text, isError: isError,

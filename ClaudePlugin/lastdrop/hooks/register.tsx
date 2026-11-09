@@ -511,7 +511,7 @@ function header(request: Request, line: Line): string {
   if (request.agent === undefined) return where ? `${where}\n\n` : ''
   if (!line.model) return ''
   const worktree = where ? ` ${where}` : ''
-  const declined = Array.isArray(line.declined) && line.declined.length > 0 ? `\nDeclined (needed approval): ${line.declined.join('; ')}` : ''
+  const declined = Array.isArray(line.declined) && line.declined.length > 0 ? `\nDeclined: ${line.declined.join('; ')}` : ''
   const skipped = Array.isArray(line.unavailable) && line.unavailable.length > 0 ? ` (${line.unavailable.join(', ')} unavailable)` : ''
   return `Ran on ${String(line.model)}${skipped}.${worktree}${declined}\n\n`
 }
@@ -697,7 +697,7 @@ const T3_TOOLS = /^mcp__t3-code__/
 /** Where a delegated child's report came from: T3 shows only the child thread's own instance and model. */
 function delegatedHeader(line: Line): string {
   const where = line.worktreePath ? ` Worktree: ${String(line.worktreePath)}${line.worktreeBranch ? ` (branch ${String(line.worktreeBranch)})` : ''}.` : ''
-  const declined = Array.isArray(line.declined) && line.declined.length > 0 ? `\nDeclined (needed approval): ${line.declined.join('; ')}` : ''
+  const declined = Array.isArray(line.declined) && line.declined.length > 0 ? `\nDeclined: ${line.declined.join('; ')}` : ''
   const skipped = Array.isArray(line.unavailable) && line.unavailable.length > 0 ? `, ${line.unavailable.join(', ')} unavailable` : ''
   if (!line.account) return where ? `${where.trim()}\n\n` : ''
   return `Ran on ${String(line.account)}${line.model ? ` (${String(line.model)}${skipped})` : ''}.${where}${declined}\n\n`

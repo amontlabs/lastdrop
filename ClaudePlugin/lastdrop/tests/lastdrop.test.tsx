@@ -594,7 +594,7 @@ test('a route saved for the old lastdrop: types still resumes', async ($, on) =>
 
 test('the report header names the model, the worktree and what was declined', async ($, on) => {
   const result = { ...RESULT, model: 'gpt-6.1-sol' }
-  const full = { ...result, worktreePath: '/w/x', worktreeBranch: 'agent-x', declined: ['git push', 'rm -rf build'] }
+  const full = { ...result, worktreePath: '/w/x', worktreeBranch: 'agent-x', declined: ['git push (needed approval)', 'rm -rf build (needed approval)'] }
   const outputs = [result]
   const e = engine([$, on], { catalog: CATALOG, outputs })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
@@ -605,7 +605,7 @@ test('the report header names the model, the worktree and what was declined', as
   expect(report(await step($, 'turn-2'))).toContain(`Ran on gpt-6.1-sol. Worktree: /w/x (branch agent-x).\n\n`)
   outputs[0] = full
   await e.launch({ model: 'sol', tool_use_id: 'toolu_3' })
-  expect(report(await step($, 'turn-3'))).toBe(`Ran on gpt-6.1-sol. Worktree: /w/x (branch agent-x).\nDeclined (needed approval): git push; rm -rf build\n\n${RESULT.text}`)
+  expect(report(await step($, 'turn-3'))).toBe(`Ran on gpt-6.1-sol. Worktree: /w/x (branch agent-x).\nDeclined: git push (needed approval); rm -rf build (needed approval)\n\n${RESULT.text}`)
 })
 
 test('Claude reroutes and failed agent runs get no header', async ($, on) => {
@@ -955,9 +955,9 @@ test('the header names the models skipped as unavailable', async ($, on) => {
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   await e.launch({ model: 'sol' })
   expect(report(await step($))).toBe(`Ran on gemini-4-argon-high (gpt-6.1-sol unavailable).\n\n${RESULT.text}`)
-  outputs[0] = { ...RESULT, model: 'c', unavailable: ['a', 'b'], worktreePath: '/w/x', worktreeBranch: 'agent-x', declined: ['git push'] }
+  outputs[0] = { ...RESULT, model: 'c', unavailable: ['a', 'b'], worktreePath: '/w/x', worktreeBranch: 'agent-x', declined: ['git push (needed approval)'] }
   await e.launch({ model: 'sol', tool_use_id: 'toolu_2' })
-  expect(report(await step($, 'turn-2'))).toBe(`Ran on c (a, b unavailable). Worktree: /w/x (branch agent-x).\nDeclined (needed approval): git push\n\n${RESULT.text}`)
+  expect(report(await step($, 'turn-2'))).toBe(`Ran on c (a, b unavailable). Worktree: /w/x (branch agent-x).\nDeclined: git push (needed approval)\n\n${RESULT.text}`)
 })
 
 test('a fallback attempt updates the pane row and creates no second one', async ($, on) => {
