@@ -131,7 +131,7 @@ final class ThreadLauncherTests: LastDropTestCase {
 
     func testARecentLimitReachedAnswerCountsAsFull() {
         let decision = ThreadLauncher.decide(["--resume", "X"], ledger: ledger(sessions: ["X": "A"]),
-                                             candidates: [candidate("A", 10, 10), candidate("B", 10, 10)],
+                                             candidates: [candidate("A", 10, 10), candidate("B", 0, 0)],
                                              transcript: transcript(age: 60), now: now,
                                              isFull: { $0 == "A" }, newSessionID: { "m" })
         XCTAssertEqual(decision.action, .move)
@@ -224,6 +224,8 @@ final class ThreadLauncherTests: LastDropTestCase {
         // The real ledger: the thread moved to B earlier, so it continues in conversation C now.
         SessionLedger.record(session: "C", account: "B")
         SessionLedger.setCurrent("C", ofThread: "X")
+        try FileManager.default.createDirectory(at: projects.appendingPathComponent("p"), withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: projects.appendingPathComponent("p").appendingPathComponent("C.jsonl"))
         let decision = decide(["--resume", "X"], candidates: [candidate("B", 10, 10), candidate("main", 0, 0)],
                               transcript: transcript(age: 10 * 60), newSessionID: "", live: true)
         XCTAssertEqual(decision.action, .stay)
@@ -379,7 +381,9 @@ final class ThreadLauncherTests: LastDropTestCase {
         defer { try? FileManager.default.removeItem(at: home) }
         let script = ThreadLauncher.wrapperScript(executable: "/nonexistent/lastdrop")
         // No claude anywhere: an error, 127.
-        XCTAssertEqual(try runScript(script, home: home, path: "/usr/bin:/bin").status, 127)
+        let installed = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude", "/usr/bin/claude", "/bin/claude"]
+            .contains { FileManager.default.isExecutableFile(atPath: $0) }
+        if !installed { XCTAssertEqual(try runScript(script, home: home, path: "/usr/bin:/bin").status, 127) }
         // A claude in ~/.local/bin runs with T3's arguments.
         let claude = bin.appendingPathComponent("claude")
         try Data("#!/bin/sh\necho fake-claude \"$@\"\n".utf8).write(to: claude)
