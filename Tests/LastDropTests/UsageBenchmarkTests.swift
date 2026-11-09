@@ -4,7 +4,7 @@ import XCTest
 
 /// The real transcripts on this Mac, timed. Reads them, writes only the database named by `LASTDROP_USAGE_BENCH`:
 /// `LASTDROP_USAGE_BENCH=/tmp/usage.sqlite swift test -c release -Xswiftc -enable-testing --filter UsageBenchmark`
-final class UsageBenchmarkTests: XCTestCase {
+final class UsageBenchmarkTests: LastDropTestCase {
     private func time<T>(_ label: String, _ work: () -> T) -> T {
         let start = DispatchTime.now().uptimeNanoseconds
         let result = work()

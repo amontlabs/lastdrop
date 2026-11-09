@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class AgentPoolTests: XCTestCase {
+final class AgentPoolTests: LastDropTestCase {
     private let now = Date(timeIntervalSince1970: 2_000_000_000)
     private let main = Account.main(.codex), work = Account(provider: .codex, key: "work"), home = Account(provider: .codex, key: "home")
 

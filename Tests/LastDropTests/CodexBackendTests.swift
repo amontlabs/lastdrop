@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class CodexBackendTests: XCTestCase {
+final class CodexBackendTests: LastDropTestCase {
     private func json(_ text: String) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
     }

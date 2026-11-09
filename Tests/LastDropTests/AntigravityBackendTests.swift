@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class AntigravityBackendTests: XCTestCase {
+final class AntigravityBackendTests: LastDropTestCase {
     func testModelsGroupOnlyOfferedEfforts() throws {
         let models = AntigravityBackend.parseModels("""
         Fetching available models...

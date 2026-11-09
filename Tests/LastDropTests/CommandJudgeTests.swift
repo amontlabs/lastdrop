@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class CommandJudgeTests: XCTestCase {
+final class CommandJudgeTests: LastDropTestCase {
     func testThePolicyFilesShipWithTheirLicence() throws {
         let directory = try XCTUnwrap(CommandJudge.policyDirectory())
         for file in ["policy_template.md", "policy.md", "LICENSE", "NOTICE"] {
@@ -83,7 +83,7 @@ final class CommandJudgeTests: XCTestCase {
     }
 }
 
-final class CommandJudgeSettingTests: XCTestCase {
+final class CommandJudgeSettingTests: LastDropTestCase {
     func testTheJudgeRunsTheConfiguredModelAndEffort() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-judge-setting-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

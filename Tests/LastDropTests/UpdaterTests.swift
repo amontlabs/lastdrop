@@ -5,7 +5,7 @@ import XCTest
 @testable import LastDrop
 
 @MainActor
-final class UpdaterTests: XCTestCase {
+final class UpdaterTests: LastDropTestCase {
     private var dir: URL!
     private let page = URL(string: "https://example.com")!
 

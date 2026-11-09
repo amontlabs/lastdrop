@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class PermissionRulesTests: XCTestCase {
+final class PermissionRulesTests: LastDropTestCase {
     private func rules(allow: [String] = [], deny: [String] = [], ask: [String] = []) -> PermissionRules {
         var rules = PermissionRules()
         rules.add(["allow": allow, "deny": deny, "ask": ask])

@@ -2,7 +2,7 @@ import XCTest
 @testable import LastDrop
 
 /// Extra models for the Agent tool: the model asked for is the model that runs, read-only roles, effort, worktrees.
-final class AgentModelsTests: XCTestCase {
+final class AgentModelsTests: LastDropTestCase {
     private func definition(effort: String? = "high") -> AgentDefinition {
         .init(name: "sol", description: "Reviews.", provider: .codex, model: "gpt-6.1-sol", effort: effort)
     }

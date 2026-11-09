@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class SubagentTests: XCTestCase {
+final class SubagentTests: LastDropTestCase {
     private func candidate(_ id: String, _ session: Double?, _ weekly: Double?, active: Int = 0) -> SubagentAccounts.Candidate {
         .init(account: ClaudeAccount(id: id), name: id, sessionUsed: session, weeklyUsed: weekly, active: active)
     }

@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class EndpointBackendTests: XCTestCase {
+final class EndpointBackendTests: LastDropTestCase {
     func testEndpointEnvironmentScrubsCredentialsAndPinsEveryModelRole() {
         let profile = EndpointProfile(provider: .zai, directory: "/tmp/zai", model: "glm-5.3", effort: "high")
         let request = SubagentRunner.Request(prompt: "x", sessionID: "s", endpoint: profile)

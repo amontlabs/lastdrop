@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class AgentCatalogTests: XCTestCase {
+final class AgentCatalogTests: LastDropTestCase {
     private func agent(_ name: String, enabled: Bool = true) -> AgentDefinition {
         AgentDefinition(name: name, description: "Second opinion on hard bugs.", provider: .codex, model: "gpt-6.1-sol", effort: "high", enabled: enabled)
     }

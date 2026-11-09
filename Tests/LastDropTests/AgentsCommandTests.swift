@@ -2,14 +2,16 @@ import Combine
 import XCTest
 @testable import LastDrop
 
-final class AgentsCommandTests: XCTestCase {
+final class AgentsCommandTests: LastDropTestCase {
     private var url: URL!
 
     override func setUp() {
+        super.setUp()
         url = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-\(UUID().uuidString).json")
     }
 
     override func tearDown() {
+        super.tearDown()
         try? FileManager.default.removeItem(at: url)
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + ".lock"))
     }

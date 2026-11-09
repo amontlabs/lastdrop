@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class AccountsTests: XCTestCase {
+final class AccountsTests: LastDropTestCase {
     private func keys(_ config: AccountsConfig, _ provider: ProviderID) -> [String] { config.pool(provider).map(\.key) }
 
     // MARK: Accounts

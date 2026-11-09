@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class ThreadLauncherTests: XCTestCase {
+final class ThreadLauncherTests: LastDropTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
     private var ledgerFile: URL!
     private var projects: URL!
@@ -14,6 +14,7 @@ final class ThreadLauncherTests: XCTestCase {
     }
 
     override func tearDown() {
+        super.tearDown()
         SessionLedger.fileOverride = nil
         ThreadLauncher.projectsOverride = nil
         try? FileManager.default.removeItem(at: ledgerFile)

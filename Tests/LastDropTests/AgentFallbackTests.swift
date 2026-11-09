@@ -26,7 +26,7 @@ enum FakeZAI: AgentBackend {
     static func terminal(_ entry: AgentRegistry.Entry) -> String? { nil }
 }
 
-final class AgentFallbackTests: XCTestCase {
+final class AgentFallbackTests: LastDropTestCase {
     private var lines: [[String: Any]] = []
     private var ledger: URL!
 
@@ -46,6 +46,7 @@ final class AgentFallbackTests: XCTestCase {
     }
 
     override func tearDown() {
+        super.tearDown()
         AgentRegistry.fileOverride = nil
         AgentRun.sink = nil
         AgentRun.backends = { $0.backend }

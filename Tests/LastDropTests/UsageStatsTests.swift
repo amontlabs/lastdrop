@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import LastDrop
 
-final class UsageStatsTests: XCTestCase {
+final class UsageStatsTests: LastDropTestCase {
     private var folder: URL!
 
     override func setUpWithError() throws {

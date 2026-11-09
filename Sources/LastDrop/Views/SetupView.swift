@@ -9,8 +9,11 @@ struct SetupView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     enum Step: Int, CaseIterable {
-        case accounts, agents
-        var name: String { self == .accounts ? "Accounts" : "Agents" }
+        case accounts, agents, t3
+        var name: String { switch self { case .accounts: "Accounts"; case .agents: "Agents"; case .t3: "T3 Code" } }
+
+        /// The steps this Mac gets: T3 Code only when it is installed.
+        static var available: [Step] { T3Settings.isInstalled ? allCases : [.accounts, .agents] }
     }
 
     init(model: AppModel, step: Step = .accounts) {
@@ -40,6 +43,8 @@ struct SetupView: View {
                             SuggestedAgentsSection(model: model)
                             AgentsSections(model: model)
                         }
+                    case .t3:
+                        T3ThreadsSection(titled: false)
                     }
                 }
                 .transition(.opacity)
@@ -60,12 +65,11 @@ struct SetupView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 0) {
             AppMark(size: 48)
-            Text(step == .accounts ? "Welcome to lastdrop" : "Agents")
+            Text(step == .accounts ? "Welcome to lastdrop" : step == .agents ? "Agents" : "T3 Code")
                 .font(.system(size: 26, weight: .bold))
                 .padding(.top, 18)
                 .accessibilityAddTraits(.isHeader)
-            Text(step == .accounts ? "See what's left of your AI plans. Logins on this Mac are already here."
-                                   : "Optional. Run subagents on whichever Claude account has room, and hand work to your other plans.")
+            Text(subtitle)
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -81,10 +85,18 @@ struct SetupView: View {
         }
     }
 
+    private var subtitle: String {
+        switch step {
+        case .accounts: "See what's left of your AI plans. Logins on this Mac are already here."
+        case .agents: "Optional. Run subagents on whichever Claude account has room, and hand work to your other plans."
+        case .t3: "Optional. Start each T3 Code thread on the Claude account with the most room."
+        }
+    }
+
     /// "1 Accounts — 2 Agents": where you are, a check on what's done.
     private var stepper: some View {
         HStack(spacing: 8) {
-            ForEach(Step.allCases, id: \.self) { item in
+            ForEach(Step.available, id: \.self) { item in
                 if item.rawValue > 0 {
                     Capsule().fill(Design.ring).frame(width: 18, height: 1.5)
                 }
@@ -126,7 +138,7 @@ struct SetupView: View {
             if step != .accounts {
                 Button("Back") { move(-1) }.glassButton()
             }
-            Button(step == Step.allCases.last ? "Get started" : "Continue") { move(1) }
+            Button(step == Step.available.last ? "Get started" : "Continue") { move(1) }
                 .glassButton(prominent: true)
                 .keyboardShortcut(.defaultAction)
         }
@@ -139,9 +151,9 @@ struct SetupView: View {
 
     private func move(_ offset: Int) {
         let next = step.rawValue + offset
-        if let target = Step(rawValue: next) {
+        if let target = Step(rawValue: next), Step.available.contains(target) {
             step = target
-        } else if next >= Step.allCases.count {
+        } else if next >= Step.available.count {
             finish()
         }
     }

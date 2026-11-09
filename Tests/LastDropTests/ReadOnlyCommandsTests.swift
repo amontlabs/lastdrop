@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class ReadOnlyCommandsTests: XCTestCase {
+final class ReadOnlyCommandsTests: LastDropTestCase {
     private func allowed(_ commands: [String], file: StaticString = #filePath, line: UInt = #line) {
         for command in commands { XCTAssertNotNil(ReadOnlyCommands.check(command), command, file: file, line: line) }
     }
@@ -72,7 +72,7 @@ final class ReadOnlyCommandsTests: XCTestCase {
 
 /// lastdrop's matcher against Claude Code 2.1.319's own flag tables: every listed flag is read-only, and no flag
 /// outside a command's table is.
-final class ReadOnlyTablesTests: XCTestCase {
+final class ReadOnlyTablesTests: LastDropTestCase {
     /// A line that uses `flag` on `command`, with a value of its kind and whatever the command needs around it.
     static func line(_ command: String, _ flag: String, _ kind: ReadOnlyCommands.Value?) -> String {
         let value: String

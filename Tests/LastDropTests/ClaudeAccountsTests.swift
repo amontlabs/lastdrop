@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class ClaudeAccountsTests: XCTestCase {
+final class ClaudeAccountsTests: LastDropTestCase {
     // MARK: Accounts
 
     func testKeychainServiceMatchesClaudeCode() {
@@ -39,7 +39,7 @@ final class ClaudeAccountsTests: XCTestCase {
     }
 }
 
-final class LimitResetsTests: XCTestCase {
+final class LimitResetsTests: LastDropTestCase {
     private let now = Date(timeIntervalSince1970: 1_793_000_000)
 
     func testClaudeResetGrants() {

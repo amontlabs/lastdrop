@@ -14,6 +14,18 @@ account, sets `CLAUDE_CONFIG_DIR` to it (none for Main), and `execve`s the real 
 Claude-only feature, because it still talks to Claude Code. A generic ACP provider would have lost idle
 compaction, limit display, forks and steering.
 
+**Turning it on (`T3Settings`).** T3 keeps the setting in `~/.t3/userdata/settings.json` at
+`providerInstances.claudeAgent.config.binaryPath` (read in T3 0.1.7, `serverSettings.ts`). The server watches
+that file and rebuilds its provider instances when it changes, so no restart is needed: new threads use the
+wrapper at once, a running thread's Claude at its next start. T3 writes the file only when the user changes a
+setting, atomically and in whole. lastdrop does the same: it reads the file, changes that one key, and renames
+a new file over it, so every other setting stays. A file that isn't valid JSON is never touched (T3 leaves it
+for its user to repair). A path the user set is asked about first and kept in
+`~/Library/Application Support/lastdrop/t3-binary-path.json`; turning off puts it back (or removes the key, and
+the instance when T3 had none), and leaves the setting alone if it no longer points at the wrapper. T3's
+managed-policy file was not used: it would lock the setting in T3's own screen. A small race remains if the user
+saves a T3 setting in the same instant. The Settings page offers the path to copy as a fallback.
+
 **When it chooses.** T3 starts a thread's Claude on a new thread, after Stop, and after 30 idle minutes
 (`ProviderSessionManager`, T3 0.1.7). Each start asks one question: *is this conversation's cache still warm
 on its account, and does that account have room?* If yes, the thread stays. If not, it goes to the best account:

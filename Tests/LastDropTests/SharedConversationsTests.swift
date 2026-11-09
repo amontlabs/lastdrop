@@ -3,7 +3,7 @@ import XCTest
 
 /// Every account's conversations folder points at the one shared `~/.claude/projects`, so usage has to tell the
 /// accounts apart through the session ledger.
-final class SharedConversationsTests: XCTestCase {
+final class SharedConversationsTests: LastDropTestCase {
     private var folder: URL!
 
     override func setUpWithError() throws {

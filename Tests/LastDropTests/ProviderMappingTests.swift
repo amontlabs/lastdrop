@@ -1,7 +1,7 @@
 import XCTest
 @testable import LastDrop
 
-final class ProviderMappingTests: XCTestCase {
+final class ProviderMappingTests: LastDropTestCase {
     private func obj(_ json: String) -> [String: Any] {
         try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
     }
@@ -91,7 +91,7 @@ final class ProviderMappingTests: XCTestCase {
     }
 }
 
-final class FormatTests: XCTestCase {
+final class FormatTests: LastDropTestCase {
     func testDurations() {
         XCTAssertEqual(Format.duration(30), "1m")
         XCTAssertEqual(Format.duration(12 * 60), "12m")
@@ -116,7 +116,7 @@ final class FormatTests: XCTestCase {
     }
 }
 
-final class ClaudeMappingTests: XCTestCase {
+final class ClaudeMappingTests: LastDropTestCase {
     func testClaudeWindowsAndPlan() throws {
         let root = try JSONSerialization.jsonObject(with: Data("""
         {"five_hour":{"utilization":6.0,"resets_at":"2026-10-26T19:59:59.943648+00:00"},
@@ -143,7 +143,7 @@ final class ClaudeMappingTests: XCTestCase {
     }
 }
 
-final class NewProviderTests: XCTestCase {
+final class NewProviderTests: LastDropTestCase {
     private func obj(_ json: String) -> [String: Any] {
         try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
     }
@@ -185,7 +185,7 @@ final class NewProviderTests: XCTestCase {
     }
 }
 
-final class PanelSplitTests: XCTestCase {
+final class PanelSplitTests: LastDropTestCase {
     func testOnlySessionAndWeeklyShowByDefault() {
         let w = ["Session", "Weekly", "Fable Weekly", "Claude"].map { UsageWindow(label: $0, usedPercent: 1) }
         let split = ProviderSection.split(w)
