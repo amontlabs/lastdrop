@@ -183,12 +183,22 @@ final class AppModel {
         if SubagentInstaller.oldIsInstalled() && !SubagentInstaller.isInstalled() { setAgents(true) }
         // This version's plugin, the first time it runs.
         if SubagentInstaller.isStale() { updatePlugin() }
+        // The wrapper T3 Code points at, kept current with where this app's executable is.
+        Task.detached { ThreadLauncher.writeWrapper() }
         refreshLocalChecks()
+        // Every account reads the one shared conversations folder; renaming folders stays off the main thread.
+        let extras = claudeConfig.accounts
+        Task.detached(priority: .utility) { for account in extras { ClaudeSignIn.shareConversations(account) } }
         loop = Task { [weak self] in
+            var lastReaperCheck = Date.distantPast
             while !Task.isCancelled {
                 await self?.refreshDue()
                 await self?.claudeTick()
                 self?.keepStatsCurrent()
+                if Date().timeIntervalSince(lastReaperCheck) >= 20 {
+                    lastReaperCheck = Date()
+                    Task.detached { ThreadReaper.check() }
+                }
                 try? await Task.sleep(for: .seconds(15))
             }
         }

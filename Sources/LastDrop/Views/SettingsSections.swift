@@ -201,6 +201,7 @@ struct AgentsSections: View {
                     change { $0.judges[provider] = judge }
                 }
             }
+            T3ThreadsSection()
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentCatalogChanged)) { _ in catalog = AgentCatalog.load() }
         // `lastdrop --agents` is another process.
@@ -259,6 +260,31 @@ struct AgentsSections: View {
             error = nil
         } catch {
             self.error = "Couldn't save the agents: \(error.localizedDescription)"
+        }
+    }
+}
+
+/// Settings → Agents → T3 Code threads: the wrapper script its Claude provider points at, so its threads run
+/// through lastdrop's accounts.
+struct T3ThreadsSection: View {
+    var body: some View {
+        PageSection("T3 Code threads") {
+            Caption("Each new T3 Code thread starts on the Claude account with the most room, and moves only when that "
+                        + "costs nothing. In T3 Code, set Settings → Providers → Claude → Binary path to:")
+                .padding(.bottom, 6)
+            HStack(spacing: 6) {
+                Text(ThreadLauncher.wrapperPath.path)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(ThreadLauncher.wrapperPath.path)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ThreadLauncher.wrapperPath.path, forType: .string)
+                }
+            }
         }
     }
 }

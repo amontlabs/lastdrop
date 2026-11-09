@@ -3,10 +3,10 @@ import Foundation
 
 /// Signing an account in: Claude Code does it itself, in the account's own folder, from the browser or in Terminal.
 enum ClaudeSignIn {
-    /// What a new account's terminal sign-in shares with `~/.claude`: everything but the sessions
-    /// and the sign-in itself.
+    /// What a new account's terminal sign-in shares with `~/.claude`: everything but the sign-in itself. The
+    /// conversations folder goes through `shareConversations`, which keeps an account's own aside.
     static let sharedItems = ["settings.json", "settings.local.json", "CLAUDE.md", "skills", "agents", "commands",
-                              "hooks", "plugins", "output-styles"]
+                              "hooks", "plugins", "output-styles", "projects"]
 
     /// Prepares the account's Claude Code folder (links to the shared items in `~/.claude`) and opens
     /// Terminal on `claude` there, where Claude Code signs in itself.
@@ -37,6 +37,39 @@ enum ClaudeSignIn {
                       (try? fm.attributesOfItem(atPath: target)) == nil else { continue }   // keep anything already there
                 try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             }
+            shareConversations(account)
+        }
+    }
+
+    /// Points the account's `projects` at the one shared `~/.claude/projects`, so a conversation can continue on
+    /// any account. A real folder of the account's own is renamed aside, never merged or deleted, so a running
+    /// Claude Code keeps what it holds open; on any error everything stays as it was.
+    static func shareConversations(_ account: ClaudeAccount) {
+        guard !account.isMain, let dir = account.cliConfigDir else { return }
+        shareConversations(folder: URL(fileURLWithPath: dir), shared: URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects"))
+    }
+
+    /// The folder work of sharing, with the folders as parameters so tests use their own.
+    static func shareConversations(folder: URL, shared: URL) {
+        let fm = FileManager.default
+        let link = folder.appendingPathComponent("projects", isDirectory: true)
+        do {
+            try fm.createDirectory(at: shared, withIntermediateDirectories: true)
+            var isDirectory: ObjCBool = false
+            if fm.fileExists(atPath: link.path, isDirectory: &isDirectory), isDirectory.boolValue,
+               (try? fm.destinationOfSymbolicLink(atPath: link.path)) == nil {
+                var aside = folder.appendingPathComponent("projects-before-sharing", isDirectory: true)
+                var n = 2
+                while fm.fileExists(atPath: aside.path) {
+                    aside = folder.appendingPathComponent("projects-before-sharing-\(n)", isDirectory: true)
+                    n += 1
+                }
+                try fm.moveItem(at: link, to: aside)   // a rename keeps whatever a running session has open
+            }
+            guard (try? fm.destinationOfSymbolicLink(atPath: link.path)) == nil else { return }   // already shared
+            try fm.createSymbolicLink(at: link, withDestinationURL: shared)
+        } catch {
+            SubagentLog.write("sharing conversations with \(folder.lastPathComponent): \(error)")
         }
     }
 

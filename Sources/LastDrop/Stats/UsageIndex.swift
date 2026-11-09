@@ -76,7 +76,9 @@ final class UsageIndex: @unchecked Sendable {
     @discardableResult
     func update(progress: @escaping @Sendable (Double) -> Void = { _ in }) -> Bool {
         var files: [UsageFile] = []
-        for root in roots { UsageFiles.list(root, into: &files) }
+        // The ledger is read once per scan: it says which account each conversation in the shared folder ran on.
+        let sessions = SessionLedger.allSessions()
+        for root in roots { UsageFiles.list(root, ledger: sessions, into: &files) }
         var cursors = loadCursors()
         let horizon = Int64(now().timeIntervalSince1970) - Int64(Self.historyDays) * 86400
         var pending: [UsageFile] = []

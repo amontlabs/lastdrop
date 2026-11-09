@@ -109,6 +109,7 @@ enum WarmPool {
     static func start(_ spec: Spec, onExit: (@Sendable (Process) -> Void)? = nil) -> (Process, String, Pipe, Pipe, Pipe)? {
         guard let claude = SubagentRunner.executable(environment: spec.environment) else { return nil }
         let sessionID = UUID().uuidString.lowercased()
+        SessionLedger.record(session: sessionID, account: spec.account)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: claude)
         process.arguments = spec.arguments + ["--input-format", "stream-json", "--session-id", sessionID]

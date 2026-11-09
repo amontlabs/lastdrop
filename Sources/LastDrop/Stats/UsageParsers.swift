@@ -100,7 +100,7 @@ private struct Interner {
 enum UsageParser {
     static func parse(_ file: UsageFile, from offset: Int64, context: UsageContext, ledger: UsageLedger) -> ParsedUsage {
         switch file.kind {
-        case .claude: claude(file.path, from: offset, ledger: ledger)
+        case .claude: claude(file.path, from: offset, forkedAt: file.forkedAt, ledger: ledger)
         case .codex: codex(file.path, from: offset, context: context)
         case .antigravity: antigravity(file.path, from: offset, context: context, ledger: ledger)
         }
@@ -113,10 +113,13 @@ enum UsageParser {
     /// Each request's usage stands on every line of its message, its output still growing on the early ones, and
     /// a session copied to another account keeps its rows: `(message id, request id)` identifies it. Rows with a `msg_hook_` id are other providers' runs
     /// that lastdrop's plugin put back into the conversation, under a Claude label; those runs count where they ran.
-    static func claude(_ path: String, from offset: Int64, ledger: UsageLedger) -> ParsedUsage {
+    static func claude(_ path: String, from offset: Int64, forkedAt: Date? = nil, ledger: UsageLedger) -> ParsedUsage {
         var out = ParsedUsage()
         var sessions = Interner(), models = Interner(), directories = Interner()
         var sessionIDs: [String] = []
+        // Lines from before the fork were copied from the conversation it came from, which counts them. Whole
+        // hours are enough: the copies made right at the fork dedupe on the request's identity.
+        let forkedHour = forkedAt.map { Int32($0.timeIntervalSince1970 / 3600) }
         out.end = UsageFiles.lines(path: path, from: offset) { line in
             guard line.contains("\"usage\""), line.contains("\"assistant\""), !line.contains("\"msg_hook_") else { return }
             var type = Bytes(start: nil, count: 0), message = type, timestamp = type, sessionID = type, agentID = type, cwd = type, request = type
@@ -132,6 +135,7 @@ enum UsageParser {
                 else if key.is("requestId") { request = value }
             }
             guard type.is("assistant"), message.count > 0, let hour = timestamp.utcHour else { return }
+            if let forked = forkedHour, hour < forked { return }
             var id = Bytes(start: nil, count: 0), model = id, usage = id
             JSONSkim.fields(message) { key, value in
                 if key.is("id") { id = value }

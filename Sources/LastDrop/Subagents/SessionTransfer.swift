@@ -14,7 +14,7 @@ enum SessionTransfer {
 
     static func copy(_ sessionID: String, from source: URL, to target: URL) -> Bool {
         let fm = FileManager.default
-        guard !sessionID.isEmpty, source.standardizedFileURL != target.standardizedFileURL,
+        guard !sessionID.isEmpty, source.resolvingSymlinksInPath() != target.resolvingSymlinksInPath(),
               let project = (try? fm.contentsOfDirectory(atPath: source.path))?.first(where: {
                   fm.fileExists(atPath: source.appendingPathComponent("\($0)/\(sessionID).jsonl").path)
               }),

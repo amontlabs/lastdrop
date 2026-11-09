@@ -59,7 +59,7 @@ extension AppModel {
             let s = state(of: Account(provider: .claude, key: row.id))
             // Kept through errors (rate limited, say): when it was read goes with it.
             guard let at = s.lastSuccess, s.snapshot != nil else { continue }
-            status[row.id] = .init(session: row.used("Session"), weekly: row.used("Weekly"), at: at)
+            status[row.id] = .init(session: row.used("Session"), weekly: row.used("Weekly"), at: at, plan: s.snapshot?.plan)
         }
         // Agents on other providers pick among their accounts by the same reading. A plan without
         // Session and Weekly (OpenRouter credits) counts its one window as both.
