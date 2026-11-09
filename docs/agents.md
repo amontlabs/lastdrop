@@ -110,8 +110,10 @@ call also has a different `model`, it is denied naming both choices. A custom ag
 the plugin only accepts the form when it has seen the native listing, and otherwise says to use `model: "sol"`.
 
 **Report header.** A successful added-agent run starts with `Ran on <model>.`, plus ` Worktree: <path> (branch
-<branch>).` when it had one, and on a following line `Declined (needed approval): a; b` when the provider asked
-for approvals lastdrop declined. A Claude reroute with a worktree gets just the worktree line.
+<branch>).` when it had one, and on a following line `Declined: a; b` when something the agent needed was refused.
+Each item says why: `git push (needed approval)` when a provider's request went unanswered, or, on Antigravity,
+`swift test (not covered by your allow rules; judge: high risk, user authorization low — <rationale>)`, so the main
+agent can suggest an allow rule. A Claude reroute with a worktree gets just the worktree line.
 
 Usage saving adds one named block through `prompt.context`, leaving the shared system prompt intact.
 Claude renders context before prompt-submit hooks, so the context hook reads the catalog itself and
@@ -240,8 +242,54 @@ worktrees, git sees `.claude/worktrees/` as untracked unless the repository igno
 
 `Explore` and `Plan` run read-only on an added agent, however the permission mode is set, and get a brief in
 their instructions (search and report; return a step-by-step plan). Codex gets the read-only sandbox,
-Antigravity plan mode, and the Claude-runner providers (Claude accounts, Z.ai, OpenRouter)
-`--disallowedTools Edit,Write,NotebookEdit`.
+Antigravity plan mode (edits refused, and the judge told to allow only actions that read), and the Claude-runner
+providers (Claude accounts, Z.ai, OpenRouter) `--disallowedTools Edit,Write,NotebookEdit`.
+
+## Permission modes
+
+The session's mode, as each provider runs it. A headless run can't ask anyone, so "ask" always becomes a check.
+
+| Session mode | Claude accounts, Z.ai, OpenRouter | Codex | Antigravity |
+| --- | --- | --- | --- |
+| `default`, `auto` | `auto` | workspace-write + `auto_review` | accept-edits; commands: rules, then judge |
+| `acceptEdits` | `acceptEdits` | workspace-write | accept-edits; commands: rules, then judge |
+| `plan` (and Explore/Plan roles) | `plan` | read-only | plan; edits refused; commands: deny rules, then judge (read-only) |
+| `bypassPermissions` | `bypassPermissions` | full access | accept-edits; everything allowed |
+
+On Antigravity `acceptEdits` works like `auto`: Claude Code would prompt for commands there, and nobody can be
+asked, so they go through the same check.
+
+## How commands are checked
+
+Each provider judges its own agents. Nobody is asked and nothing is bypassed.
+
+- **Claude accounts:** Claude Code's auto mode, with the user's rules.
+- **Z.ai and OpenRouter:** Claude Code's client-side auto mode check (`CLAUDE_CODE_AUTO_MODE_SERVER=0`), with
+  Anthropic's instructions and the user's rules, judged through the same endpoint by `glm-5.3` on Z.ai and the
+  agent's own model on OpenRouter (`CLAUDE_CODE_AUTO_MODE_MODEL`). See Limits.
+- **Codex:** its own `auto_review` reviewer. Requests it would still ask a person about are declined and reported.
+- **Antigravity:** `agy acp` sends each action that needs approval as `session/request_permission` before it
+  runs. lastdrop answers:
+  1. The user's Claude Code rules for `Bash(...)`, from `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`),
+     managed settings, and the project's `.claude/settings.json` and `.claude/settings.local.json` (the main
+     checkout's too, from a worktree). A deny rule refuses; an ask rule refuses too, since nobody can be asked; an
+     allow rule allows. Matching follows Claude Code's: exact, `*` anywhere, `:*` and a trailing ` *` (which also
+     matches the bare command), wrappers like `timeout` and `nohup` stripped. Deny and ask match any part of a
+     compound command, even inside `$(…)` or a loop. Allow needs every part covered and stays conservative: a
+     substitution, subshell, redirect to a file, control flow, a leading `VAR=` or an exec wrapper is never
+     allowed by a pattern and goes to the judge.
+  2. Otherwise the judge: Codex's open-source reviewer policy (`codex-rs/prompts/templates/guardian`, Apache 2.0,
+     shipped in `Resources/CodexGuardian` with its licence and NOTICE), asked of `gemini-3.8-flash` at low effort
+     through the user's own Antigravity plan: `agy -p … --mode plan --disable-slash-commands --print-timeout 120s`
+     from an empty folder. It reads the agent's role and task (the main agent's prompt, and follow-ups) as
+     trusted, the agent's earlier tool calls (inputs only), and the planned action with its folder. Tool outputs
+     and the agent's own words are left out. It answers `{risk_level, user_authorization, outcome, rationale}`;
+     anything else, a failure or a timeout refuses. An identical action is judged once per run.
+
+  The agent is told up front (ACP `_meta.antigravity.systemPrompt.append`) that its commands are reviewed, that a
+  refusal is final, and to name in its report what it needed and why. `agy` ends its turn at a refusal, so
+  lastdrop continues it with the reason (up to four times; the last asks for the report). Each decision is a live
+  step and a `•` line in the agent's log. A check takes about 5 s (up to about 20 s).
 
 ## Limits
 
@@ -251,11 +299,12 @@ Antigravity plan mode, and the Claude-runner providers (Claude accounts, Z.ai, O
   gap there; its restriction is by instruction.
 - The Agent tool's schema still shows four values for `model`; Claude follows the listing, and the plugin
   accepts the rest before validation.
-- Provider permission requests are declined and reported (`Declined (needed approval)`), not asked. Argon
-  (Antigravity) can't run shell commands headless: denied commands are reported, and it continues without
-  them (its turn ends at the denial, so lastdrop continues the conversation once with a short prompt).
-  `agy` does accept per-session allow rules (`--settings '{"permissions":{"allow":["command(<exact command>)"]}}'`),
-  which lastdrop doesn't turn on by itself.
+- Provider permission requests nobody can answer are declined and reported (`Declined: … (needed approval)`), not
+  asked.
+- Antigravity's judge follows Codex's line, which is more permissive than Claude's auto mode: it allows read-only
+  production SSH or killing a local process, which Claude blocks. Rules only cover `Bash(...)`: other requests
+  (an edit outside the workspace, a fetch) always go to the judge. The judge starts one `agy` per check, on the
+  user's plan.
 - On Z.ai and OpenRouter, auto mode's server-side check can't run (the endpoint doesn't serve it), so the profile
   sets `CLAUDE_CODE_AUTO_MODE_SERVER=0`: Claude Code then judges actions with its own client-side check, with
   Anthropic's instructions and the user's rules, through the same endpoint. `CLAUDE_CODE_AUTO_MODE_MODEL` picks the
@@ -296,16 +345,27 @@ persistence, wait logic (B §2, with the bugs to leave behind). Mapping:
   as text; the reasoning summary and plan as text. Final answer = the turn's final-phase message.
 - Permission modes → sandbox + approval (default and auto → workspace-write + auto review, as a Claude
   agent's default becomes auto; acceptEdits → workspace-write; plan → read-only; bypass → full access).
-  Antigravity likewise: default, acceptEdits and auto → accept-edits; plan → plan. Approval requests nobody can answer are declined,
-  never left hanging.
+  Antigravity: see Permission modes. Approval requests nobody can answer are declined, never left hanging.
 - The user's MCP servers are translated from `~/.claude.json` into per-thread config overrides, except
   servers Codex already configures itself (`config/read`), which keep Codex's entry (LCU needs its Codex adapter); the role
   goes in `developerInstructions`; CLAUDE.md content is passed explicitly (Codex only reads AGENTS.md).
 - Open in Terminal: `cd <cwd> && CODEX_HOME=<home> codex resume <threadId>` (stop the runner's copy first).
 - Worktree isolation: lastdrop creates the worktree before `thread/start`, named as Claude Code names its own (see Worktrees).
 
-**3. Antigravity: through the official `agy` CLI as a child process (the user decided to go ahead; no OAuth token reuse).** `agy -p --output-format stream-json` would work technically (research D §4),
-but Google's current FAQ calls wrapping `agy` in third-party coding agents unsupported on consumer plans,
+**3. Antigravity: through the official `agy` CLI as a child process (the user decided to go ahead; no OAuth token reuse).**
+lastdrop runs `agy acp` (Agent Client Protocol, JSON-RPC over stdio; research I §4 and §8):
+- `initialize` (no file system or terminal: `agy` runs its tools itself), then `session/new` with the folder, or
+  `session/resume` with the stored session for a follow-up. The ACP session id is the conversation id, so Open in
+  Terminal's `agy --conversation <id>` opens the same conversation.
+- The model and effort are one slug from `session/new`'s `availableModels` (`gemini-3.8-flash-low`), set with
+  `session/set_model`; the mode with `session/set_mode` on every session, so a saved CLI preference never applies.
+  An unknown slug is an `unavailable` model, for fallbacks.
+- `session/update` gives the live steps and transcript (`tool_call`, `tool_call_update`, `agent_message_chunk`);
+  the report is the turn's last text; tokens come from `session/prompt`'s `usage`.
+- Permission requests: see How commands are checked. TaskStop ends `agy acp` and any judge still running.
+
+Earlier it used `agy -p --output-format stream-json`, which can't answer a permission request headless. Policy:
+Google's current FAQ calls wrapping `agy` in third-party coding agents unsupported on consumer plans,
 its terms ban reusing the Antigravity OAuth, and it has banned accounts for this before. A Google forum
 moderator said the opposite; that conflict is still open. Revisit once Google answers it in writing. Gemini
 CLI no longer runs on consumer subscriptions. Separately: lastdrop's usage reading already uses Antigravity's

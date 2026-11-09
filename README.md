@@ -83,7 +83,10 @@ conversation (Agent) or a task in its own thread (`delegate_task`). Both use the
 fallbacks. Each report starts with the account and model it ran on.
 
 **Your agents.** Click **New agent…** and pick a name, when Claude should use it, a plan, a model and an
-effort. Claude sees it in the Agent tool's list of models.
+effort. Claude sees it in the Agent tool's list of models. Nobody is asked to approve their commands: each provider
+checks its own. Claude agents use Claude Code's auto mode, Codex its own reviewer, and Antigravity your Claude
+Code permission rules, then Codex's open-source safety policy judged by Gemini on your plan. A refused command is
+named in the report, with the reason.
 
 **Claude's subagents.** They run on your other Claude account with the most usage left (down to 10% by
 default), never on the session's own account. The panel marks that account **Next**. Each one is a normal
