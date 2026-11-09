@@ -13,6 +13,8 @@ enum SubagentRunner {
         /// The Claude Code session to start (`--session-id`), or to continue when `resume` is set.
         var sessionID: String
         var resume = false
+        /// When set, forks the session to a new conversation under this id (`--resume <sessionID> --fork-session --session-id <forkTo>`).
+        var forkTo: String?
         /// A `--mcp-config` file with the caller's own MCP servers.
         var mcpConfig: String?
         /// Added to Claude Code's system prompt (`--append-system-prompt`): an agent's role from lastdrop's list.
@@ -83,7 +85,11 @@ enum SubagentRunner {
     /// `claude -p` reads the prompt from stdin, so its length never meets the argument limit.
     static func arguments(_ request: Request) -> [String] {
         var args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", request.permissionMode]
-        args += request.resume ? ["--resume", request.sessionID] : ["--session-id", request.sessionID]
+        if let forkTo = request.forkTo {
+            args += ["--resume", request.sessionID, "--fork-session", "--session-id", forkTo]
+        } else {
+            args += request.resume ? ["--resume", request.sessionID] : ["--session-id", request.sessionID]
+        }
         // "general-purpose" is the plain session; any other type is an agent Claude Code knows
         // (Explore, Plan, or one from ~/.claude/agents, which every account's folder links to).
         if let type = request.subagentType, !type.isEmpty, type != "general-purpose" { args += ["--agent", type] }
@@ -100,7 +106,7 @@ enum SubagentRunner {
     /// What a ready process must have been started with to take this run; nil for a follow-up.
     static func warmSpec(_ request: Request, on account: ClaudeAccount, in directory: String,
                          environment base: [String: String]) -> WarmPool.Spec? {
-        guard !request.resume, request.endpoint == nil, request.disallowedTools.isEmpty else { return nil }
+        guard !request.resume, request.forkTo == nil, request.endpoint == nil, request.disallowedTools.isEmpty else { return nil }
         var args = arguments(request)
         if let i = args.firstIndex(of: "--session-id") { args.removeSubrange(i...i + 1) }
         return WarmPool.Spec(account: account.id, directory: directory, arguments: args,
@@ -155,7 +161,7 @@ enum SubagentRunner {
         var output: FileHandle!, errors: FileHandle!
         var lines: AsyncLineSequence<FileHandle.AsyncBytes>.AsyncIterator!
         var process: Process?
-        var sessionID = request.sessionID
+        var sessionID = request.forkTo ?? request.sessionID
         var pid: Int32 = 0
         var earlyInit: [String: Any]?
         var switchedTo: String?
@@ -187,6 +193,9 @@ enum SubagentRunner {
             guard let claude = override ?? executable() else {
                 return Result(text: "Claude Code (`claude`) was not found on this Mac.", isError: true, limitReached: false,
                               turns: 0, permissionDenials: 0, unavailable: true)
+            }
+            if request.endpoint == nil {
+                SessionLedger.record(session: sessionID, account: account.id)
             }
             let started = Process()
             started.executableURL = URL(fileURLWithPath: claude)
@@ -233,6 +242,12 @@ enum SubagentRunner {
                 guard let event = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] else { continue }
                 switch event.string("type") {
                 case "system" where event.string("subtype") == "init":
+                    if let id = event.string("session_id"), !id.isEmpty {
+                        sessionID = id
+                        if request.endpoint == nil {
+                            SessionLedger.record(session: id, account: account.id)
+                        }
+                    }
                     if refuses(event) { break reading }
                 case "assistant":
                     for block in event.dict("message")?.array("content") ?? [] {

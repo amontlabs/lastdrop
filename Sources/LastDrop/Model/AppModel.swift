@@ -185,10 +185,15 @@ final class AppModel {
         if SubagentInstaller.isStale() { updatePlugin() }
         refreshLocalChecks()
         loop = Task { [weak self] in
+            var lastReaperCheck = Date.distantPast
             while !Task.isCancelled {
                 await self?.refreshDue()
                 await self?.claudeTick()
                 self?.keepStatsCurrent()
+                if Date().timeIntervalSince(lastReaperCheck) >= 20 {
+                    lastReaperCheck = Date()
+                    Task.detached { ThreadReaper.check() }
+                }
                 try? await Task.sleep(for: .seconds(15))
             }
         }

@@ -321,19 +321,41 @@ enum AgentRun {
             }
             tried.insert(from.id)
             guard let to = await nextAccount(accounts, config: config, own: own, excluding: tried) else { break }
-            guard SessionTransfer.copy(entry.sessionID, from: from, to: to) else {
-                SubagentLog.write("\(agentID): session \(entry.sessionID) couldn't be copied from \(from.id) to \(to.id)")
-                break
+            let fromProjects = SessionTransfer.projectsDir(from)
+            let toProjects = SessionTransfer.projectsDir(to)
+            let shared = fromProjects.resolvingSymlinksInPath() == toProjects.resolvingSymlinksInPath()
+            if shared {
+                let fm = FileManager.default
+                guard let project = (try? fm.contentsOfDirectory(atPath: fromProjects.path))?.first(where: {
+                    fm.fileExists(atPath: fromProjects.appendingPathComponent("\($0)/\(entry.sessionID).jsonl").path)
+                }) else {
+                    SubagentLog.write("\(agentID): transcript for \(entry.sessionID) not found in \(fromProjects.path)")
+                    break
+                }
+                let fileURL = fromProjects.appendingPathComponent("\(project)/\(entry.sessionID).jsonl")
+                guard let data = try? Data(contentsOf: fileURL),
+                      (try? SessionTransfer.withoutTrailingNotices(data).write(to: fileURL, options: .atomic)) != nil else {
+                    SubagentLog.write("\(agentID): failed to rewrite transcript without trailing notices at \(fileURL.path)")
+                    break
+                }
+            } else {
+                guard SessionTransfer.copy(entry.sessionID, from: from, to: to) else {
+                    SubagentLog.write("\(agentID): session \(entry.sessionID) couldn't be copied from \(from.id) to \(to.id)")
+                    break
+                }
             }
+            let newID = UUID().uuidString.lowercased()
             SubagentLog.write("\(agentID) continues on \(to.id): \(cause)")
             emit(["type": "moved", "account": from.id, "reason": "\(cause); continuing on \(to.id)"])
             log(agentID, "\(cause); continuing on the \(to.id) account.")
             entry.account = to.id
             AgentRegistry.setRunning(to.id)
-            AgentRegistry.remember(agentID, entry: entry)   // a stop or a follow-up finds it on its new account
             let req = SubagentRunner.Request(prompt: continuePrompt, subagentType: entry.subagentType, model: entry.model,
                                              effort: entry.effort, permissionMode: permissionMode, sessionID: entry.sessionID,
-                                             resume: true, mcpConfig: mcpConfig)
+                                             resume: true, forkTo: newID, mcpConfig: mcpConfig)
+            entry.sessionID = newID
+            SessionLedger.record(session: newID, account: to.id, forkedAt: Date())
+            AgentRegistry.remember(agentID, entry: entry)   // a stop or a follow-up finds it on its new account
             let onProcess: @Sendable (Int32) -> Void = { AgentRegistry.setProcess(agentID, claude: $0) }
             result = await SubagentRunner.run(req, on: to, in: entry.directory, onProcess: onProcess) {
                 step(agentID, $0)

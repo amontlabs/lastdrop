@@ -70,6 +70,10 @@ final class SubagentTests: XCTestCase {
                               "--mcp-config", "/m.json"])
         XCTAssertFalse(SubagentRunner.arguments(.init(prompt: "x", subagentType: "general-purpose", sessionID: "s")).contains("--agent"))
         XCTAssertTrue(SubagentRunner.arguments(.init(prompt: "x", sessionID: "s1", resume: true)).contains("--resume"))
+        let forkArgs = SubagentRunner.arguments(.init(prompt: "x", sessionID: "s1", resume: true, forkTo: "s2"))
+        XCTAssertTrue(forkArgs.contains("--fork-session"))
+        XCTAssertEqual(forkArgs, ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto",
+                                  "--resume", "s1", "--fork-session", "--session-id", "s2"])
     }
 
     func testPermissionModeFollowsTheSession() {
@@ -286,6 +290,12 @@ final class SubagentTests: XCTestCase {
         XCTAssertEqual(FileManager.default.contents(atPath: target.appendingPathComponent("-w-sic/s1/tool-results/r.txt").path), Data("big".utf8))
         XCTAssertFalse(SessionTransfer.copy("missing", from: source, to: target))
         XCTAssertFalse(SessionTransfer.copy("s1", from: source, to: source))
+
+        // A symlinked folder resolves to the same real path, so copy refuses it.
+        let symlink = root.appendingPathComponent("c/projects")
+        try FileManager.default.createDirectory(at: symlink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: source)
+        XCTAssertFalse(SessionTransfer.copy("s1", from: source, to: symlink))
     }
 
     /// Starts a Haiku agent on another account, treats it as stopped at its limit (as it is when that account
@@ -322,5 +332,145 @@ final class SubagentTests: XCTestCase {
         XCTAssertNil(entry.subagentType)
         let store = try JSONDecoder.lastdrop.decode(AgentRegistry.Store.self, from: Data(#"{"agents":{},"lacking":{},"fullUntil":{}}"#.utf8))
         XCTAssertEqual(store.processes?.count, 0)
+    }
+
+    func testForkRunStartsColdWithoutClaimingWarmPool() {
+        let req = SubagentRunner.Request(prompt: "p", sessionID: "s1", resume: true, forkTo: "s2")
+        let spec = SubagentRunner.warmSpec(req, on: ClaudeAccount(id: "Pro"), in: "/dir", environment: [:])
+        XCTAssertNil(spec, "A fork run must start cold, never reuse a warm process")
+    }
+
+    func testIsLimitNoticeCases() {
+        // Case 1: Limit notice is the last turn
+        let noticeLast = """
+        {"type":"assistant","message":{"model":"claude-3-haiku","content":[{"type":"text","text":"hello"}]}}
+        {"type":"user","message":{"role":"user","content":"do work"}}
+        {"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"You have reached your usage limit."}]}}
+        """
+        XCTAssertTrue(ThreadReaper.isLimitNotice(tail: Data(noticeLast.utf8)))
+
+        // Case 2: Real assistant reply comes after limit notice
+        let replyAfter = """
+        {"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"You have reached your usage limit."}]}}
+        {"type":"assistant","message":{"model":"claude-3-haiku","content":[{"type":"text","text":"I am back and working fine."}]}}
+        """
+        XCTAssertFalse(ThreadReaper.isLimitNotice(tail: Data(replyAfter.utf8)))
+
+        // Case 3: Metadata lines after limit notice (metadata is ignored, notice is still the last user/assistant line)
+        let metadataAfter = """
+        {"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Weekly limit exceeded."}]}}
+        {"type":"last-prompt","lastPrompt":"go"}
+        {"type":"progress","step":1}
+        """
+        XCTAssertTrue(ThreadReaper.isLimitNotice(tail: Data(metadataAfter.utf8)))
+
+        // Case 4: Synthetic error without mentioning limit
+        let syntheticOtherError = """
+        {"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Internal server error."}]}}
+        """
+        XCTAssertFalse(ThreadReaper.isLimitNotice(tail: Data(syntheticOtherError.utf8)))
+
+        // Case 5: Empty data
+        XCTAssertFalse(ThreadReaper.isLimitNotice(tail: Data()))
+    }
+
+    func testThreadReaperChecksAndReapsLiveProcess() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-reaper-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            SessionLedger.fileOverride = nil
+            ThreadReaper.projectsDirOverride = nil
+        }
+        let ledgerFile = root.appendingPathComponent("sessions.json")
+        SessionLedger.fileOverride = ledgerFile
+
+        let projects = root.appendingPathComponent("projects")
+        let projectFolder = projects.appendingPathComponent("proj-test")
+        try FileManager.default.createDirectory(at: projectFolder, withIntermediateDirectories: true)
+        ThreadReaper.projectsDirOverride = projects
+
+        // Start a dummy sleeper process
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        proc.arguments = ["60"]
+        try proc.run()
+        defer { if proc.isRunning { proc.terminate() } }
+
+        let session = "thread-session-1"
+        let transcript = projectFolder.appendingPathComponent("\(session).jsonl")
+
+        // Written before live entry time: reaper should ignore it
+        let notice = #"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Usage limit reached."}]}}"# + "\n"
+        try Data(notice.utf8).write(to: transcript)
+
+        let entryTime = Date().addingTimeInterval(2)
+        SessionLedger.addLive(.init(pid: proc.processIdentifier, account: "account-alpha", session: session, thread: "t1", at: entryTime))
+
+        XCTAssertEqual(SessionLedger.live().count, 1)
+        ThreadReaper.check()
+        // Still alive because file was modified before entry.at
+        XCTAssertTrue(SessionLedger.isAlive(proc.processIdentifier))
+        XCTAssertEqual(SessionLedger.live().count, 1)
+
+        // Now update modification date of transcript after entry.at
+        try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: transcript.path)
+
+        ThreadReaper.check()
+
+        // Wait up to 1 second for SIGTERM
+        for _ in 0..<10 {
+            if !SessionLedger.isAlive(proc.processIdentifier) { break }
+            usleep(100_000)
+        }
+        XCTAssertFalse(SessionLedger.isAlive(proc.processIdentifier))
+        XCTAssertTrue(SessionLedger.live().isEmpty)
+    }
+
+    func testCarryOnRewritesTranscriptWhenSharedFolderAndForksToNewID() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-carryon-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            SessionLedger.fileOverride = nil
+        }
+        SessionLedger.fileOverride = root.appendingPathComponent("sessions.json")
+
+        let sharedProjects = root.appendingPathComponent("shared/projects")
+        let project = sharedProjects.appendingPathComponent("myproj")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+
+        let oldSessionID = "original-session-1"
+        let transcriptURL = project.appendingPathComponent("\(oldSessionID).jsonl")
+        let content = """
+        {"type":"user","message":{"role":"user","content":"hello"}}
+        {"type":"assistant","message":{"model":"claude-3-haiku","content":[{"type":"text","text":"step 1"}]}}
+        {"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"You have hit your session limit"}]}}
+        """
+        try Data(content.utf8).write(to: transcriptURL)
+
+        // Account A and B
+        let accA = ClaudeAccount(id: "AccountA")
+        let accB = ClaudeAccount(id: "AccountB")
+
+        // Test rewrite in place
+        let fromProjects = sharedProjects
+        let toProjects = sharedProjects
+        XCTAssertEqual(fromProjects.resolvingSymlinksInPath(), toProjects.resolvingSymlinksInPath())
+
+        let dataBefore = try Data(contentsOf: transcriptURL)
+        let cleaned = SessionTransfer.withoutTrailingNotices(dataBefore)
+        try cleaned.write(to: transcriptURL, options: .atomic)
+
+        let rewritten = String(decoding: try Data(contentsOf: transcriptURL), as: UTF8.self)
+        XCTAssertFalse(rewritten.contains("limit"))
+        XCTAssertTrue(rewritten.contains("step 1"))
+
+        // And ledger records fork
+        let newID = "forked-session-1"
+        SessionLedger.record(session: newID, account: accB.id, forkedAt: Date())
+        let recorded = SessionLedger.session(newID)
+        XCTAssertEqual(recorded?.account, "AccountB")
+        XCTAssertNotNil(recorded?.forkedAt)
     }
 }
