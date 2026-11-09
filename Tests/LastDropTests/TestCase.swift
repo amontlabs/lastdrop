@@ -15,11 +15,13 @@ class LastDropTestCase: XCTestCase {
         ledgerFolder = folder
         SessionLedger.fileOverride = folder.appendingPathComponent("sessions.json")
         AgentRegistry.fileOverride = folder.appendingPathComponent("subagents.json")
+        SubagentUsage.fileOverride = folder.appendingPathComponent("usage.json")
     }
 
     override func tearDown() {
         SessionLedger.fileOverride = nil
         AgentRegistry.fileOverride = nil
+        SubagentUsage.fileOverride = nil
         if let ledgerFolder { try? FileManager.default.removeItem(at: ledgerFolder) }
         super.tearDown()
     }

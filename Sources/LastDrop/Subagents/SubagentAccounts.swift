@@ -103,26 +103,90 @@ actor SubagentUsage {
         var at: Date
         /// The plan's name ("Max 20x"), for `PlanSize`.
         var plan: String? = nil
+        /// Anthropic answered 429 for this account: no process asks again before this. Shared, so the app and
+        /// every runner back off together.
+        var blockedUntil: Date? = nil
+        /// Rate-limit answers in a row; the wait grows with it. Cleared by the next successful read.
+        var failures: Int? = nil
     }
+
+    /// The app's own reading is fresh for this long; younger than that, a runner never asks Anthropic itself.
+    static let appReadingFresh: TimeInterval = 15 * 60
+    /// While an account can't be read, its last reading still routes for this long.
+    static let readingKept: TimeInterval = 2 * 3600
+    /// Longest wait after a rate limit.
+    static let maxBackoff: TimeInterval = 30 * 60
+
+    /// Tests point the shared status file elsewhere.
+    nonisolated(unsafe) static var fileOverride: URL?
 
     /// The account's plan, as the app or a runner last read it.
     static func plan(_ account: ClaudeAccount) -> String? { readStatus()[account.id]?.plan }
 
+    // MARK: Shared backoff
+
+    /// When the account may be asked again; nil when it may be now.
+    static func blockedUntil(_ id: String, now: Date = .now) -> Date? {
+        guard let until = readStatus()[id]?.blockedUntil, until > now else { return nil }
+        return until
+    }
+
+    /// Wait after the n-th rate limit in a row: 5, 10, 20, then 30 minutes.
+    static func backoff(failures: Int) -> TimeInterval {
+        min(300 * pow(2, Double(max(failures, 1) - 1)), maxBackoff)
+    }
+
+    /// Records a 429 for the account for every process: the server's Retry-After, else the growing backoff. An
+    /// account already blocked keeps its block, so a burst of processes counts as one failure. Returns the end.
+    @discardableResult
+    static func recordBlock(_ id: String, retryAfter: TimeInterval?, now: Date = .now) -> Date {
+        var all = readStatus()
+        var entry = all[id] ?? Status(session: nil, weekly: nil, at: .distantPast)
+        if let until = entry.blockedUntil, until > now { return until }
+        let failures = (entry.failures ?? 0) + 1
+        let wait = retryAfter.map { min(max($0, 60), 3600) } ?? backoff(failures: failures)
+        let until = now.addingTimeInterval(wait)
+        entry.failures = failures
+        entry.blockedUntil = until
+        all[id] = entry
+        writeStatus(all)
+        return until
+    }
+
+    /// A successful read ends the backoff.
+    static func clearBlock(_ id: String) {
+        var all = readStatus()
+        guard all[id]?.blockedUntil != nil || all[id]?.failures != nil else { return }
+        all[id]?.blockedUntil = nil
+        all[id]?.failures = nil
+        writeStatus(all)
+    }
+
+    /// The account's usage for routing. The app fetches and writes `usage.json`; a runner reads it, and asks
+    /// Anthropic only when the app's reading is old (the app isn't running) and no process was told to back
+    /// off. While the account can't be read, its last reading (up to two hours old) stands in.
     func usage(_ account: ClaudeAccount) async -> (session: Double?, weekly: Double?) {
         if AgentRegistry.isFull(account.id) { return (100, 100) }
         let saved = Self.readStatus()[account.id]
-        if let saved, Date().timeIntervalSince(saved.at) < 360 { return (saved.session, saved.weekly) }
-        if let hit = cache[account.id], Date().timeIntervalSince(hit.at) < 120 { return (hit.sessionUsed, hit.weeklyUsed) }
+        let now = Date()
+        let reading: (session: Double?, weekly: Double?)? = saved.flatMap {
+            now.timeIntervalSince($0.at) < Self.readingKept ? ($0.session, $0.weekly) : nil
+        }
+        if let saved, now.timeIntervalSince(saved.at) < Self.appReadingFresh { return (saved.session, saved.weekly) }
+        if Self.blockedUntil(account.id, now: now) != nil { return reading ?? (nil, nil) }
+        if let hit = cache[account.id], now.timeIntervalSince(hit.at) < 120 { return (hit.sessionUsed, hit.weeklyUsed) }
         var snapshot: UsageSnapshot?
         do {
-            snapshot = try await ClaudeProvider(configDir: account.cliConfigDir).fetch()
+            var provider = ClaudeProvider(configDir: account.cliConfigDir)
+            provider.lean = true
+            snapshot = try await provider.fetch()
         } catch ProviderError.unauthorized {
             snapshot = await ClaudeSignIn.renew(account)
             if snapshot == nil { SubagentLog.write("the \(account.id) sign-in couldn't be renewed") }
         } catch {
             SubagentLog.write("usage of \(account.id) unreadable: \(error.localizedDescription)")
             // Rate limited, say: an older reading beats none. A full account still answers "limit reached".
-            if let saved, Date().timeIntervalSince(saved.at) < 30 * 60 { return (saved.session, saved.weekly) }
+            if let reading { return reading }
             snapshot = nil
         }
         func used(_ label: String) -> Double? { snapshot?.windows.first { $0.label == label }?.usedPercent }
@@ -130,7 +194,9 @@ actor SubagentUsage {
         // Shared with the next runners, which are other processes.
         if snapshot != nil {
             var status = Self.readStatus()
-            status[account.id] = Status(session: used("Session"), weekly: used("Weekly"), at: Date(), plan: snapshot?.plan)
+            // A runner doesn't ask for the plan's name: keep the one the app read.
+            status[account.id] = Status(session: used("Session"), weekly: used("Weekly"), at: Date(),
+                                        plan: saved?.plan ?? snapshot?.plan)
             Self.writeStatus(status)
         }
         return (used("Session"), used("Weekly"))
@@ -140,11 +206,11 @@ actor SubagentUsage {
     func markFull(_ account: ClaudeAccount) { AgentRegistry.markFull(account.id) }
 
     static func readStatus() -> [String: Status] {
-        (try? Data(contentsOf: LastDropPaths.usage)).flatMap { try? JSONDecoder.lastdrop.decode([String: Status].self, from: $0) } ?? [:]
+        (try? Data(contentsOf: fileOverride ?? LastDropPaths.usage)).flatMap { try? JSONDecoder.lastdrop.decode([String: Status].self, from: $0) } ?? [:]
     }
 
     static func writeStatus(_ status: [String: Status]) {
         LastDropPaths.ensure(LastDropPaths.support)
-        try? JSONEncoder.lastdrop.encode(status).write(to: LastDropPaths.usage, options: .atomic)
+        try? JSONEncoder.lastdrop.encode(status).write(to: fileOverride ?? LastDropPaths.usage, options: .atomic)
     }
 }

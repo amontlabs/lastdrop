@@ -73,6 +73,13 @@ extension AppModel {
         let saved = SubagentUsage.readStatus()
         // A runner may have read an account more recently than the app.
         for (id, entry) in saved where (status[id]?.at ?? .distantPast) < entry.at { status[id] = entry }
+        // The backoff is shared with the runners: the app's rebuilt entries keep it, and an account never read yet
+        // keeps its placeholder.
+        for (id, entry) in saved where entry.blockedUntil != nil || entry.failures != nil {
+            if status[id] == nil { status[id] = entry; continue }
+            status[id]?.blockedUntil = entry.blockedUntil
+            status[id]?.failures = entry.failures
+        }
         if status != saved { SubagentUsage.writeStatus(status) }
     }
 }
