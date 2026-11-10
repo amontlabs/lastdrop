@@ -242,8 +242,9 @@ private struct CompactMeter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            HStack {
+            HStack(spacing: 4) {
                 Text(window.label).foregroundStyle(.secondary)
+                ResetBadge(resets: window.resets, now: now)
                 Spacer(minLength: 4)
                 Text(window.detail ?? Format.left(window)).monospacedDigit()
             }
@@ -551,8 +552,9 @@ struct WindowRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 4) {
                 Text(window.label).font(.subheadline)
+                ResetBadge(resets: window.resets, now: now)
                 Spacer()
                 Text(Format.left(window))
                     .font(.subheadline)

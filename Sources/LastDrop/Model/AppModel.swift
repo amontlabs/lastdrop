@@ -403,8 +403,10 @@ final class AppModel {
     /// from or written to this Mac's accounts.
     func loadDemo() {
         let now = Date()
-        func w(_ label: String, _ used: Double, _ hours: Double) -> UsageWindow {
-            UsageWindow(label: label, usedPercent: used, resetsAt: now.addingTimeInterval(hours * 3600))
+        func w(_ label: String, _ used: Double, _ hours: Double, resets: Int = 0) -> UsageWindow {
+            var w = UsageWindow(label: label, usedPercent: used, resetsAt: now.addingTimeInterval(hours * 3600))
+            if resets > 0 { w.resets = LimitResets(count: resets, expiries: Array(repeating: now.addingTimeInterval(120 * 86400), count: resets)) }
+            return w
         }
         var config = AccountsConfig()
         config.update("claude.main") { $0.menuBar = .both }
@@ -414,7 +416,7 @@ final class AppModel {
         config.update("antigravity.main") { $0.notifyAt = 0.9 }
         accountsConfig = config
         let usage: [String: UsageSnapshot] = [
-            "claude.main": UsageSnapshot(title: "Claude", plan: "Max 20x", windows: [w("Session", 81, 1.8), w("Weekly", 46, 92), w("Fable Weekly", 30, 92)]),
+            "claude.main": UsageSnapshot(title: "Claude", plan: "Max 20x", windows: [w("Session", 81, 1.8), w("Weekly", 46, 92), w("Fable Weekly", 30, 92, resets: 3)]),
             "claude.work": UsageSnapshot(title: "Claude", plan: "Team", windows: [w("Session", 12, 4.2), w("Weekly", 23, 121)]),
             "codex.main": {
                 var s = UsageSnapshot(title: "Codex", plan: "Pro 200", windows: [w("Session", 34, 3.1), w("Weekly", 18, 140)])

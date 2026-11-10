@@ -62,24 +62,26 @@ struct ClaudeProvider: UsageProvider {
     private func snapshot(windows: [UsageWindow], credits: ExtraCredits?, creds: Credentials?, grants: [String: Any]?) async -> UsageSnapshot {
         var snapshot = UsageSnapshot(title: "Claude", plan: creds?.plan, windows: windows)
         snapshot.credits = credits
-        snapshot.resets = Self.resetGrants(from: grants)
-        guard let creds else { return snapshot }
-        let token = creds.isUsable() ? creds.accessToken : nil
-        if grants == nil {
-            // The same endpoint as the usage: never asked while it's telling this account to back off.
-            let ask = token != nil && SubagentUsage.blockedUntil(usageID) == nil
-            snapshot.resets = await Self.resetCache.value(usageID) {
-                guard ask, let token else { throw ProviderError.http(429) }
-                return try await Self.resetGrants(accessToken: token)
+        var grantList = Self.resetGrants(from: grants)
+        if let creds {
+            let token = creds.isUsable() ? creds.accessToken : nil
+            if grants == nil {
+                // The same endpoint as the usage: never asked while it's telling this account to back off.
+                let ask = token != nil && SubagentUsage.blockedUntil(usageID) == nil
+                grantList = await Self.resetCache.value(usageID) {
+                    guard ask, let token else { throw ProviderError.http(429) }
+                    return try await Self.resetGrants(accessToken: token)
+                }
             }
+            // Keyed by the subscription in the sign-in too: after a plan change the old name isn't kept, and
+            // while the profile can't be read the sign-in's own name stands in.
+            let plan = await Self.planCache.value("\(usageID)|\(creds.plan ?? "")") {
+                guard let token else { throw ProviderError.http(401) }
+                return try await Self.planDisplayName(accessToken: token)
+            }
+            snapshot.plan = plan ?? creds.plan
         }
-        // Keyed by the subscription in the sign-in too: after a plan change the old name isn't kept, and
-        // while the profile can't be read the sign-in's own name stands in.
-        let plan = await Self.planCache.value("\(usageID)|\(creds.plan ?? "")") {
-            guard let token else { throw ProviderError.http(401) }
-            return try await Self.planDisplayName(accessToken: token)
-        }
-        snapshot.plan = plan ?? creds.plan
+        snapshot.resets = Self.place(grantList, on: &snapshot.windows)
         return snapshot
     }
 
@@ -158,7 +160,7 @@ struct ClaudeProvider: UsageProvider {
 
     /// Reset grants are asked for at most once an hour per account: asking on every refresh got
     /// OpenUsage sustained 429s on the usage endpoint.
-    private static let resetCache = HourlyCache<LimitResets>()
+    private static let resetCache = HourlyCache<[ResetGrant]>()
 
     /// The plan's current name ("Ultra") is asked for at most once an hour per account.
     private static let planCache = HourlyCache<String>()
@@ -166,8 +168,7 @@ struct ClaudeProvider: UsageProvider {
     /// The plan name claude.ai shows. Claude Code's keychain login only keeps internal ids
     /// ("max", "default_claude_max_20x"), which no longer match the names Anthropic sells the plans under.
     static func planDisplayName(accessToken: String) async throws -> String? {
-        let headers = ["Authorization": "Bearer \(accessToken)", "Accept": "application/json",
-                       "anthropic-beta": "oauth-2025-04-20", "User-Agent": "lastdrop"]
+        let headers = ClaudeCodeHeaders.oauth(accessToken: accessToken)
         let (body, http) = try await HTTP.json(HTTP.request(profileURL, headers: headers))
         guard (200..<300).contains(http.statusCode), let root = body as? [String: Any] else { throw ProviderError.http(http.statusCode) }
         return planDisplayName(fromProfile: root)
@@ -181,36 +182,67 @@ struct ClaudeProvider: UsageProvider {
     }
 
     /// Anthropic's one-off usage-limit resets: the usage endpoint with `cedar_ember=1` adds a
-    /// `cedar_ember` block (as Claude Code and OpenUsage read it).
-    static func resetGrants(accessToken: String) async throws -> LimitResets? {
-        let headers = ["Authorization": "Bearer \(accessToken)", "Accept": "application/json",
-                       "anthropic-beta": "oauth-2025-04-20", "User-Agent": "lastdrop"]
+    /// `cedar_ember` block (as Claude Code and OpenUsage read it). Anthropic lists them only to Claude Code,
+    /// hence its headers (see `ClaudeCodeHeaders`).
+    static func resetGrants(accessToken: String) async throws -> [ResetGrant]? {
+        let headers = ClaudeCodeHeaders.oauth(accessToken: accessToken)
         let (body, http) = try await HTTP.json(HTTP.request(usageURL + "?cedar_ember=1&skip_spend=1", headers: headers))
         guard (200..<300).contains(http.statusCode), let root = body as? [String: Any] else { throw ProviderError.http(http.statusCode) }
         return resetGrants(from: root["cedar_ember"])
     }
 
-    /// `{"eligible": true, "grants": [{"id", "resets_left", "ends_at", "clears"}], "next_grant_id"}`. Nil for
-    /// a missing or `null` block (plans outside the program) or a malformed grant. An ineligible account
-    /// has no usable resets.
-    static func resetGrants(from value: Any?, now: Date = .now) -> LimitResets? {
+    /// One reset grant the account can spend. `modelOnly` grants clear one model's weekly limit and nothing
+    /// else (`"clears": ["seven_day_overage_included"]`, the launch-week Fable resets).
+    struct ResetGrant: Hashable, Sendable {
+        var count: Int
+        var expiries: [Date]
+        /// "New model launch: one Fable reset for Max, …"
+        var label: String
+        var modelOnly: Bool
+    }
+
+    /// `{"eligible": true, "grants": [{"id", "label", "resets_left", "ends_at", "clears"}], "next_grant_id"}`.
+    /// Nil for a missing or `null` block (plans outside the program) or a malformed grant. An ineligible
+    /// account has no usable resets.
+    static func resetGrants(from value: Any?, now: Date = .now) -> [ResetGrant]? {
         guard let block = value as? [String: Any] else { return nil }
-        var count = 0
-        var expiries: [Date] = []
+        var grants: [ResetGrant] = []
         for entry in block["grants"] as? [Any] ?? [] {
             guard let grant = entry as? [String: Any], let left = grant.double("resets_left") else { return nil }
             let ends = Dates.iso(grant.string("ends_at"))
             guard block["eligible"] as? Bool == true, left >= 1, ends.map({ $0 > now }) ?? true else { continue }
-            count += Int(left)
-            if let ends { expiries += Array(repeating: ends, count: Int(left)) }
+            let clears = grant["clears"] as? [String] ?? []
+            grants.append(ResetGrant(count: Int(left), expiries: ends.map { Array(repeating: $0, count: Int(left)) } ?? [],
+                                     label: grant.string("label") ?? "",
+                                     modelOnly: !clears.isEmpty && !clears.contains("five_hour") && !clears.contains("seven_day")))
         }
-        return LimitResets(count: count, expiries: expiries.sorted())
+        return grants
+    }
+
+    /// Puts each model-only grant on its model's weekly row ("Fable Weekly"): the one whose model the grant's
+    /// label names, else the only model row there is. Returns the account's other resets, for its header.
+    static func place(_ grants: [ResetGrant]?, on windows: inout [UsageWindow]) -> LimitResets? {
+        guard let grants else { return nil }
+        let modelRows = windows.indices.filter { windows[$0].label != "Weekly" && windows[$0].label.hasSuffix(" Weekly") }
+        var account = LimitResets(count: 0, expiries: [])
+        for grant in grants {
+            let label = grant.label.lowercased()
+            let row = grant.modelOnly
+                ? modelRows.first { label.contains(windows[$0].label.dropLast(" Weekly".count).lowercased()) }
+                    ?? (modelRows.count == 1 ? modelRows[0] : nil)
+                : nil
+            if let row {
+                windows[row].resets = (windows[row].resets ?? LimitResets(count: 0, expiries: [])).adding(grant.count, grant.expiries)
+            } else {
+                account = account.adding(grant.count, grant.expiries)
+            }
+        }
+        return account
     }
 
     /// Usage of the account `accessToken` belongs to.
     static func usage(accessToken: String, expired: String) async throws -> ([UsageWindow], ExtraCredits?) {
-        let headers = ["Authorization": "Bearer \(accessToken)", "Accept": "application/json",
-                       "anthropic-beta": "oauth-2025-04-20", "User-Agent": "lastdrop"]
+        let headers = ClaudeCodeHeaders.oauth(accessToken: accessToken)
         let (body, http) = try await HTTP.json(HTTP.request(usageURL, headers: headers))
         if http.statusCode == 401 || http.statusCode == 403 { throw ProviderError.unauthorized(expired) }
         if http.statusCode == 429 {

@@ -48,12 +48,55 @@ final class LimitResetsTests: LastDropTestCase {
             ["id": "g0", "resets_left": 0, "ends_at": "2026-11-01T00:00:00+00:00"],
             ["id": "old", "resets_left": 1, "ends_at": "2020-01-01T00:00:00+00:00"],
         ]]
-        let r = ClaudeProvider.resetGrants(from: block, now: now)
+        var windows: [UsageWindow] = []
+        let r = ClaudeProvider.place(ClaudeProvider.resetGrants(from: block, now: now), on: &windows)
         XCTAssertEqual(r?.count, 2)
         XCTAssertEqual(r?.expiries.count, 2)
         XCTAssertNil(ClaudeProvider.resetGrants(from: NSNull()))
         XCTAssertEqual(ClaudeProvider.resetGrants(from: ["eligible": false, "grants": block["grants"]!], now: now)?.count, 0)
         XCTAssertNil(ClaudeProvider.resetGrants(from: ["eligible": true, "grants": [["id": "x"]]], now: now))   // malformed
+    }
+
+    /// Anthropic's answer of 2026-11-10: three launch grants that clear the Fable weekly limit only.
+    func testModelOnlyGrantsGoOnTheirModelRow() {
+        func grant(_ id: String, _ label: String, _ clears: [String]) -> [String: Any] {
+            ["id": id, "label": label, "resets_total": 1, "resets_left": 1, "starts_at": "2026-11-09T18:00:00+00:00",
+             "ends_at": "2027-03-09T07:59:00+00:00", "clears": clears, "usable_now": true]
+        }
+        let block: [String: Any] = ["eligible": true, "ineligible_reason": NSNull(), "next_grant_id": "launch-2610-fable", "grants": [
+            grant("launch-2610-fable", "New model launch: one Fable reset for Max, Team Premium and Enterprise Premium", ["seven_day_overage_included"]),
+            grant("launch-2610-fable-6mo", "New model launch: one more Fable reset at 6 months' tenure", ["seven_day_overage_included"]),
+            grant("weekly", "Weekly reset", ["five_hour", "seven_day"]),
+        ]]
+        let grants = ClaudeProvider.resetGrants(from: block, now: now)
+        XCTAssertEqual(grants?.map(\.modelOnly), [true, true, false])
+
+        var windows = [UsageWindow(label: "Session"), UsageWindow(label: "Weekly"),
+                       UsageWindow(label: "Sonnet Weekly"), UsageWindow(label: "Fable Weekly")]
+        let account = ClaudeProvider.place(grants, on: &windows)
+        XCTAssertEqual(account?.count, 1)
+        XCTAssertEqual(windows.map { $0.resets?.count }, [nil, nil, nil, 2])
+        XCTAssertEqual(windows[3].resets?.expiries.count, 2)
+
+        // A label that names no row: the only model row takes it; with none, the account header does.
+        var one = [UsageWindow(label: "Weekly"), UsageWindow(label: "Opus Weekly")]
+        let unnamed = [ClaudeProvider.ResetGrant(count: 1, expiries: [], label: "Launch reset", modelOnly: true)]
+        XCTAssertEqual(ClaudeProvider.place(unnamed, on: &one)?.count, 0)
+        XCTAssertEqual(one[1].resets?.count, 1)
+        var none = [UsageWindow(label: "Weekly")]
+        XCTAssertEqual(ClaudeProvider.place(unnamed, on: &none)?.count, 1)
+    }
+
+    func testClaudeCodeHeaders() {
+        let h = ClaudeCodeHeaders.oauth(accessToken: "tok", version: "2.1.321")
+        XCTAssertEqual(h["User-Agent"], "claude-cli/2.1.321 (external, cli)")
+        XCTAssertEqual(h["x-app"], "cli")
+        XCTAssertEqual(h["Authorization"], "Bearer tok")
+        XCTAssertEqual(h["anthropic-beta"], "oauth-2025-04-20")
+        XCTAssertNotNil(UUID(uuidString: h["X-Claude-Code-Session-Id"] ?? ""))
+        XCTAssertEqual(ClaudeCodeHeaders.version(launcherTarget: "/u/.local/share/claude/versions/2.1.319", installed: ["2.1.321"]), "2.1.319")
+        XCTAssertEqual(ClaudeCodeHeaders.version(launcherTarget: nil, installed: ["2.1.9", "2.1.321", "2.1.40", "junk"]), "2.1.321")
+        XCTAssertEqual(ClaudeCodeHeaders.version(launcherTarget: "/opt/claude", installed: []), ClaudeCodeHeaders.fallbackVersion)
     }
 
     func testCodexResetCredits() {

@@ -8,6 +8,8 @@ struct UsageWindow: Hashable, Sendable, Codable {
     var resetsAt: Date?
     /// Optional count-style value shown instead of a percent ("75 / 100 left").
     var detail: String?
+    /// Resets that clear this limit alone (Claude's model-only grants); the account's others sit on the snapshot.
+    var resets: LimitResets?
 
     var remainingPercent: Double? { usedPercent.map { 100 - $0 } }
 }
@@ -29,6 +31,10 @@ struct LimitResets: Hashable, Sendable, Codable {
     /// When each remaining reset expires, soonest first; one entry per reset. May be shorter than
     /// `count` when the provider gave no dates.
     var expiries: [Date]
+
+    func adding(_ count: Int, _ expiries: [Date]) -> LimitResets {
+        LimitResets(count: self.count + count, expiries: (self.expiries + expiries).sorted())
+    }
 
     /// Without the resets whose deadline has passed.
     func current(now: Date = .now) -> LimitResets {
