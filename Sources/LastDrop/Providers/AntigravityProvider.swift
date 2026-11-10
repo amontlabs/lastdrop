@@ -8,7 +8,10 @@ struct AntigravityProvider: UsageProvider {
     /// Falls back to the token the Antigravity app keeps: the main account only.
     var usesAppLogin = true
 
-    private static let hosts = ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.googleapis.com"]
+    /// The daily host first: it is the one Antigravity and agy use, and it tracks their usage. The production
+    /// host can answer 200 with stale Gemini buckets (near 0% used while daily shows real use), so it only
+    /// fills buckets the daily host lacks.
+    private static let hosts = ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"]
     private static let summaryPath = "/v1internal:retrieveUserQuotaSummary"
     private static let loadPath = "/v1internal:loadCodeAssist"
     /// Cloud Code answers 403 "no valid license" unless the caller sends the Antigravity client's
@@ -197,7 +200,7 @@ struct AntigravityProvider: UsageProvider {
         return (http.statusCode, obj as? [String: Any] ?? [:])
     }
 
-    /// Asks the production host, and the daily one too when the first lacks any shared bucket.
+    /// Asks the daily host, and the production one too when the first lacks any shared bucket.
     private static func fetchSummaries(token: String) async -> Outcome {
         var bodies: [[String: Any]] = []
         var authFailed = false
