@@ -6,7 +6,7 @@ import Foundation
 /// Like Codex's reviewer it sees the task (trusted), the agent's earlier tool calls (inputs only) and the planned
 /// action; tool outputs and the agent's own text are left out as untrusted. Anything but a clear answer denies.
 enum CommandJudge {
-    /// The judge when the user chose none in Settings → Agents.
+    /// The judge when the user chose none in Settings → Accounts.
     static var defaultJudge: AgentJudge { AgentProvider.antigravity.defaultJudge! }
     /// `--print-timeout` for `agy`; the process is killed 30 s after it if it hasn't ended.
     static let timeout: TimeInterval = 120
@@ -87,7 +87,7 @@ enum CommandJudge {
 
     /// Why no command can be judged: the chosen judge can't run. Commands that need the judge are refused with it.
     static func unavailable(_ judge: AgentJudge) -> String {
-        "the command judge \(judge.summary) is not available on this Antigravity account; choose another in lastdrop's Settings → Agents"
+        "the command judge \(judge.summary) is not available on this Antigravity account; choose another in lastdrop's Settings → Accounts"
     }
 
     /// The reason the judge can't run on an account offering `models`, else nil. An empty list can't say no.

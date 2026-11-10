@@ -5,9 +5,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f5f8fb" />
-    <meta name="description" content="Use any model as a built-in subagent in Claude Code, with a subscription or API key, and spread usage across your accounts." />
+    <meta name="description" content="Use any model as a built-in subagent in Claude Code and T3 Code, with a subscription or API key, and spread usage across your accounts." />
     <meta property="og:title" content="lastdrop — Every plan, down to the last drop" />
-    <meta property="og:description" content="Use any model as a built-in subagent in Claude Code, with a subscription or API key, and spread usage across your accounts." />
+    <meta property="og:description" content="Use any model as a built-in subagent in Claude Code and T3 Code, with a subscription or API key, and spread usage across your accounts." />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="https://lastdrop.amontlabs.com/media/social-preview.png" />
     <meta property="og:url" content="https://lastdrop.amontlabs.com/" />
@@ -57,6 +57,7 @@
         <a class="brand" href="#" aria-label="lastdrop home"><svg aria-hidden="true"><use href="#drop" /></svg><span>lastdrop</span></a>
         <nav aria-label="Main navigation">
           <a href="#spread">How it works</a>
+          <a href="#t3">T3 Code</a>
           <a class="source-nav" href="https://github.com/amontlabs/lastdrop">GitHub <span aria-hidden="true">↗</span></a>
         </nav>
         <div class="header-actions">
@@ -79,8 +80,8 @@
           <canvas id="ripples" aria-hidden="true"></canvas>
           <h1 id="hero-title">Every plan, down to the last drop.</h1>
           <p class="hero-description">
-            Use any model as a built-in subagent in Claude Code,<br class="desktop-break" />
-            with a subscription or API key.
+            Use any model as a built-in subagent in Claude Code and T3 Code,<br class="desktop-break" />
+            with a subscription or API key. Your accounts share the load.
           </p>
           <div class="hero-actions">
             <a class="button primary" href="#download"><svg class="icon" aria-hidden="true"><use href="#download-icon" /></svg>Download for macOS</a>
@@ -125,7 +126,7 @@
         <section id="built-in" class="reads joint" aria-labelledby="reads-title">
           <div class="section-heading">
             <h2 id="reads-title">Nothing new to learn.</h2>
-            <p>lastdrop adds the blue lines to what Claude reads. Its tools stay the same.</p>
+            <p>lastdrop adds the blue lines to what Claude reads. Its tools stay the same. Want another agent? Ask Claude: it can change the list for you.</p>
           </div>
           <div class="sheet">
             <p class="sheet-title">Available agent types for the Agent tool</p>
@@ -140,6 +141,27 @@
             <p class="sheet-call">Agent({ subagent_type: "general-purpose", model: <em>"reviewer"</em> })</p>
           </div>
         </section>
+
+        <section id="t3" class="threads" aria-labelledby="t3-title">
+          <div class="section-heading">
+            <h2 id="t3-title">T3 Code, on all your Claude accounts.</h2>
+            <p>Keep only the Claude provider in T3 Code. lastdrop runs each thread on one of your Claude accounts, your main one included, and gives Claude every other model when it delegates, through the Agent tool or <code>delegate_task</code>.</p>
+          </div>
+        </section>
+        <div class="principles joint">
+          <div>
+            <h2>Starts with room</h2>
+            <p>A new thread starts on the Claude account with the most left.</p>
+          </div>
+          <div>
+            <h2>Moves for free</h2>
+            <p>A thread stays while its cache is warm. It moves only when that costs nothing: the cache expired, or the thread was just compacted.</p>
+          </div>
+          <div>
+            <h2>Keeps going</h2>
+            <p>When its account runs out, the thread continues on another one at your next message. Same conversation.</p>
+          </div>
+        </div>
 
         <section id="glance" class="glance joint" aria-labelledby="glance-title">
           <div class="glance-copy">

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings → Agents → T3 Code threads, and a setup step: one switch that points T3 Code's Claude provider at
+/// Settings → Claude → T3 Code threads, and a setup step: one switch that points T3 Code's Claude provider at
 /// lastdrop's launcher (`T3Settings`), so its threads run on the account with room. The path to set by hand
 /// stays behind a disclosure, for when the switch can't do it.
 struct T3ThreadsSection: View {

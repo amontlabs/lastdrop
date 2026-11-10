@@ -1,20 +1,26 @@
 # Several Claude accounts, with automatic failover for Claude Code
 
 Status: **replaced twice.** The relay described here was built, then removed; so was the next design, one
-Claude app copy per account. Current: [subagents on accounts with
-room](#current-design-2026-10-27-subagents-on-accounts-with-room). The rest of this document is the research
-and the earlier designs, kept for reference; their code is in git history.
+Claude app copy per account. Current: [T3 Code threads](#t3-code-threads-on-accounts-with-room-2026-11-09) and
+[subagents](#current-design-2026-10-27-subagents-on-accounts-with-room) on accounts with room. Everything from
+[Earlier design](#earlier-design-one-app-copy-per-account) on is the research and the earlier designs, kept for
+reference; their code is in git history, and the settings and screens they describe are not in the app.
+
+Accounts are added in Settings → Accounts (**Add account…**). Settings → Claude holds the **Agents in Claude Code**
+switch, **T3 Code threads**, **Save Claude usage** and the account limits.
 
 ## T3 Code threads on accounts with room (2026-11-09)
 
 lastdrop chooses the account for each T3 Code thread too, not only for subagents. T3's Claude provider has
 a **Binary path** setting. It points to `~/Library/Application Support/lastdrop/bin/claude-thread`, a
 wrapper that runs `lastdrop --claude-thread <T3's arguments>`. The launcher (`ThreadLauncher`) chooses the
-account, runs claude in the main profile signed in as it (`CLAUDE_SECURESTORAGE_CONFIG_DIR`; none for Main), and `execve`s the real `claude`. T3 keeps every
+account, sets its sign-in and profile in the environment (`ClaudeAccount.runEnvironment`, below; nothing for
+Main), and `execve`s the real `claude`. T3 keeps every
 Claude-only feature, because it still talks to Claude Code. A generic ACP provider would have lost idle
 compaction, limit display, forks and steering.
 
-**Turning it on (`T3Settings`).** T3 keeps the setting in `~/.t3/userdata/settings.json` at
+**Turning it on (`T3Settings`).** The switch is Settings → Claude → **T3 Code threads** ("Choose the Claude account
+for T3 Code threads"), also a step in setup. T3 keeps the setting in `~/.t3/userdata/settings.json` at
 `providerInstances.claudeAgent.config.binaryPath` (read in T3 0.1.7, `serverSettings.ts`). The server watches
 that file and rebuilds its provider instances when it changes, so no restart is needed: new threads use the
 wrapper at once, a running thread's Claude at its next start. T3 writes the file only when the user changes a
@@ -24,12 +30,13 @@ for its user to repair). A path the user set is asked about first and kept in
 `~/Library/Application Support/lastdrop/t3-binary-path.json`; turning off puts it back (or removes the key, and
 the instance when T3 had none), and leaves the setting alone if it no longer points at the wrapper. T3's
 managed-policy file was not used: it would lock the setting in T3's own screen. A small race remains if the user
-saves a T3 setting in the same instant. The Settings page offers the path to copy as a fallback.
+saves a T3 setting in the same instant. Under the switch, **Set it by hand** gives the path to copy as a fallback.
 
 **When it chooses.** T3 starts a thread's Claude on a new thread, after Stop, and after 30 idle minutes
 (`ProviderSessionManager`, T3 0.1.7). Each start asks one question: *is this conversation's cache still warm
 on its account, and does that account have room?* If yes, the thread stays. If not, it goes to the best account:
-- A new thread (`--session-id`) goes to the best account.
+- A new thread (`--session-id`) goes to the best account. Main is one of the candidates, like any other account.
+- A warm one stays, unless its account is at a known limit, removed or signed out.
 - A cold one (last answer more than 55 minutes ago; the cache lasts an hour on subscriptions) may move.
 - A just-compacted one may move. T3's idle compaction runs about two minutes before the cache expires, so it
   stays and uses the warm cache, and the next start moves it.
@@ -48,8 +55,9 @@ because they're short and move by themselves at a limit.
 own id forever and ignores the one Claude reports, so `SessionLedger` maps T3's id to the conversation it
 continues in now. A subagent that moves at its limit forks the same way (`AgentRun.carryOn`).
 
-**Accounts are only sign-ins.** A run on another account is claude in the main profile (`CLAUDE_CONFIG_DIR` unset)
-with `CLAUDE_SECURESTORAGE_CONFIG_DIR=~/.claude-accounts/<name>` (`ClaudeAccount.runEnvironment`). Claude Code then
+**Accounts are only sign-ins.** A run on another account is claude with
+`CLAUDE_SECURESTORAGE_CONFIG_DIR=~/.claude-accounts/<name>` (`ClaudeAccount.runEnvironment`), and with
+`CLAUDE_CONFIG_DIR` naming a profile that links back to `~/.claude` (next paragraph). Claude Code then
 uses that folder's keychain sign-in ("Claude Code-credentials-<sha8 of the folder path>"): the request carries that
 account's token and account_uuid, while settings, MCP servers, memory and conversations come from `~/.claude`. So T3's
 check for `<its id>.jsonl` in `~/.claude/projects` passes on every account, and nothing is copied between folders.
@@ -74,6 +82,20 @@ lasts until the next start: change those in Main. The sign-in folder itself is u
 from `CLAUDE_SECURESTORAGE_CONFIG_DIR`. With no readable `~/.claude.json` there is no profile and the run is as
 before.
 
+**Reading usage without getting rate limited.** `/api/oauth/usage` allows few requests per account, and the app and
+every runner process read it.
+- Claude Code's own answer comes first: a `cachedUsageUtilization` for the account, under 10 minutes old, in
+  `~/.claude.json`, the account's profile or its folder, costs no request (`ClaudeProvider.cachedUsage`).
+- The app refreshes every 5 minutes and saves each reading. A runner uses a saved reading under 15 minutes old and
+  asks Anthropic only when it is older (`SubagentUsage.usage`).
+- A 429 is recorded once for every process: no one asks again until the server's Retry-After (kept between 1 and
+  60 minutes), or else after 5, 10, 20, then 30 minutes. A successful read ends it. Meanwhile a reading up to two
+  hours old stands in.
+- Requests carry Claude Code's own headers (`ClaudeCodeHeaders`), because Anthropic lists reset grants
+  (`cedar_ember`) only to Claude Code: with lastdrop's own User-Agent the block came back ineligible. Grants and
+  the plan's name are asked for at most once an hour. A grant that clears only one model's weekly limit shows on
+  that model's weekly row.
+
 **The session's own account.** `SubagentAccounts.ownAccountUUID` reads `CLAUDE_SECURESTORAGE_CONFIG_DIR` first (the
 account signed in at that folder), then `CLAUDE_CODE_ACCOUNT_UUID`, then `CLAUDE_CONFIG_DIR`, so a T3 thread
 launched on Max routes its subagents away from Max.
@@ -97,7 +119,9 @@ itself, with its lock in the secure-storage folder, shared with `ClaudeSignIn.re
 ## Current design (2026-10-27): subagents on accounts with room
 
 The app copies below were also replaced. Each account is now a Claude Code sign-in held in
-`~/.claude-accounts/<name>`; runs use it through `CLAUDE_SECURESTORAGE_CONFIG_DIR` in the main profile. lastdrop's plugin keeps Claude Code's built-in `Agent` tool and native
+`~/.claude-accounts/<name>`; runs use it through `CLAUDE_SECURESTORAGE_CONFIG_DIR`, with the main profile's
+settings and conversations (see [Accounts are only sign-ins](#t3-code-threads-on-accounts-with-room-2026-11-09)).
+lastdrop's plugin keeps Claude Code's built-in `Agent` tool and native
 subagents. When another account has room (never the session's own, both thresholds respected, most room
 first), `lastdrop --agent-route` admits the call without starting a model or claiming a warm process.
 The engine still checks the call and creates its own task through `agent.spawn`'s `next(e)`. A separate
@@ -278,6 +302,9 @@ avoids all four.
 
 ## Goal
 
+*From here to the end: the relay design, built and then removed. The settings and files named below (Settings →
+Claude with a reorderable list and a routing toggle, `Relay/`, `ClaudeOAuth.swift`) no longer exist.*
+
 - Connect several Claude accounts in lastdrop (for example a $20 Pro and a Max).
 - Put them in a priority order. Claude Code uses the first account that has room. When its Session (5 h) or
   Weekly limit runs out, the next one takes over without you noticing. When the first one resets, it is
@@ -425,7 +452,7 @@ If the relay isn't listening, every Claude Code request fails. So:
   17:40". Optional notification on each switch, using the existing notification setting.
 - **Menu bar:** the Claude item shows the account in use. Optionally a small dot when it isn't the first in
   the list, so you can see Max has taken over.
-- **Settings → Claude:** list of accounts you can drag to reorder; Add account; Remove; "Main" (detected, or
+- **Settings → Claude** (as designed then): list of accounts you can drag to reorder; Add account; Remove; "Main" (detected, or
   picked by hand); "Allow extra usage" per account; "Route Claude Code through lastdrop" toggle, which
   explains the `settings.json` key it writes.
 - **Usage polling** stays as it is (`/api/oauth/usage` every 5 minutes) but runs once per account. Between
@@ -662,7 +689,7 @@ UUID is what gets matched to `lastKnownAccountUuid` in the Claude app and to `oa
 
 **The flow in lastdrop:**
 
-1. Settings → Claude → Add account. Optional email field, sent as `login_hint`.
+1. Settings → Claude → Add account (today: Settings → Accounts → Add account…). Optional email field, sent as `login_hint`.
 2. lastdrop makes the PKCE verifier and challenge plus a `state`, and opens a one-shot listener on
    `127.0.0.1:<random port>`. The `LoopbackListener` in `GoogleOAuth.swift` already does this.
 3. It opens the authorize URL in an **empty, throwaway browser session**, not the default browser. Your
@@ -704,6 +731,8 @@ the kind of thing Anthropic's terms on subscription tokens restrict, and it fits
 the automatic switching (see Terms).
 
 ## As built
+
+The relay as it was built, before it was removed.
 
 | Piece | Where |
 | --- | --- |

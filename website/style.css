@@ -153,6 +153,10 @@ code { font-family: var(--mono); }
 .sheet-call { margin-top: 14px; color: var(--ink); overflow-wrap: anywhere; }
 .sheet-call em { font-style: normal; color: var(--accent-ink); }
 
+/* T3 Code threads: a heading over three cells, like the principles. */
+.threads { padding: 56px 24px 40px; border-bottom: 1px solid var(--line); }
+.threads code { font-size: 0.9em; }
+
 /* The real panel, with its tabs live. */
 .glance { display: grid; grid-template-columns: 1fr 1fr; align-items: center; min-height: 640px; }
 .glance-copy { padding: 56px 24px; }
@@ -211,7 +215,7 @@ code { font-family: var(--mono); }
 @media (max-width: 640px) {
   :root { scroll-padding-top: 70px; }
   .site-header { padding: 0 16px; gap: 12px; }
-  .site-header nav a:first-child { display: none; }
+  .site-header nav a:not(.source-nav) { display: none; }
   .site-header nav { justify-content: flex-end; }
   .hero { min-height: 0; padding: 64px 16px 88px; }
   .hero h1 { font-size: 38px; letter-spacing: -1.4px; }
@@ -221,7 +225,7 @@ code { font-family: var(--mono); }
   .principles { grid-template-columns: 1fr; }
   .principles > div { padding: 22px 16px; }
   .principles > div + div { border-left: 0; border-top: 1px solid var(--line); }
-  .spread, .reads { padding-left: 16px; padding-right: 16px; }
+  .spread, .reads, .threads { padding-left: 16px; padding-right: 16px; }
   .runs { grid-template-columns: 1fr; }
   .log-row { flex-direction: column; align-items: flex-start; }
   .sheet { padding: 16px; }

@@ -19,21 +19,28 @@ https://github.com/user-attachments/assets/cf7e7f33-c58a-4633-a22e-8449d3a87664
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-agents-dark.png">
-    <img src="docs/images/panel-agents-light.png" width="320" alt="The lastdrop panel, Agents tab: Claude Code subagents, Save Claude usage, and agents on other plans">
+    <img src="docs/images/panel-agents-light.png" width="320" alt="The lastdrop panel, Agents tab: Save Claude usage, and your agents on other plans with their fallbacks">
   </picture>
 </p>
 
 ## What it does
 
-- **Any model as a subagent.** Make an agent on any connected plan: a name, when to use it, a model
-  and an effort.
-- **Built in for Claude.** Claude calls it through the Agent tool's model: `Agent({ subagent_type: "general-purpose", model: "<name>" })`.
-- **T3 Code too.** Claude your daily driver in T3 Code? Keep only the Claude provider in T3 and set up every
-  other model in lastdrop. Claude reaches them whenever it delegates.
-- **Load-balanced.** Add several accounts per plan, Claude included. Each subagent runs on the account with
-  the most usage left.
+- **Any model as a subagent.** Turn a model on any connected plan into an agent Claude can call: a name, when to
+  use it, a model and an effort. Claude calls it like its own:
+  `Agent({ subagent_type: "general-purpose", model: "<name>" })`.
+- **Fallbacks.** Give an agent several models in order. If the first is out of quota or can't start, the next
+  one runs.
+- **Several Claude accounts, one Claude.** Subagents run on your other Claude accounts, so your main session
+  lasts longer.
+- **T3 Code threads on the account with room.** Each thread starts on the Claude account with the most usage
+  left, your main one included. When that account runs out, your next message continues on another.
+- **T3 Code needs only Claude.** Keep the Claude provider in T3 and set up every other model in lastdrop. Claude
+  reaches them whenever it delegates.
+- **Load-balanced.** Add several accounts per plan. Each agent runs on the account with the most usage left.
+- **No approval prompts, no blind trust.** Every command an agent runs is checked. Refused ones come back with
+  the reason.
 - **Save Claude usage.** A switch that encourages Claude to delegate to your agents.
-- **Limits in the menu bar.** Usage left on each account, and when it resets.
+- **Limits in the menu bar.** Usage left on each account, when it resets, and the limit resets you can still spend.
 - **Stats.** Tokens, API prices and agents by day, project, account and model, across Claude Code, Codex and
   Antigravity.
 
@@ -74,41 +81,55 @@ rm -rf /Applications/lastdrop.app && cp -R dist/lastdrop.app /Applications/
 
 ## Agents in Claude Code and T3 Code
 
-Turn on **Agents in Claude Code** in **Settings → Agents**. It works in the terminal, in the Claude
+Turn on **Agents in Claude Code** in **Settings → Claude**. It works in the terminal, in the Claude
 desktop app and in T3 Code.
 
-**T3 Code.** If Claude is your daily driver in T3 Code, the Claude provider is the only one T3 needs. Your
-other models and accounts live in lastdrop, and Claude reaches them whenever it delegates: a subagent in the
-conversation (Agent) or a task in its own thread (`delegate_task`). Both use the same agents, accounts and
-fallbacks. Each report starts with the account and model it ran on.
-
-**Your agents.** Click **New agent…** and pick a name, when Claude should use it, a plan, a model and an
-effort. Claude sees it in the Agent tool's list of models. Nobody is asked to approve their commands: each provider
-checks its own. Claude agents use Claude Code's auto mode, Codex its own reviewer, and Antigravity your Claude
-Code permission rules, then Codex's open-source safety policy judged by Gemini on your plan. A refused command is
-named in the report, with the reason.
-
-**Claude's subagents.** They run on your smallest other Claude account that still has room (down to 10% by
-default), never on the session's own account: a Pro's 5-hour window resets whether you used it or not. The panel marks that account **Next**. Each one is a normal
-Claude Code process with the same folder, model, permissions and MCP servers. `/agents-elsewhere` lists
-what runs where.
-
-**T3 Code threads.** lastdrop can also choose the account for each T3 Code thread. A new thread starts on
-the account with the most room. A running thread stays on its account while its prompt cache is warm, and
-moves only when that costs nothing: its cache has expired, or it was just compacted. When its account runs
-out, lastdrop ends that thread's Claude between turns and notifies you, and your next message continues on
-another account. To turn it on, use the switch in **Settings → Agents → T3 Code threads**
-(or the T3 Code step in setup). It sets T3 Code's **Settings → Providers → Claude → Binary path** for you,
-asks before replacing a path you set yourself, and puts it back when you turn it off. The path is also there
-to copy by hand.
-
-**Save Claude usage.** Adds a prompt that encourages Claude to delegate implementation, exploration, reviews
-and research. **Edit…** shows it and lets you change it.
+**Your agents.** In **Settings → Agents**, click **New agent…** and pick a name, when Claude should use it, a
+plan, a model and an effort. Add more models under it as fallbacks: the next one runs only if the one above
+can't start, never once work has begun. Claude sees the agent in the Agent tool's list of models, and its steps
+show live while it works. Each report starts with the model it ran on. You can also just ask Claude to add or
+change an agent: it uses `lastdrop --agents`. In T3 Code, Claude reaches the same agents from a subagent
+(Agent) or a task in its own thread (`delegate_task`).
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-agents-dark.png">
-    <img src="docs/images/settings-agents-light.png" width="680" alt="Settings, Agents: the plugin switch, Save Claude usage, and agents on Antigravity, Codex and Z.ai">
+    <img src="docs/images/settings-agents-light.png" width="680" alt="Settings, Agents: your agents on other plans, each with its models and fallbacks">
+  </picture>
+</p>
+
+**Commands are checked, nobody is asked.** Read-only commands such as `ls` or `git status` run straight away.
+The rest go through a check:
+
+- Claude agents: Claude Code's auto mode, with your rules.
+- Codex: its own reviewer.
+- Z.ai and OpenRouter: Claude Code's own check, run by a judge model on that plan.
+- Antigravity: your Claude Code permission rules, then a judge model on your plan.
+
+You pick each judge model under that provider's accounts in **Settings → Accounts**. A refused command is named
+in the report, with the reason.
+
+**Claude's subagents.** They run on your smallest other Claude account that still has room (10% left by
+default, down to 0% in **Settings → Claude**), never on the session's own account: a Pro's 5-hour window
+resets whether you used it or not. The panel marks that account **Next**. Each one is a normal Claude Code process with the same folder, model, permissions and MCP servers.
+The model never changes, only the account. `/agents-elsewhere` lists what runs where.
+
+**T3 Code threads.** lastdrop can also choose the Claude account for each T3 Code thread, your main account
+included. A new thread starts on the account with the most room. A running thread stays on its account while
+its prompt cache is warm, and moves only when that costs nothing: its cache has expired, or it was just
+compacted. When its account runs out, lastdrop ends that thread's Claude between turns and notifies you, and
+your next message continues on another account. Turn it on in **Settings → Claude → T3 Code threads** (or the
+T3 Code step in setup). It sets T3 Code's **Settings → Providers → Claude → Binary path** for you, asks before
+replacing a path you set yourself, and puts it back when you turn it off. The path is also there to copy by
+hand.
+
+**Save Claude usage.** In **Settings → Claude**. Adds a prompt that encourages Claude to delegate
+implementation, exploration, reviews and research. **Edit…** shows it and lets you change it.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-claude-dark.png">
+    <img src="docs/images/settings-claude-light.png" width="680" alt="Settings, Claude: Agents in Claude Code, T3 Code threads, Save Claude usage and account limits">
   </picture>
 </p>
 
@@ -138,9 +159,16 @@ Add as many accounts per plan as you like. For each, pick what the menu bar show
 
 ## Privacy
 
-Everything stays on your Mac. lastdrop reads usage from each provider with the logins you already have, and
-keeps its own keys in the keychain. The one thing it writes back is an expiring Codex token, renewed the
-way the Codex CLI does it. Logs are in `~/Library/Logs/lastdrop`.
+Everything stays on your Mac. lastdrop reads usage from each provider with the logins you already have. Its
+own keys and the Claude sign-ins you add are in the keychain. Logs are in `~/Library/Logs/lastdrop`.
+
+What it writes outside its own folders:
+
+- An expiring Codex token, renewed the way the Codex CLI does it.
+- Its plugin, added to Claude Code when **Agents in Claude Code** is on.
+- A profile per extra Claude account, in `~/.claude-accounts/<name>/profile`: links to `~/.claude`, plus a copy
+  of `~/.claude.json` with that account's own state. `~/.claude.json` itself is only read.
+- T3 Code's Claude binary path, when **T3 Code threads** is on. Turning it off puts it back.
 
 The Stats tab reads the transcripts these tools keep on your Mac and saves only hourly totals, in
 `~/Library/Application Support/lastdrop/usage.sqlite`: tokens, models and project names, never your messages.

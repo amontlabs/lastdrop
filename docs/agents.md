@@ -26,7 +26,11 @@ the model, the call fails naming it, or (for a reroute) the built-in agent runs.
 
 ## The Agents list (Settings)
 
-**Save Claude usage** (off by default) asks Claude to delegate substantial implementation, exploration,
+Settings has four pages: Accounts, Claude, Agents and General. Settings → Claude holds the **Agents in Claude Code**
+switch (it installs the plugin; everything here needs it on), **T3 Code threads**, **Save Claude usage** and the
+account limits. Settings → Agents holds the list.
+
+**Save Claude usage** (Settings → Claude, off by default) asks Claude to delegate substantial implementation, exploration,
 reviews and research to the models added to the Agent tool's model parameter first, choosing by description,
 even when a description says to prefer built-in Claude subagents. Claude works itself or uses built-in agents
 only when none fits. The catalog stores this as `saveClaude`; older catalogs decode it as false.
@@ -37,8 +41,8 @@ One global list. Each entry:
 | --- | --- |
 | name | The value Claude passes as `model`. A slug; `sonnet`, `opus`, `haiku`, `fable`, `inherit`, `best`, `opusplan` and anything starting with `claude-` are reserved, because the native model wins. |
 | description | The role Claude reads ("Second opinion on tricky bugs"). Also sent to the backend as instructions. |
-| provider | Claude account pool, Codex, Z.ai, OpenRouter (Antigravity: see below). |
-| model | Picked from the provider's live list (Codex `model/list`, OpenRouter `/api/v1/models` filtered to tool use, Z.ai fixed list). |
+| provider | Claude account pool, Codex, Z.ai, OpenRouter or Antigravity. |
+| model | Picked from the provider's live list (Codex `model/list`, OpenRouter `/api/v1/models` filtered to tool use, Antigravity `agy`'s list, Z.ai fixed list). |
 | effort | Preset (fixed level), or the call's `effort`, which wins over the preset (levels the model lacks are an error, not a silent clamp). |
 | enabled | Off removes it from the list; a call already in flight or a stale one gets a clear "not available" error. |
 
@@ -210,16 +214,19 @@ said flash didn't run; with them, 6/6 used delegate_task with `flash`, kept the 
 ## Fallbacks
 
 An agent has one or more models by priority, each with its own provider, model and optional effort. The catalog
-keeps the first as the agent's own and the rest as `fallbacks` (Settings → Agents, **Models**, one list by priority, at least one entry: "Tried in order. The next one runs only if the one above can't start, never once
-work has begun."). The list is empty by default, so an agent without one reads and behaves as before, and the
-stored catalog doesn't even carry the key.
+keeps the first as the agent's own and the rest as `fallbacks`. In Settings → Agents, the agent's editor shows them
+as one **Models** list by priority, with at least one entry: "Tried in order. The next one runs only if the one above
+can't start, never once work has begun." `fallbacks` is empty by default, so an agent without any reads and behaves
+as before, and the stored catalog doesn't even carry the key.
 
 The list shows the chain, so Claude knows what it is choosing: `sol: Reviews… (Codex · gpt-6.1-sol · high, then
 Antigravity · gemini-4-argon)`.
 
 A fallback is tried only when an attempt fails before any work happened, and for a reason about availability: a
 usage limit, a sign-in or key, a provider that isn't installed, a model the account doesn't have, or an effort the
-provider doesn't take (an error, never a silent clamp). Never after a tool ran, and never for another error: an
+provider doesn't take (an error, never a silent clamp). On Antigravity, `agy` reports a spent quota as the model's
+own reply and ends the turn normally; a short reply that is only that notice counts as a usage limit, so the chain
+moves on. Never after a tool ran, and never for another error: an
 empty report, a bug, or a stop (`TaskStop` ends the whole chain at once). The call's `effort` wins over each
 attempt's own. The read-only role and worktree isolation apply to every attempt, and a worktree a failed attempt
 made is removed before the next starts.
@@ -313,7 +320,8 @@ Each provider judges its own agents. Nobody is asked and nothing is bypassed.
   lastdrop continues it with the reason (up to four times; the last asks for the report). Each decision is a live
   step and a `•` line in the agent's log. A check takes about 5 s (up to about 20 s).
 
-**The command judge** is a per-provider setting in Settings → Agents (Command judges) and `lastdrop --agents judge`,
+**The command judge** is a per-provider setting: the **Command judge** row under the provider's accounts in
+Settings → Accounts (shown while Agents in Claude Code is on), or `lastdrop --agents judge`. It is
 stored in the catalog as `judges: {"zai": {"model": "glm-5.4"}, "antigravity": {"model": …, "effort": …}}`. Z.ai takes
 a model from its list (default `glm-5.3`), OpenRouter a model id from its live list (default: each agent's own
 model), Antigravity a model and effort from `agy`'s list (default `gemini-3.8-flash`, low). Both places check the
@@ -353,12 +361,14 @@ drops `judges` (its encoder doesn't know it), which puts the defaults back.
 
 ## Backends
 
-Two runners cover four providers.
+Three runners cover five providers.
 
 **1. Claude Code runner (exists).** Claude accounts as today, plus any Anthropic-compatible endpoint. A Claude
-account's folder is only its sign-in: the run is `claude` in the main profile (`CLAUDE_CONFIG_DIR` unset) with
-`CLAUDE_SECURESTORAGE_CONFIG_DIR` naming the folder, so settings, MCP servers (no `--mcp-config` copy) and
-sessions (`~/.claude/projects`) are the user's own. Endpoints:
+account's folder is only its sign-in. Main runs as plain `claude`. Another account runs with
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` naming its folder and `CLAUDE_CONFIG_DIR` naming `<folder>/profile`, which links
+to everything in `~/.claude` and keeps only its own `.claude.json`. So settings, MCP servers (no `--mcp-config`
+copy) and sessions (`~/.claude/projects`) are the user's own (see [claude-accounts.md](claude-accounts.md)).
+Endpoints:
 - Z.ai: `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, `ANTHROPIC_AUTH_TOKEN=<Coding Plan API key>`,
   GLM model ids for every model role. Effort maps to GLM low/high/max. Needs a Coding Plan **API key**: the
   web session lastdrop keeps can't do inference. Ask for the key in Settings first; creating it through the
@@ -414,7 +424,7 @@ OAuth client and User-Agent, which those same terms cover. Worth reviewing.
    provider. Proves registration, live edits, disable and errors with no new backend.
 2. Z.ai and OpenRouter on the Claude Code runner (config dirs, env scrub, warm-pool keys, error classes).
 3. Codex runner.
-4. Antigravity if and when Google's policy allows it.
+4. Antigravity, through `agy` (built; the policy question under Backends is still open).
 
 Each backend ships after a tracer run passes: Read/Bash/Edit, warm start, continue, stop, transcript, Open in
 Terminal, and a quota-exhausted error.

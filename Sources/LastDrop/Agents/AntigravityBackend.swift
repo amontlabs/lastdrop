@@ -214,7 +214,7 @@ enum AntigravityBackend: AgentBackend {
     }
 
     /// The executable seam lets tests run a fake ACP agent; `judge` replaces the reviewer process, and `judgeModel`
-    /// the judge chosen in Settings → Agents.
+    /// the judge chosen in Settings → Accounts.
     static func run(_ job: AgentJob, _ events: AgentEvents, executable: String,
                     rules: PermissionRules? = nil, judgeModel: AgentJudge? = nil,
                     judge: (@Sendable (String) async -> CommandJudge.Verdict)? = nil) async -> SubagentRunner.Result {
