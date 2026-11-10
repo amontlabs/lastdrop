@@ -70,6 +70,11 @@ final class LimitResetsTests: LastDropTestCase {
         ]]
         let grants = ClaudeProvider.resetGrants(from: block, now: now)
         XCTAssertEqual(grants?.map(\.modelOnly), [true, true, false])
+        // Max 5x's Fable grant clears the session as well: still the Fable row's.
+        XCTAssertTrue(ClaudeProvider.isModelOnly(clears: ["five_hour", "seven_day_overage_included"]))
+        XCTAssertFalse(ClaudeProvider.isModelOnly(clears: ["five_hour"]))
+        XCTAssertFalse(ClaudeProvider.isModelOnly(clears: ["seven_day", "seven_day_overage_included"]))
+        XCTAssertFalse(ClaudeProvider.isModelOnly(clears: []))
 
         var windows = [UsageWindow(label: "Session"), UsageWindow(label: "Weekly"),
                        UsageWindow(label: "Sonnet Weekly"), UsageWindow(label: "Fable Weekly")]

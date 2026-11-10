@@ -191,8 +191,8 @@ struct ClaudeProvider: UsageProvider {
         return resetGrants(from: root["cedar_ember"])
     }
 
-    /// One reset grant the account can spend. `modelOnly` grants clear one model's weekly limit and nothing
-    /// else (`"clears": ["seven_day_overage_included"]`, the launch-week Fable resets).
+    /// One reset grant the account can spend. `modelOnly` grants clear one model's weekly limit, not the
+    /// account's (the launch-week Fable resets; see `isModelOnly`).
     struct ResetGrant: Hashable, Sendable {
         var count: Int
         var expiries: [Date]
@@ -214,9 +214,16 @@ struct ClaudeProvider: UsageProvider {
             let clears = grant["clears"] as? [String] ?? []
             grants.append(ResetGrant(count: Int(left), expiries: ends.map { Array(repeating: $0, count: Int(left)) } ?? [],
                                      label: grant.string("label") ?? "",
-                                     modelOnly: !clears.isEmpty && !clears.contains("five_hour") && !clears.contains("seven_day")))
+                                     modelOnly: isModelOnly(clears: clears)))
         }
         return grants
+    }
+
+    /// A grant clears one model's weekly limit rather than the account's: it clears a weekly limit other than
+    /// `seven_day`, and not `seven_day` itself. The session may come with it: Max 20x's Fable launch grant
+    /// clears `["seven_day_overage_included"]`, Max 5x's `["five_hour", "seven_day_overage_included"]`.
+    static func isModelOnly(clears: [String]) -> Bool {
+        !clears.contains("seven_day") && clears.contains { $0.hasPrefix("seven_day_") }
     }
 
     /// Puts each model-only grant on its model's weekly row ("Fable Weekly"): the one whose model the grant's
