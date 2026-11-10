@@ -54,8 +54,9 @@ enum ClaudeSignIn {
 
     /// Claude Code renews an account's sign-in when it starts; lastdrop only reads it. So when an account's
     /// sign-in has expired (unused for a while), lastdrop starts Claude Code on it with no prompt, which costs
-    /// no usage, until its usage reads again, then lets it go. Nil when that didn't renew it.
-    static func renew(_ account: ClaudeAccount) async -> UsageSnapshot? {
+    /// no usage, and waits for the renewed sign-in to land in the keychain. Watching the keychain asks Anthropic
+    /// nothing; the usage is then read once. Nil when that didn't renew it, or the usage still can't be read.
+    static func renew(_ account: ClaudeAccount, lean: Bool = false) async -> UsageSnapshot? {
         guard !account.isMain, let claude = SubagentRunner.executable() else { return nil }
         SubagentLog.write("renewing the \(account.id) sign-in")
         let process = Process()
@@ -73,12 +74,22 @@ enum ClaudeSignIn {
         process.standardError = FileHandle.nullDevice
         guard (try? process.run()) != nil else { return nil }
         defer { try? input.fileHandleForWriting.close() }   // no prompt: it exits by itself
+        var renewed = false
         for _ in 0..<15 {
             try? await Task.sleep(for: .seconds(2))
-            if let snapshot = try? await ClaudeProvider(configDir: account.cliConfigDir).fetch() { return snapshot }
-            if !process.isRunning { break }
+            let running = process.isRunning   // before the read: a sign-in written as it exits still counts
+            renewed = isSignedIn(ClaudeProvider.storedCredentials(configDir: account.cliConfigDir))
+            if renewed || !running { break }
         }
-        return nil
+        guard renewed else { return nil }
+        var provider = ClaudeProvider(configDir: account.cliConfigDir)
+        provider.lean = lean
+        return try? await provider.fetch()
+    }
+
+    /// True when the stored sign-in (Claude Code's credentials blob) holds a token that hasn't expired.
+    static func isSignedIn(_ raw: String?, now: Date = .now) -> Bool {
+        raw.flatMap(ClaudeProvider.credentials(from:))?.isUsable(now: now) ?? false
     }
 
     static func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }

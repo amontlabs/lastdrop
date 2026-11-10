@@ -51,12 +51,15 @@ struct Account: Codable, Hashable, Sendable, Identifiable {
 
     // MARK: Where its login lives
 
+    /// Tests point `~/.claude-accounts` elsewhere.
+    nonisolated(unsafe) static var claudeFoldersOverride: String?
+
     /// The folder a CLI keeps this account's login in: `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Nil for a main
     /// account, which uses the CLI's default, and for providers without a CLI login.
     var folder: String? {
         guard !isMain else { return nil }
         switch provider {
-        case .claude: return NSHomeDirectory() + "/.claude-accounts/\(key)"
+        case .claude: return (Self.claudeFoldersOverride ?? NSHomeDirectory() + "/.claude-accounts") + "/\(key)"
         case .codex: return NSHomeDirectory() + "/.codex-accounts/\(key)"
         case .antigravity, .zai, .openrouter: return nil
         }

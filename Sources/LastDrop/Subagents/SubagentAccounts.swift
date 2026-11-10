@@ -173,15 +173,17 @@ actor SubagentUsage {
             now.timeIntervalSince($0.at) < Self.readingKept ? ($0.session, $0.weekly) : nil
         }
         if let saved, now.timeIntervalSince(saved.at) < Self.appReadingFresh { return (saved.session, saved.weekly) }
-        if Self.blockedUntil(account.id, now: now) != nil { return reading ?? (nil, nil) }
+        var provider = ClaudeProvider(configDir: account.cliConfigDir)
+        provider.lean = true
+        // Claude Code's own recent answer for the account costs no request, so it's read even while blocked.
+        let cached = provider.cachedUsage(now: now)
+        if cached == nil, Self.blockedUntil(account.id, now: now) != nil { return reading ?? (nil, nil) }
         if let hit = cache[account.id], now.timeIntervalSince(hit.at) < 120 { return (hit.sessionUsed, hit.weeklyUsed) }
         var snapshot: UsageSnapshot?
         do {
-            var provider = ClaudeProvider(configDir: account.cliConfigDir)
-            provider.lean = true
             snapshot = try await provider.fetch()
         } catch ProviderError.unauthorized {
-            snapshot = await ClaudeSignIn.renew(account)
+            snapshot = await ClaudeSignIn.renew(account, lean: true)
             if snapshot == nil { SubagentLog.write("the \(account.id) sign-in couldn't be renewed") }
         } catch {
             SubagentLog.write("usage of \(account.id) unreadable: \(error.localizedDescription)")
@@ -192,14 +194,26 @@ actor SubagentUsage {
         func used(_ label: String) -> Double? { snapshot?.windows.first { $0.label == label }?.usedPercent }
         cache[account.id] = (Date(), used("Session"), used("Weekly"))
         // Shared with the next runners, which are other processes.
-        if snapshot != nil {
-            var status = Self.readStatus()
-            // A runner doesn't ask for the plan's name: keep the one the app read.
-            status[account.id] = Status(session: used("Session"), weekly: used("Weekly"), at: Date(),
-                                        plan: saved?.plan ?? snapshot?.plan)
-            Self.writeStatus(status)
+        if let snapshot {
+            // A copy of Claude Code's answer is as old as when Claude Code asked.
+            Self.recordReading(account.id, session: used("Session"), weekly: used("Weekly"),
+                               at: cached?.fetchedAt ?? Date(), credentialPlan: snapshot.plan)
         }
         return (used("Session"), used("Weekly"))
+    }
+
+    /// A runner's reading, for the next runners. The entry's backoff stays: a reading from Claude Code's copy
+    /// doesn't end it, and one from Anthropic already did. A runner doesn't ask for the plan's name, so it keeps
+    /// the one the app read, unless the sign-in says the plan changed.
+    static func recordReading(_ id: String, session: Double?, weekly: Double?, at: Date, credentialPlan: String?) {
+        var status = readStatus()
+        var entry = status[id] ?? Status(session: nil, weekly: nil, at: at)
+        entry.session = session
+        entry.weekly = weekly
+        entry.at = at
+        entry.plan = ClaudeProvider.plan(shown: entry.plan, credentials: credentialPlan)
+        status[id] = entry
+        writeStatus(status)
     }
 
     /// Full for the next ten minutes, for every runner.

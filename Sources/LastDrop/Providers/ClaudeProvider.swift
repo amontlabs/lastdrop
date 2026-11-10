@@ -16,9 +16,22 @@ struct ClaudeProvider: UsageProvider {
     private static let usageURL = "https://api.anthropic.com/api/oauth/usage"
     private static let profileURL = "https://api.anthropic.com/api/oauth/profile"
 
-    struct Credentials { var accessToken: String; var expiresAt: Date?; var plan: String? }
+    struct Credentials {
+        var accessToken: String; var expiresAt: Date?; var plan: String?
+        /// Not about to expire: Anthropic would accept it.
+        func isUsable(now: Date = .now) -> Bool { expiresAt.map { $0.timeIntervalSince(now) >= 60 } ?? true }
+    }
 
     func fetch() async throws -> UsageSnapshot {
+        // Claude Code asks the same endpoint for the same account and keeps the answer: while that's recent,
+        // asking again only spends the account's small quota on the endpoint. The shared block stays as it
+        // is: a cached answer says nothing about whether Anthropic would answer lastdrop now.
+        if let cached = cachedUsage() {
+            let (windows, credits) = Self.reading(from: cached.root)
+            if lean { return UsageSnapshot(title: "Claude", plan: nil, windows: windows, credits: credits) }
+            let creds = Self.storedCredentials(configDir: configDir).flatMap(Self.credentials(from:))
+            return await snapshot(windows: windows, credits: credits, creds: creds, grants: cached.root["cedar_ember"] as? [String: Any])
+        }
         // Another process (or an earlier refresh) was told to back off: asking again only keeps the 429 going.
         if let until = SubagentUsage.blockedUntil(usageID) { throw ProviderError.rateLimited(Self.rateLimitedMessage(until: until)) }
         guard let raw = Self.storedCredentials(configDir: configDir) else {
@@ -30,9 +43,7 @@ struct ClaudeProvider: UsageProvider {
 
         // Read-only: Claude Code refreshes its own login, so an expired token just means "run claude".
         let expired = "Claude Code sign-in expired. Run `claude` to refresh it."
-        if let expiry = creds.expiresAt, expiry.timeIntervalSinceNow < 60 {
-            throw ProviderError.unauthorized(expired)
-        }
+        if !creds.isUsable() { throw ProviderError.unauthorized(expired) }
         let windows: [UsageWindow], credits: ExtraCredits?
         do {
             (windows, credits) = try await Self.usage(accessToken: creds.accessToken, expired: expired)
@@ -42,14 +53,99 @@ struct ClaudeProvider: UsageProvider {
         }
         SubagentUsage.clearBlock(usageID)
         if lean { return UsageSnapshot(title: "Claude", plan: creds.plan, windows: windows, credits: credits) }
-        // After a successful usage fetch, so the token is known to work; a failure only costs the badge.
-        let token = creds.accessToken
-        let resets = await Self.resetCache.value(configDir ?? "main") { try await Self.resetGrants(accessToken: token) }
-        let plan = await Self.planCache.value(configDir ?? "main") { try await Self.planDisplayName(accessToken: token) }
-        var snapshot = UsageSnapshot(title: "Claude", plan: plan ?? creds.plan, windows: windows)
-        snapshot.resets = resets
+        return await snapshot(windows: windows, credits: credits, creds: creds, grants: nil)
+    }
+
+    /// The app's snapshot: the reading plus the plan's name and the reset grants, each asked for at most once
+    /// an hour and only with a sign-in that works. `grants` is the `cedar_ember` block when the reading already
+    /// came with one, which saves that request.
+    private func snapshot(windows: [UsageWindow], credits: ExtraCredits?, creds: Credentials?, grants: [String: Any]?) async -> UsageSnapshot {
+        var snapshot = UsageSnapshot(title: "Claude", plan: creds?.plan, windows: windows)
         snapshot.credits = credits
+        snapshot.resets = Self.resetGrants(from: grants)
+        guard let creds else { return snapshot }
+        let token = creds.isUsable() ? creds.accessToken : nil
+        if grants == nil {
+            // The same endpoint as the usage: never asked while it's telling this account to back off.
+            let ask = token != nil && SubagentUsage.blockedUntil(usageID) == nil
+            snapshot.resets = await Self.resetCache.value(usageID) {
+                guard ask, let token else { throw ProviderError.http(429) }
+                return try await Self.resetGrants(accessToken: token)
+            }
+        }
+        // Keyed by the subscription in the sign-in too: after a plan change the old name isn't kept, and
+        // while the profile can't be read the sign-in's own name stands in.
+        let plan = await Self.planCache.value("\(usageID)|\(creds.plan ?? "")") {
+            guard let token else { throw ProviderError.http(401) }
+            return try await Self.planDisplayName(accessToken: token)
+        }
+        snapshot.plan = plan ?? creds.plan
         return snapshot
+    }
+
+    /// The plan in the account's sign-in, read without asking Anthropic. Nil when it isn't signed in.
+    func credentialPlan() async -> String? {
+        Self.storedCredentials(configDir: configDir).flatMap(Self.credentials(from:))?.plan
+    }
+
+    /// The plan name to keep when the profile can't be asked: the one already shown, unless the sign-in now says
+    /// a plan of another size (the account was upgraded, and "Pro" would stay forever). "Ultra" and the
+    /// sign-in's "Max 20x" are the same plan, so the nicer name stays.
+    static func plan(shown: String?, credentials: String?) -> String? {
+        guard let credentials else { return shown }
+        guard let shown else { return credentials }
+        return PlanSize(plan: shown) == PlanSize(plan: credentials) ? shown : credentials
+    }
+
+    // MARK: Claude Code's cached reading
+
+    /// The usage answer Claude Code keeps in its `.claude.json` (`cachedUsageUtilization`), the same JSON the
+    /// endpoint returns.
+    struct CachedUsage {
+        var fetchedAt: Date
+        var root: [String: Any]
+    }
+
+    /// A cached answer is used while younger than this. With the app's 5-minute refresh, a reading stays
+    /// within the 15 minutes runners trust (`SubagentUsage.appReadingFresh`).
+    static let cacheFresh: TimeInterval = 10 * 60
+
+    /// Tests point `~/.claude.json` elsewhere.
+    nonisolated(unsafe) static var sharedConfigOverride: String?
+    /// Main's `.claude.json`.
+    static var sharedConfig: String { sharedConfigOverride ?? NSHomeDirectory() + "/.claude.json" }
+
+    /// Where Claude Code may have kept this account's answer: `~/.claude.json` (Main's sessions, and the
+    /// sessions lastdrop started before accounts had profiles), the account's profile, where its sessions run,
+    /// and the account folder's own, written when Claude Code signs in or renews there.
+    var cacheFiles: [String] {
+        [Self.sharedConfig] + (configDir.map { [ClaudeProfile.configFile(folder: $0), $0 + "/.claude.json"] } ?? [])
+    }
+
+    /// This account's recent answer from Claude Code, if it has one.
+    func cachedUsage(now: Date = .now) -> CachedUsage? {
+        Self.cachedUsage(accountUUID: Self.signedInAccount(configDir: configDir).uuid, files: cacheFiles, now: now)
+    }
+
+    /// The newest fresh answer for the account among the files.
+    static func cachedUsage(accountUUID: String?, files: [String], now: Date = .now) -> CachedUsage? {
+        guard let accountUUID else { return nil }
+        return files.compactMap { path -> CachedUsage? in
+            guard let data = FileManager.default.contents(atPath: path),
+                  let config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+            return cachedUsage(fromConfig: config, accountUUID: accountUUID, now: now)
+        }.max { $0.fetchedAt < $1.fetchedAt }
+    }
+
+    /// `{"cachedUsageUtilization": {"fetchedAtMs", "accountUuid", "utilization": {…}}}`. Sessions of every
+    /// account write the shared file, so an answer counts only for the account it names. Nil when it names
+    /// another (or none), is older than `cacheFresh` or dated ahead of the clock, or has no limits in it.
+    static func cachedUsage(fromConfig config: [String: Any], accountUUID: String, now: Date = .now) -> CachedUsage? {
+        guard let cache = config.dict("cachedUsageUtilization"), cache.string("accountUuid") == accountUUID,
+              let fetchedAt = Dates.epoch(cache.double("fetchedAtMs")), let root = cache.dict("utilization"),
+              (0..<cacheFresh).contains(now.timeIntervalSince(fetchedAt) + 5),   // a few seconds of clock slack
+              !windows(from: root).isEmpty else { return nil }
+        return CachedUsage(fetchedAt: fetchedAt, root: root)
     }
 
     static func rateLimitedMessage(until: Date, now: Date = .now) -> String {
@@ -122,6 +218,11 @@ struct ClaudeProvider: UsageProvider {
         }
         guard (200..<300).contains(http.statusCode) else { throw ProviderError.http(http.statusCode) }
         guard let root = body as? [String: Any] else { throw ProviderError.invalidResponse }
+        return reading(from: root)
+    }
+
+    /// The windows and extra usage in a usage answer, from Anthropic or from Claude Code's copy of one.
+    static func reading(from root: [String: Any]) -> ([UsageWindow], ExtraCredits?) {
         let windows = windows(from: root)
         return (windows, extraUsage(from: root, limitReached: windows.contains { ($0.usedPercent ?? 0) >= 100 }))
     }
@@ -190,7 +291,7 @@ struct ClaudeProvider: UsageProvider {
 
     // MARK: Credential loading
 
-    private static func storedCredentials(configDir: String?) -> String? {
+    static func storedCredentials(configDir: String?) -> String? {
         if let raw = Keychain.read(service: keychainService(configDir: configDir)) { return raw }
         let dir = configDir ?? ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].map { ($0 as NSString).expandingTildeInPath }
             ?? NSHomeDirectory() + "/.claude"
@@ -209,7 +310,7 @@ struct ClaudeProvider: UsageProvider {
     /// The account a Claude Code config folder is signed in to: `oauthAccount` in its `.claude.json`
     /// (`~/.claude.json` for the default folder).
     static func signedInAccount(configDir: String?) -> (uuid: String?, email: String?) {
-        let path = configDir.map { $0 + "/.claude.json" } ?? NSHomeDirectory() + "/.claude.json"
+        let path = configDir.map { $0 + "/.claude.json" } ?? sharedConfig
         let account = (try? Data(contentsOf: URL(fileURLWithPath: path)))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?.dict("oauthAccount")
         return (account?.string("accountUuid"), account?.string("emailAddress"))

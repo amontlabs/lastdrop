@@ -116,11 +116,11 @@ enum SubagentRunner {
 
     /// The calling session's environment, minus everything that ties it to that session and account.
     static func environment(for account: ClaudeAccount, from base: [String: String], endpoint: EndpointProfile? = nil) -> [String: String] {
-        var env = account.runEnvironment(from: base).filter { key, _ in
+        var env = account.runEnvironment(from: base.filter { key, _ in
             !(key.hasPrefix("CLAUDE_CODE_") || key.hasPrefix("CLAUDE_AGENT_") || key == "CLAUDECODE"
-              || key == "CLAUDE_CONFIG_DIR" || key == "CLAUDE_EFFORT" || key == "CLAUDE_PID"
+              || key == "CLAUDE_EFFORT" || key == "CLAUDE_PID"
               || key.hasPrefix("ANTHROPIC_") || key == "MAX_THINKING_TOKENS")
-        }
+        })
         if let endpoint {
             env["CLAUDE_CONFIG_DIR"] = endpoint.directory
             env.merge(endpoint.environment) { _, new in new }

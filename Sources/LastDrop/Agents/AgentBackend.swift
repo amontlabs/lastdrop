@@ -171,7 +171,11 @@ enum ClaudeBackend: AgentBackend {
 
     static func terminal(_ entry: AgentRegistry.Entry) -> String? {
         let account = ClaudeAccount(id: entry.account)
-        let export = account.cliConfigDir.map { "unset CLAUDE_CONFIG_DIR\nexport CLAUDE_SECURESTORAGE_CONFIG_DIR=\(ClaudeSignIn.shellQuote($0))\n" } ?? ""
+        // The same environment as the run: the account's sign-in, in its profile when it has one.
+        let env = account.runEnvironment(from: [:])
+        let export = account.isMain ? "" : ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"].map { key in
+            env[key].map { "export \(key)=\(ClaudeSignIn.shellQuote($0))\n" } ?? "unset \(key)\n"
+        }.joined()
         return "\(export)cd \(ClaudeSignIn.shellQuote(entry.directory)) || exit 1\nexec claude --resume \(entry.sessionID)"
     }
 }

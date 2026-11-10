@@ -163,14 +163,19 @@ extension JSONDecoder {
 }
 
 extension ClaudeAccount {
-    /// The environment to run claude on this account: always in the main profile (`CLAUDE_CONFIG_DIR` removed, so
-    /// settings, MCP servers and conversations come from `~/.claude`), signed in as this account through
-    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` (its folder is only a sign-in holder). Main uses the default sign-in.
+    /// The environment to run claude on this account. Main runs as it is: `~/.claude` and the default sign-in.
+    /// Another account is signed in through `CLAUDE_SECURESTORAGE_CONFIG_DIR` (its folder holds the sign-in) and
+    /// runs in its profile (`CLAUDE_CONFIG_DIR`): `~/.claude` through links, so settings, plugins and
+    /// conversations are Main's, with a `.claude.json` of its own (`ClaudeProfile`). Building the environment
+    /// brings that profile up to date.
     func runEnvironment(from base: [String: String]) -> [String: String] {
         var env = base
         env.removeValue(forKey: "CLAUDE_CONFIG_DIR")
         env.removeValue(forKey: "CLAUDE_SECURESTORAGE_CONFIG_DIR")
-        if let dir = cliConfigDir { env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = dir }
+        if let dir = cliConfigDir {
+            env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = dir
+            env["CLAUDE_CONFIG_DIR"] = ClaudeProfile.prepare(folder: dir)
+        }
         return env
     }
 }

@@ -293,6 +293,11 @@ final class AppModel {
             states[id]?.error = error.localizedDescription
             if case ProviderError.notConfigured = error { states[id]?.notConfigured = true }
             if case ProviderError.rateLimited = error { states[id]?.rateLimited = true }
+            // The plan's name comes with a reading. While none arrives, the sign-in still tells an upgrade.
+            if let claude = account.usageProvider as? ClaudeProvider, let shown = states[id]?.snapshot?.plan {
+                let plan = ClaudeProvider.plan(shown: shown, credentials: await claude.credentialPlan())
+                if plan != shown { states[id]?.snapshot?.plan = plan }
+            }
         }
         states[id]?.isLoading = false
     }

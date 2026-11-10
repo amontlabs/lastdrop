@@ -58,6 +58,22 @@ fork's lines from before `forkedAt`, which its parent counts. A folder's own `pr
 counts as that account's. Subagents started before this change keep their session in the old account's folder;
 resuming one copies it to `~/.claude/projects` first (`SessionTransfer.transcriptInMain`).
 
+**Each account has its own `.claude.json` (2026-11-10, not yet checked live).** Claude Code keeps account state in
+`<CLAUDE_CONFIG_DIR or home>/.claude.json`: `oauthAccount`, and the answers Anthropic gave that account
+(`cachedUsageUtilization`, model access, feature flags…). With one `~/.claude.json` for every account, a session
+finds another account's `cachedUsageUtilization`, clears it and asks `/api/oauth/usage` again, until the endpoint
+rate limits the account. No setting moves that file alone, so `runEnvironment` also sets
+`CLAUDE_CONFIG_DIR=~/.claude-accounts/<name>/profile` (`ClaudeProfile`): a folder where every folder of `~/.claude`
+and the user's files (`settings.json`, `keybindings.json`, `history.jsonl`, every Markdown file such as `CLAUDE.md`) are links, so
+conversations and settings stay shared, and `.claude.json` is real. Each time a session starts, that file is rebuilt
+as `~/.claude.json` with the account's own keys swapped in: the keys Claude Code clears when signing out, plus
+every key with "cache" in its name (`ClaudeProfile.isOwn`). Everything else, unknown keys included, is Main's, and
+`~/.claude.json` is only read. The rebuild holds Claude Code's own config lock (`.claude.json.lock`) and is skipped
+when it's taken. What a session on another account writes to a shared key (trusting a project, adding an MCP server)
+lasts until the next start: change those in Main. The sign-in folder itself is untouched; the sign-in still comes
+from `CLAUDE_SECURESTORAGE_CONFIG_DIR`. With no readable `~/.claude.json` there is no profile and the run is as
+before.
+
 **The session's own account.** `SubagentAccounts.ownAccountUUID` reads `CLAUDE_SECURESTORAGE_CONFIG_DIR` first (the
 account signed in at that folder), then `CLAUDE_CODE_ACCOUNT_UUID`, then `CLAUDE_CONFIG_DIR`, so a T3 thread
 launched on Max routes its subagents away from Max.
