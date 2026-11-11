@@ -34,7 +34,8 @@ extension AppModel {
             let name = account.isMain ? plan.map { String($0.split(separator: " ")[0]) } ?? "Main" : account.id
             var row = ClaudeAccountRow(account: account, name: name, email: cli.email, plan: plan, snapshot: s.snapshot,
                                        error: s.error, cliUUID: cli.uuid)
-            if let session = row.used("Session"), let weekly = row.used("Weekly") {
+            let reading = SubagentUsage.reading(s.snapshot?.windows ?? [])
+            if let session = reading.session, let weekly = reading.weekly {
                 row.takesSubagents = session < claudeConfig.sessionThreshold * 100 && weekly < claudeConfig.weeklyThreshold * 100
             }
             return row
@@ -58,8 +59,10 @@ extension AppModel {
         for row in claudeRows {
             let s = state(of: Account(provider: .claude, key: row.id))
             // Kept through errors (rate limited, say): when it was read goes with it.
-            guard let at = s.lastSuccess, s.snapshot != nil else { continue }
-            status[row.id] = .init(session: row.used("Session"), weekly: row.used("Weekly"), at: at, plan: s.snapshot?.plan)
+            guard let at = s.lastSuccess, let snapshot = s.snapshot else { continue }
+            let reading = SubagentUsage.reading(snapshot.windows)
+            status[row.id] = .init(session: reading.session, weekly: reading.weekly, at: at,
+                                   models: reading.models.isEmpty ? nil : reading.models, plan: snapshot.plan)
         }
         // Agents on other providers pick among their accounts by the same reading. A plan without
         // Session and Weekly (OpenRouter credits) counts its one window as both.

@@ -125,7 +125,7 @@ enum ClaudeBackend: AgentBackend {
         var tried = Set<String>()
         var last: SubagentRunner.Result?
         let model = job.definition.model
-        while let account = await AgentRun.pick(config.ordered, config: config, own: own, excluding: tried) {
+        while let account = await AgentRun.pick(config.ordered, config: config, own: own, model: model, excluding: tried) {
             AgentRegistry.setRunning(account.id)
             let req = SubagentRunner.Request(prompt: job.prompt, model: model, effort: job.effort, worktree: job.worktree,
                                              permissionMode: permissionMode, sessionID: UUID().uuidString.lowercased(),

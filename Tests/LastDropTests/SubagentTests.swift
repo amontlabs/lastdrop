@@ -33,6 +33,43 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertNil(SubagentAccounts.pick([candidate("Pro", 50, 25, active: 4)], sessionThreshold: 0.9, weeklyThreshold: 0.95))
     }
 
+    func testAPlanWithoutAFiveHourWindowHasRoom() {
+        // Ultra: only weekly rows. The session counts as unused, not unknown.
+        let reading = SubagentUsage.reading([UsageWindow(label: "Weekly", usedPercent: 0, resetsAt: nil)])
+        XCTAssertEqual(reading.session, 0)
+        XCTAssertNil(SubagentUsage.reading([]).session)
+        let ultra = SubagentAccounts.Candidate(account: ClaudeAccount(id: "main"), name: "main", sessionUsed: reading.session,
+                                               weeklyUsed: reading.weekly, size: PlanSize(plan: "Ultra"))
+        XCTAssertEqual(SubagentAccounts.pick([ultra], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.name, "main")
+        XCTAssertEqual(SubagentAccounts.pickForThread([ultra])?.name, "main")
+    }
+
+    func testTheRunsModelLimitCounts() {
+        let reading = SubagentUsage.reading([UsageWindow(label: "Session", usedPercent: 38, resetsAt: nil),
+                                             UsageWindow(label: "Weekly", usedPercent: 80, resetsAt: nil),
+                                             UsageWindow(label: "Fable Weekly", usedPercent: 100, resetsAt: nil)])
+        XCTAssertEqual(reading.used(model: "claude-fable-5-2"), 100)
+        XCTAssertEqual(reading.used(model: "fable"), 100)
+        XCTAssertNil(reading.used(model: "opus"))
+        var max = candidate("Max", 38, 50)
+        max.modelUsed = reading.used(model: "fable")
+        let ultra = candidate("Ultra", 0, 0)
+        XCTAssertEqual(SubagentAccounts.pick([max, ultra], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.name, "Ultra")
+        XCTAssertNil(SubagentAccounts.pick([max], sessionThreshold: 0.9, weeklyThreshold: 0.9))
+    }
+
+    func testTheSessionsOwnAccountTakesSubagentsAboveItsReserve() {
+        var own = candidate("Own", 10, 10)
+        own.isOwn = true
+        XCTAssertEqual(SubagentAccounts.pick([own], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.name, "Own")
+        own.sessionUsed = 75   // 15 points left, under the 20 kept for the session
+        XCTAssertNil(SubagentAccounts.pick([own], sessionThreshold: 0.9, weeklyThreshold: 0.9))
+    }
+
+    func testPlanSizeComesFromTheSignInsTier() {
+        XCTAssertEqual(PlanSize(plan: ClaudeProvider.planName(type: "max", tier: "default_claude_max_5x")), PlanSize(session: 5, weekly: 5))
+    }
+
     func testOwnAccountComesFromTheSession() {
         XCTAssertEqual(SubagentAccounts.ownAccountUUID(environment: ["CLAUDE_CODE_ACCOUNT_UUID": "u1"]), "u1")
     }

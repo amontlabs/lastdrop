@@ -80,6 +80,8 @@ enum ThreadLauncher {
         var sessionID: String?
         var resumeSessionAt: String?
         var forkSession = false
+        /// The thread's model: an account out of that model's weekly limit is no place to start it.
+        var model: String?
     }
 
     static func parse(_ args: [String]) -> Parsed {
@@ -95,6 +97,7 @@ enum ThreadLauncher {
             if let v = value("--resume-session-at") { parsed.resumeSessionAt = v }
             else if let v = value("--resume") { parsed.resume = v }
             else if let v = value("--session-id") { parsed.sessionID = v }
+            else if let v = value("--model") { parsed.model = v }
             else if arg == "--fork-session" { parsed.forkSession = true }
             i += 1
         }
@@ -382,7 +385,7 @@ enum ThreadLauncher {
                 guard ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid != nil else { continue }
                 let usage = await SubagentUsage.shared.usage(account)
                 candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
-                                        size: PlanSize(plan: SubagentUsage.plan(account))))
+                                        modelUsed: usage.used(model: parsed.model), size: SubagentUsage.size(account)))
             }
             return candidates
         }

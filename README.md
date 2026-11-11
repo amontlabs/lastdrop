@@ -109,9 +109,10 @@ The rest go through a check:
 You pick each judge model under that provider's accounts in **Settings → Accounts**. A refused command is named
 in the report, with the reason.
 
-**Claude's subagents.** They run on your smallest other Claude account that still has room (10% left by
-default, down to 0% in **Settings → Claude**), never on the session's own account: a Pro's 5-hour window
-resets whether you used it or not. The panel marks that account **Next**. Each one is a normal Claude Code process with the same folder, model, permissions and MCP servers.
+**Claude's subagents.** They run on your smallest Claude account that still has room (10% left by
+default, down to 0% in **Settings → Claude**) for their model, Fable's own weekly limit included: a Pro's 5-hour
+window resets whether you used it or not. The session's own account takes them too, but keeps 20 points for the
+session itself. A plan with no 5-hour window (Ultra) counts only its weekly limits. The panel marks that account **Next**. Each one is a normal Claude Code process with the same folder, model, permissions and MCP servers.
 The model never changes, only the account. `/agents-elsewhere` lists what runs where.
 
 **T3 Code threads.** lastdrop can also choose the Claude account for each T3 Code thread, your main account

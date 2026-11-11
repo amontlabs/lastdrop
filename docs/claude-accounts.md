@@ -43,11 +43,15 @@ on its account, and does that account have room?* If yes, the thread stays. If n
 - `--resume-session-at` never moves: its message ids belong to the conversation's own lineage.
 
 **Best account for a thread.** `SubagentAccounts.pickForThread` gives the most room in Pro-sized windows:
-`min(5h size × 5h left, weekly size × weekly left)`. `PlanSize`: Pro 1/1, Max 5x 5/5, Max 20x 20/10. Only
+`min(5h size × 5h left, weekly size × weekly left)`, and the weekly row of the thread's `--model` (Fable Weekly) when
+there is one. `PlanSize` comes from the sign-in's rate-limit tier (`default_claude_max_5x`), else the shown plan name:
+Pro 1/1, Max 5x 5/5, Max 20x 20/10. A plan with no 5-hour window (Ultra: `five_hour` is null) counts its session as
+unused once the week is read; only a failed read is unknown. Only
 accounts below 80% of their 5-hour window and 95% of their week are considered, so a long conversation
 doesn't start on an account's last points; if none is, the roomiest account not at a limit. Subagents pick
-differently (`SubagentAccounts.pick`): the smallest plan with room first, never the session's own account,
-because they're short and move by themselves at a limit.
+differently (`SubagentAccounts.pick`): the smallest plan with room first, because they're short and move
+by themselves at a limit. The session's own account is a candidate too, with 20 points (`ownReserve`) kept for the
+session, and the run's model's weekly row counts like the others.
 
 **Moving keeps no session id across accounts.** Every request carries the session id
 (`x-claude-code-session-id`, `metadata.user_id.session_id`). A thread that moves continues as
@@ -122,8 +126,8 @@ The app copies below were also replaced. Each account is now a Claude Code sign-
 `~/.claude-accounts/<name>`; runs use it through `CLAUDE_SECURESTORAGE_CONFIG_DIR`, with the main profile's
 settings and conversations (see [Accounts are only sign-ins](#t3-code-threads-on-accounts-with-room-2026-11-09)).
 lastdrop's plugin keeps Claude Code's built-in `Agent` tool and native
-subagents. When another account has room (never the session's own, both thresholds respected, most room
-first), `lastdrop --agent-route` admits the call without starting a model or claiming a warm process.
+subagents. When another account has room (the session's own past its reserve included, both thresholds and the model's
+weekly row respected, smallest plan first), `lastdrop --agent-route` admits the call without starting a model or claiming a warm process.
 The engine still checks the call and creates its own task through `agent.spawn`'s `next(e)`. A separate
 `turn.step` hook runs `lastdrop --agent-run` inside that native task and serves the remote report without
 calling the session's model client. Added agents (the Agent tool's `model: "<name>"`) use the same adapter.
@@ -149,8 +153,8 @@ which then asked the user whether to wait). If an account reaches its limit befo
 starts again on the next account. If it reaches its limit partway through, the agent's Claude Code session
 has its transcript rewritten in place in `~/.claude/projects` without the trailing limit notice (a session an older
 run left in its account's folder is copied there first) and is forked and continued there with `--resume` and a neutral "continue" prompt. A follow-up
-(SendMessage) works the same way. The next account is the other account with the most room. If none
-has room, it's the session's own account, which is where a built-in subagent would have run. The same
+(SendMessage) works the same way. The next account is the one with room for the model. If none
+has room, it's the session's own account past its reserve, which is where a built-in subagent would have run. The same
 applies when the room an agent was admitted for is gone by the time it starts. Only when every account,
 the session's own included, is at its limit does the caller get the limit as an error. The pane shows each
 move. `LASTDROP_LIVE_FAILOVER=1 swift test --filter testLiveAnAgentAtItsLimit` checks a move between

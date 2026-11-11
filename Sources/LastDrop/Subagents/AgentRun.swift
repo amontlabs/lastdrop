@@ -127,7 +127,8 @@ enum AgentRun {
 
     static func warm(_ request: Request) async {
         let config = ClaudeAccountsConfig.load()
-        guard let account = await pick(config.ordered, config: config, own: SubagentAccounts.ownAccountUUID(), excluding: [], log: false)
+        guard let account = await pick(config.ordered, config: config, own: SubagentAccounts.ownAccountUUID(), model: request.wantedModel,
+                                       excluding: [], log: false)
         else { return }
         let req = SubagentRunner.Request(prompt: "", subagentType: request.subagentType, model: request.wantedModel, effort: request.effort,
                                          permissionMode: mappedPermissionMode(request.permissionMode), sessionID: "",
@@ -167,7 +168,8 @@ enum AgentRun {
             return ["type": "routed"]
         }
         let config = ClaudeAccountsConfig.load()
-        let account = await pick(config.ordered, config: config, own: SubagentAccounts.ownAccountUUID(), excluding: [])
+        let account = await pick(config.ordered, config: config, own: SubagentAccounts.ownAccountUUID(), model: request.wantedModel,
+                                 excluding: [])
         return ["type": account == nil ? "no_room" : "routed"]
     }
 
@@ -233,8 +235,8 @@ enum AgentRun {
             // The chain for a plain call: the other accounts, then the built-in agent. Only a call with worktree
             // isolation (the built-in shell has none) goes on to the session's own account through the runner.
             let next = request.isolation == "worktree"
-                ? await nextAccount(accounts, config: config, own: own, excluding: tried)
-                : await pick(accounts, config: config, own: own, excluding: tried)
+                ? await nextAccount(accounts, config: config, own: own, model: request.wantedModel, excluding: tried)
+                : await pick(accounts, config: config, own: own, model: request.wantedModel, excluding: tried)
             guard let account = next else {
                 if request.isolation != "worktree" {
                     // No work happened (every attempt was refused before a tool ran): the built-in agent takes it.
@@ -321,7 +323,7 @@ enum AgentRun {
                 cause = "\(from.id) is at its usage limit"
             }
             tried.insert(from.id)
-            guard let to = await nextAccount(accounts, config: config, own: own, excluding: tried) else { break }
+            guard let to = await nextAccount(accounts, config: config, own: own, model: entry.model, excluding: tried) else { break }
             // Sessions live in ~/.claude/projects whichever account ran them (one started before that is brought over).
             // The transcript is the conversation's only copy, and the fork's parent: it is never rewritten (a process
             // of the full account may still be flushing lines into it). The fork reads it as is, notices included,
@@ -362,10 +364,10 @@ enum AgentRun {
         return accounts.first { ClaudeProvider.signedInAccount(configDir: $0.cliConfigDir).uuid == own }
     }
 
-    /// Where an admitted agent runs next: the other account with the most room, else the session's own.
-    static func nextAccount(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?,
+    /// Where an admitted agent runs next: the account with room, else the session's own past its reserve.
+    static func nextAccount(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, model: String? = nil,
                             excluding tried: Set<String>) async -> ClaudeAccount? {
-        if let account = await pick(accounts, config: config, own: own, excluding: tried) { return account }
+        if let account = await pick(accounts, config: config, own: own, model: model, excluding: tried) { return account }
         guard let mine = ownAccount(accounts, own: own), !tried.contains(mine.id) else { return nil }
         SubagentLog.write("no other account has room → \(mine.id), the session's own")
         return mine
@@ -566,20 +568,22 @@ enum AgentRun {
         "No Claude account lastdrop can use includes \(model ?? "the model"), and no other model stands in for it. \(detail)"
     }
 
-    /// The account with the most room.
-    static func pick(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?,
+    /// The account with room for a run on `model`: the smallest plan first, the calling session's own included
+    /// with a reserve kept for the session.
+    static func pick(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, model: String? = nil,
                              excluding tried: Set<String>, log: Bool = true) async -> ClaudeAccount? {
         var candidates: [SubagentAccounts.Candidate] = []
-        let allowOwn = FileManager.default.fileExists(atPath: LastDropPaths.allowOwnAccount.path)
         for account in accounts where !tried.contains(account.id) {
-            guard let signedIn = ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid, allowOwn || signedIn != own else { continue }
+            guard let signedIn = ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid else { continue }
             let usage = await SubagentUsage.shared.usage(account)
             candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
-                                    active: AgentRegistry.running(account.id), size: PlanSize(plan: SubagentUsage.plan(account))))
+                                    modelUsed: usage.used(model: model), isOwn: signedIn == own,
+                                    active: AgentRegistry.running(account.id), size: SubagentUsage.size(account)))
         }
         let choice = SubagentAccounts.pick(candidates, sessionThreshold: config.sessionThreshold, weeklyThreshold: config.weeklyThreshold)
         if log { SubagentLog.write("own \(own?.prefix(8) ?? "?"); " + candidates.map {
-            "\($0.name) session \($0.sessionUsed.map { "\(Int($0))%" } ?? "?") weekly \($0.weeklyUsed.map { "\(Int($0))%" } ?? "?")"
+            "\($0.name)\($0.isOwn ? " (own)" : "") session \($0.sessionUsed.map { "\(Int($0))%" } ?? "?") weekly \($0.weeklyUsed.map { "\(Int($0))%" } ?? "?")"
+                + ($0.modelUsed.map { " \(model ?? "model") \(Int($0))%" } ?? "")
         }.joined(separator: ", ") + " → \(choice?.name ?? "none")") }
         return choice?.account
     }
