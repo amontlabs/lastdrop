@@ -15,8 +15,9 @@ struct AntigravityProvider: UsageProvider {
     private static let summaryPath = "/v1internal:retrieveUserQuotaSummary"
     private static let loadPath = "/v1internal:loadCodeAssist"
     /// Cloud Code answers 403 "no valid license" unless the caller sends the Antigravity client's
-    /// User-Agent (OpenUsage does the same). Sent at the user's request.
-    private static let userAgent = "antigravity/2.24.0 (aidev_client; os_type=darwin; arch=\(arch))"
+    /// User-Agent (OpenUsage does the same). Sent at the user's request. The hub form is the one T3 Code
+    /// sends with the project, the request that returns the Argon buckets.
+    private static let userAgent = "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=\(arch); cl=963137146)"
     #if arch(arm64)
     private static let arch = "arm64"
     #else
@@ -34,18 +35,19 @@ struct AntigravityProvider: UsageProvider {
     func fetch() async throws -> UsageSnapshot {
         let stored = try Self.storedToken(login: login, usesAppLogin: usesAppLogin)
         var token = try await Self.accessToken(stored, forceRefresh: false)
-        var outcome = await Self.fetchSummaries(token: token)
+        var info = await Self.loadCodeAssist(token: token)
+        var outcome = await Self.fetchSummaries(token: token, project: info?.project)
         if case .authFailed = outcome, stored.refresh != nil {
             token = try await Self.accessToken(stored, forceRefresh: true)
-            outcome = await Self.fetchSummaries(token: token)
+            info = await Self.loadCodeAssist(token: token)
+            outcome = await Self.fetchSummaries(token: token, project: info?.project)
         }
         switch outcome {
         case .authFailed: throw ProviderError.unauthorized(Self.expiredMessage)
         case .refused(let reason): throw ProviderError.message("Google refused the quota request: \(reason)")
         case .unavailable: throw ProviderError.message("Antigravity quota is temporarily unavailable.")
         case .ok(let bodies):
-            let plan = await Self.loadPlan(token: token)
-            return UsageSnapshot(title: "Antigravity", plan: plan, windows: Self.windows(fromSummaries: bodies))
+            return UsageSnapshot(title: "Antigravity", plan: info?.plan, windows: Self.windows(fromSummaries: bodies))
         }
     }
 
@@ -103,14 +105,18 @@ struct AntigravityProvider: UsageProvider {
         ("gemini-5h", "Session"), ("gemini-weekly", "Weekly"), ("3p-5h", "Claude"), ("3p-weekly", "Claude Weekly"),
     ]
 
-    private static let argonGroup = "Gemini 4 Argon"
+    /// Argon buckets are `gemini-argon-5h` / `gemini-argon-weekly`, in their own group. Google only returns
+    /// them when the request names the user's Code Assist project, as T3 Code does.
+    private static func isArgon(_ bucket: [String: Any]) -> Bool {
+        bucket.string("bucketId")?.hasPrefix("gemini-argon-") == true
+    }
 
     /// Merges one or more `retrieveUserQuotaSummary` bodies by bucket id (first usable one wins).
-    /// Order: Session, Weekly, Argon Weekly, Claude, Claude Weekly.
+    /// Order: Session, Weekly, Argon, Argon Weekly, Claude, Claude Weekly.
     static func windows(fromSummaries bodies: [[String: Any]]) -> [UsageWindow] {
         var found: [String: UsageWindow] = [:]
         for body in bodies {
-            for group in groups(body) where group.string("displayName") != argonGroup {
+            for group in groups(body) {
                 for bucket in group.array("buckets") ?? [] {
                     guard let id = bucket.string("bucketId"), found[id] == nil,
                           let spec = buckets.first(where: { $0.id == id }),
@@ -122,21 +128,22 @@ struct AntigravityProvider: UsageProvider {
             }
         }
         var windows = buckets.compactMap { found[$0.id] }
-        if let argon = bodies.lazy.compactMap(argonWeekly).first {
-            windows.insert(argon, at: windows.firstIndex { $0.label.hasPrefix("Claude") } ?? windows.endIndex)
+        if let argon = bodies.lazy.map(argonWindows).first(where: { !$0.isEmpty }) {
+            windows.insert(contentsOf: argon, at: windows.firstIndex { $0.label.hasPrefix("Claude") } ?? windows.endIndex)
         }
         return windows
     }
 
-    /// Argon has its own group with one weekly bucket; judged per body so hosts are never mixed.
-    private static func argonWeekly(_ body: [String: Any]) -> UsageWindow? {
-        let weekly = groups(body).filter { $0.string("displayName") == argonGroup }
-            .flatMap { $0.array("buckets") ?? [] }
-            .filter { $0.string("window") == "weekly" }
-        guard weekly.count == 1, let bucket = weekly.first, bucket["disabled"] as? Bool != true,
-              let fraction = bucket.double("remainingFraction"), fraction.isFinite else { return nil }
-        return UsageWindow(label: "Argon Weekly", usedPercent: min(max((1 - fraction) * 100, 0), 100),
-                           resetsAt: Dates.iso(bucket.string("resetTime")))
+    /// Argon's 5-hour and weekly buckets, judged per body so hosts are never mixed.
+    private static func argonWindows(_ body: [String: Any]) -> [UsageWindow] {
+        let argon = groups(body).flatMap { $0.array("buckets") ?? [] }
+            .filter { isArgon($0) && $0["disabled"] as? Bool != true }
+        return [("5h", "Argon"), ("weekly", "Argon Weekly")].compactMap { window, label in
+            guard let bucket = argon.first(where: { $0.string("window") == window || $0.string("bucketId") == "gemini-argon-\(window)" }),
+                  let fraction = bucket.double("remainingFraction"), fraction.isFinite else { return nil }
+            return UsageWindow(label: label, usedPercent: min(max((1 - fraction) * 100, 0), 100),
+                               resetsAt: Dates.iso(bucket.string("resetTime")))
+        }
     }
 
     private static func groups(_ body: [String: Any]) -> [[String: Any]] {
@@ -144,7 +151,7 @@ struct AntigravityProvider: UsageProvider {
     }
 
     private static func isComplete(_ body: [String: Any]) -> Bool {
-        windows(fromSummaries: [body]).count == buckets.count
+        windows(fromSummaries: [body]).filter { !$0.label.hasPrefix("Argon") }.count == buckets.count
     }
 
     /// `paidTier.id` first, then its name, then the current tier's name.
@@ -156,6 +163,12 @@ struct AntigravityProvider: UsageProvider {
         if raw.hasPrefix("Google AI ") { return String(raw.dropFirst("Google AI ".count)) }
         for keyword in ["Ultra", "Pro", "Free"] where raw.lowercased().contains(keyword.lowercased()) { return keyword }
         return raw
+    }
+
+    /// `cloudaicompanionProject` is a bare id or `{"id": ...}`.
+    static func project(fromLoadCodeAssist body: [String: Any]) -> String? {
+        let id = body.string("cloudaicompanionProject") ?? body.dict("cloudaicompanionProject")?.string("id")
+        return id.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     // MARK: Keychain value
@@ -201,12 +214,13 @@ struct AntigravityProvider: UsageProvider {
     }
 
     /// Asks the daily host, and the production one too when the first lacks any shared bucket.
-    private static func fetchSummaries(token: String) async -> Outcome {
+    private static func fetchSummaries(token: String, project: String?) async -> Outcome {
+        let body: [String: Any] = project.map { ["project": $0] } ?? [:]
         var bodies: [[String: Any]] = []
         var authFailed = false
         var refusal: String?
         for (index, host) in hosts.enumerated() {
-            guard let (status, body) = await post(host, summaryPath, token: token, ua: userAgent, body: [:]) else { continue }
+            guard let (status, body) = await post(host, summaryPath, token: token, ua: userAgent, body: body) else { continue }
             if status == 401 { authFailed = true; continue }
             // 403 is Google turning the caller away (e.g. "no valid license"), not an expired login.
             if status == 403 { refusal = body.dict("error")?.string("message") ?? "HTTP 403"; continue }
@@ -219,11 +233,12 @@ struct AntigravityProvider: UsageProvider {
         return refusal.map { .refused(String($0.prefix(120))) } ?? .unavailable
     }
 
-    private static func loadPlan(token: String) async -> String? {
+    /// The plan, and the project the quota request must name for Argon to appear.
+    private static func loadCodeAssist(token: String) async -> (plan: String?, project: String?)? {
         for host in hosts {
             if let (status, body) = await post(host, loadPath, token: token, ua: userAgent, body: loadBody),
                (200..<300).contains(status) {
-                return plan(fromLoadCodeAssist: body)
+                return (plan(fromLoadCodeAssist: body), project(fromLoadCodeAssist: body))
             }
         }
         return nil

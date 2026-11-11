@@ -157,12 +157,27 @@ final class NewProviderTests: LastDropTestCase {
         let body = obj("""
         {"groups":[{"displayName":"Gemini","buckets":[{"bucketId":"gemini-5h","remainingFraction":0.5},
                                                       {"bucketId":"gemini-weekly","remainingFraction":0.8}]},
-                   {"displayName":"Gemini 4 Argon","buckets":[{"bucketId":"argon-weekly","window":"weekly","remainingFraction":0.25}]},
+                   {"displayName":"Gemini Argon","buckets":[
+                     {"bucketId":"gemini-argon-5h","window":"5h","remainingFraction":0.9},
+                     {"bucketId":"gemini-argon-weekly","window":"weekly","remainingFraction":0.25,"resetTime":"2026-11-15T00:00:00Z"}]},
                    {"displayName":"Claude","buckets":[{"bucketId":"3p-5h","remainingFraction":1}]}]}
         """)
         let w = AntigravityProvider.windows(fromSummaries: [body])
-        XCTAssertEqual(w.map(\.label), ["Session", "Weekly", "Argon Weekly", "Claude"])
-        XCTAssertEqual(w[2].remainingPercent ?? -1, 25, accuracy: 0.001)
+        XCTAssertEqual(w.map(\.label), ["Session", "Weekly", "Argon", "Argon Weekly", "Claude"])
+        XCTAssertEqual(w[2].remainingPercent ?? -1, 90, accuracy: 0.001)
+        XCTAssertEqual(w[3].remainingPercent ?? -1, 25, accuracy: 0.001)
+        XCTAssertNotNil(w[3].resetsAt)
+    }
+
+    func testAntigravityArgonDisabledIsHidden() {
+        let body = obj(#"{"groups":[{"displayName":"Gemini Argon","buckets":[{"bucketId":"gemini-argon-weekly","window":"weekly","remainingFraction":1,"disabled":true}]}]}"#)
+        XCTAssertEqual(AntigravityProvider.windows(fromSummaries: [body]).map(\.label), [])
+    }
+
+    func testAntigravityProjectFromLoadCodeAssist() {
+        XCTAssertEqual(AntigravityProvider.project(fromLoadCodeAssist: obj(#"{"cloudaicompanionProject":"p-1"}"#)), "p-1")
+        XCTAssertEqual(AntigravityProvider.project(fromLoadCodeAssist: obj(#"{"cloudaicompanionProject":{"id":"p-2"}}"#)), "p-2")
+        XCTAssertNil(AntigravityProvider.project(fromLoadCodeAssist: obj(#"{}"#)))
     }
 
     func testOpenRouterMapping() {
