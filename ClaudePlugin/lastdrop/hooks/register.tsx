@@ -473,14 +473,14 @@ function progress(report: (text: string) => void, held: boolean): (line: Line) =
       current = `Moved off ${String(line.account)}: ${String(line.reason)}`
     } else if (line.type === 'tick' && open && now - last >= QUIET_MS) {
       const minutes = Math.round((now - last) / 60_000)
-      report(`Still working${current ? ` on ${current}` : ''} (${minutes} min without a new step)\n`)
+      report(`Still working${current ? ` on ${current}` : ''} (${minutes} min without a new step)\n\n`)
       last = now
       return
     } else {
       return
     }
     last = now
-    if (current) report(`${current}\n`)
+    if (current) report(`${current}\n\n`)
   }
 }
 
