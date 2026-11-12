@@ -407,6 +407,32 @@ final class AgentModelsTests: LastDropTestCase {
         XCTAssertTrue(AgentRun.modelRefusal("fable", refused.text).contains("fable"))
     }
 
+    /// A long run reports its last top-level request as its context, not the run total, and skips a subagent's requests.
+    func testALongRunReportsItsLastRequestAsItsContext() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-fake-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let path = folder.appendingPathComponent("claude")
+        let script = """
+        #!/bin/bash
+        cat > /dev/null
+        echo '{"type":"system","subtype":"init","session_id":"s1","cwd":"/w","model":"claude-sonnet-5-5","agents":[]}'
+        for i in $(seq 1 40); do
+          echo '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[],"usage":{"input_tokens":5,"output_tokens":100,"cache_read_input_tokens":40000,"cache_creation_input_tokens":500}}}'
+        done
+        echo '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":200,"cache_read_input_tokens":41000,"cache_creation_input_tokens":700}}}'
+        echo '{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":9,"cache_creation_input_tokens":9}}}'
+        echo '{"type":"result","is_error":false,"result":"done","num_turns":41,"usage":{"input_tokens":203,"output_tokens":4200,"cache_read_input_tokens":1641000,"cache_creation_input_tokens":20700}}'
+        """
+        try script.write(to: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+        let result = await SubagentRunner.run(SubagentRunner.Request(prompt: "p", sessionID: "s"), on: ClaudeAccount(id: "main"),
+                                              in: folder.path, claim: { _ in nil }, executable: path.path, onStep: { _ in })
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.inputTokens, 1_661_903)
+        XCTAssertEqual(result.context, ["inputTokens": 3, "outputTokens": 200, "cacheReadInputTokens": 41000, "cacheCreationInputTokens": 700])
+    }
+
     func testEveryAccountRefusingLeavesAVisibleModelError() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-fake-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

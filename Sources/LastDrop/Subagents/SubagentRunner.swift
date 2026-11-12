@@ -43,6 +43,9 @@ enum SubagentRunner {
         var outputTokens = 0
         var cacheReadInputTokens = 0
         var cacheCreationInputTokens = 0
+        /// The usage of the run's last top-level API request (Claude Code's `message.usage`): the size of its context
+        /// now, where the counts above add up every request. Nil when the run made none, or the backend can't say.
+        var context: [String: Int]?
         var model: String?
         /// The session it ran as: a ready process comes with its own.
         var sessionID: String?
@@ -223,6 +226,7 @@ enum SubagentRunner {
 
         var final: [String: Any]?
         var toolUses = 0
+        var context: [String: Int]?
         var ranIn: String?
         var refusal: String?
         /// Its first init: true when the check refused it, the process stopped.
@@ -250,6 +254,11 @@ enum SubagentRunner {
                     }
                     if refuses(event) { break reading }
                 case "assistant":
+                    // A subagent's requests (`parent_tool_use_id` set) are not the run's own context.
+                    if event["parent_tool_use_id"] == nil || event["parent_tool_use_id"] is NSNull,
+                       let usage = event.dict("message")?.dict("usage") {
+                        context = contextUsage(usage)
+                    }
                     for block in event.dict("message")?.array("content") ?? [] {
                         if block.string("type") == "tool_use" {
                             toolUses += 1
@@ -290,9 +299,17 @@ enum SubagentRunner {
         var result = parse(final, provider: request.endpoint?.provider)
         result.model = startedOn
         result.toolUses = toolUses
+        result.context = context
         result.sessionID = sessionID
         result.directory = ranIn
         return result
+    }
+
+    /// One API request's usage, in the runner's line names.
+    static func contextUsage(_ usage: [String: Any]) -> [String: Int] {
+        ["inputTokens": Int(usage.double("input_tokens") ?? 0), "outputTokens": Int(usage.double("output_tokens") ?? 0),
+         "cacheReadInputTokens": Int(usage.double("cache_read_input_tokens") ?? 0),
+         "cacheCreationInputTokens": Int(usage.double("cache_creation_input_tokens") ?? 0)]
     }
 
     /// Stops a Claude Code process: asked to end, then made to after 5 s.

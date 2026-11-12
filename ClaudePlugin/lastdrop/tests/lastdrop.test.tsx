@@ -5,7 +5,16 @@ import { expect, test } from 'claude-code/testing'
 const ID = 'a1111111111111111'
 const NATIVE = { status: 'async_launched', agentId: ID, marker: 'core owns this answer' }
 const RESULT = { type: 'result', text: 'exact remote report\n', inputTokens: 100, outputTokens: 10,
-                 cacheReadInputTokens: 50, cacheCreationInputTokens: 20, model: 'claude-haiku-5-5' }
+                 cacheReadInputTokens: 50, cacheCreationInputTokens: 20, model: 'claude-haiku-5-5',
+                 context: { inputTokens: 30, outputTokens: 10, cacheReadInputTokens: 50, cacheCreationInputTokens: 20 } }
+// A long remote turn: ~1.77M tokens over its many requests, while its last request held 42k.
+const LONG = { ...RESULT, inputTokens: 1_770_000, outputTokens: 30_000, cacheReadInputTokens: 1_700_000, cacheCreationInputTokens: 60_000,
+               context: { inputTokens: 3, outputTokens: 200, cacheReadInputTokens: 41_000, cacheCreationInputTokens: 700 } }
+/** The context size Claude Code reads from a turn's stop: its last request's input and output. */
+function contextOf(chunks: { kind: string; usage?: unknown }[]): number {
+  const u = chunks.find(c => c.kind === 'stop')?.usage as Record<string, number> | null | undefined
+  return u ? u.input_tokens! + u.cache_read_input_tokens! + u.cache_creation_input_tokens! + u.output_tokens! : 0
+}
 const CATALOG = { revision: 3, agents: [
   { name: 'sol', description: 'Reviews: hard bugs.', provider: 'codex', summary: 'Codex · gpt-6.1-sol · high', prompt: 'You are sol.' },
   { name: 'argon', description: 'Advisor: trade-offs.', provider: 'antigravity', summary: 'Antigravity · gemini-4-argon', prompt: 'You are argon.' },
@@ -255,12 +264,36 @@ test('TaskStop, ListAgents and SendMessage remain native calls with native resul
   expect(e.runCount).toBe(0)
 })
 
-test('remote token usage reaches the native stop chunk without counting cached tokens twice', async ($, on) => {
+test('the remote run’s last request reaches the native stop chunk as its usage', async ($, on) => {
   const e = engine([$, on])
   await e.launch()
   const stop = (await step($)).find(c => c.kind === 'stop')
   expect(stop?.usage).toEqual({ model: 'claude-haiku-5-5', input_tokens: 30, output_tokens: 10,
                               cache_read_input_tokens: 50, cache_creation_input_tokens: 20 })
+})
+
+test('a backend that gives no last request reports no usage rather than its run total', async ($, on) => {
+  const { context: _, ...total } = RESULT
+  const e = engine([$, on], { outputs: [total] })
+  await e.launch()
+  expect((await step($)).find(c => c.kind === 'stop')?.usage).toBeNull()
+})
+
+test('after a long remote turn, a native agent’s follow-up goes through', async ($, on) => {
+  const e = engine([$, on], { outputs: [LONG] })
+  await e.launch()
+  const first = await step($)
+  expect(report(first)).toBe(RESULT.text)
+  // Claude Code compares this with the child's window before the next turn; the run total would be ~1.77M.
+  expect(contextOf(first)).toBe(41_903)
+  e.messages([{ role: 'user', content: [{ type: 'text', text: 'initial task' }] },
+    { role: 'assistant', content: [{ type: 'text', text: RESULT.text }] },
+    { role: 'user', content: [{ type: 'text', text: 'next task' }] }])
+  const second = await step($, 'turn-2')
+  expect(report(second)).toBe(RESULT.text)
+  expect(contextOf(second)).toBeLessThan(200_000)
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'next task', resume: ID })
+  expect(e.modelSteps).toBe(0)
 })
 
 test('an admission failure refuses the native spawn instead of falling back', async ($, on) => {
@@ -1119,6 +1152,21 @@ test('a follow-up to a delegated child resumes the same run with only the new me
   expect(report(await mainStep($, 'turn-2'))).toBe(RESULT.text)
   const run = e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request
   expect(run).toMatchObject({ prompt: 'what was it?', resume: 't3-abc', id: 't3-abc', model: 'claude-haiku-5-5' })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('after a long remote turn, a delegated child’s follow-up goes through', async ($, on) => {
+  const e = engine([$, on], { outputs: [LONG] })
+  const task = 'note the word\n\n<!-- lastdrop {"id":"t3-abc","model":"claude-haiku-5-5"} -->'
+  e.messages(child(task))
+  const first = await mainStep($, 'turn-1')
+  expect(contextOf(first)).toBe(41_903)
+  e.messages(child(task, { role: 'assistant', content: [{ type: 'text', text: RESULT.text }] },
+    { role: 'user', content: [{ type: 'text', text: 'what was it?' }] }))
+  const second = await mainStep($, 'turn-2')
+  expect(report(second)).toBe(RESULT.text)
+  expect(contextOf(second)).toBeLessThan(200_000)
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'what was it?', resume: 't3-abc' })
   expect(e.modelSteps).toBe(0)
 })
 

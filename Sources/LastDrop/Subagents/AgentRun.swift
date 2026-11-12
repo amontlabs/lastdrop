@@ -690,6 +690,7 @@ enum AgentRun {
             "inputTokens": result.inputTokens, "outputTokens": result.outputTokens, "permissionDenials": result.permissionDenials,
             "cacheReadInputTokens": result.cacheReadInputTokens, "cacheCreationInputTokens": result.cacheCreationInputTokens,
         ]
+        if let context = result.context { object["context"] = context }
         if let account { object["account"] = account }
         if let model = result.model { object["model"] = model }
         if let path = result.worktreePath { object["worktreePath"] = path }

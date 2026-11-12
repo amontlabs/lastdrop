@@ -527,11 +527,19 @@ function header(request: Request, line: Line): string {
   return `Ran on ${String(line.model)}${skipped}.${worktree}${declined}\n\n`
 }
 
-function usageOf(line: Line, model: string): TurnUsage {
-  const cached = Number(line.cacheReadInputTokens ?? 0)
-  const created = Number(line.cacheCreationInputTokens ?? 0)
-  return { model: String(line.model ?? model), input_tokens: Math.max(0, Number(line.inputTokens ?? 0) - cached - created),
-           output_tokens: Number(line.outputTokens ?? 0), cache_read_input_tokens: cached, cache_creation_input_tokens: created }
+/**
+ * The turn's usage as Claude Code reads it: the last message's usage is the conversation's context size, which
+ * decides compaction. A remote run makes many requests, and its totals (`inputTokens`, …) add them all up, so
+ * the run's last top-level request (`context`) stands in, as a native subagent's last request would. A backend
+ * that can't say (Codex, Antigravity) gives no usage, and Claude Code counts the local conversation instead.
+ * The totals stay on the runner's line for cost.
+ */
+function usageOf(line: Line, model: string): TurnUsage | null {
+  const context = line.context as Record<string, unknown> | undefined
+  if (!context || typeof context !== 'object') return null
+  return { model: String(line.model ?? model), input_tokens: Number(context.inputTokens ?? 0),
+           output_tokens: Number(context.outputTokens ?? 0), cache_read_input_tokens: Number(context.cacheReadInputTokens ?? 0),
+           cache_creation_input_tokens: Number(context.cacheCreationInputTokens ?? 0) }
 }
 
 /** One remote run per native turn; the engine schedules new turns for messages queued while it worked. */
