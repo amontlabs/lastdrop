@@ -226,8 +226,15 @@ A fallback is tried only when an attempt fails before any work happened, and for
 usage limit, a sign-in or key, a provider that isn't installed, a model the account doesn't have, or an effort the
 provider doesn't take (an error, never a silent clamp). On Antigravity, `agy` reports a spent quota as the model's
 own reply and ends the turn normally; a short reply that is only that notice counts as a usage limit, so the chain
-moves on. Never after a tool ran, and never for another error: an
-empty report, a bug, or a stop (`TaskStop` ends the whole chain at once). The call's `effort` wins over each
+moves on. Never for another error: an empty report, a bug, or a stop (`TaskStop` ends the whole chain at once).
+
+An attempt that reaches a usage limit partway through hands its work to the next attempt (since 2026-11-12). A Claude
+attempt first forks onto another Claude account with room (`AgentRun.carryOn`); only when none has room does the
+chain move. The next attempt runs in the folder or worktree the work is in, never a new one, and is told
+(`AgentRun.handoverPrompt`): another agent stopped partway at its limit, continue and don't start over; its thread
+(the agent id and the provider's own thread id); its transcript, the agent's log in `agents/<agentId>.log`, to read
+if it needs to; where its changes are; then the original task again. The caller sees one `started`, a `moved`, and
+the final report. When no later attempt can continue, the error says the work was started and where it is. The call's `effort` wins over each
 attempt's own. The read-only role and worktree isolation apply to every attempt, and a worktree a failed attempt
 made is removed before the next starts.
 

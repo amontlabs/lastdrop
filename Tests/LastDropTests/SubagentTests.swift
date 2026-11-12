@@ -2,8 +2,8 @@ import XCTest
 @testable import LastDrop
 
 final class SubagentTests: LastDropTestCase {
-    private func candidate(_ id: String, _ session: Double?, _ weekly: Double?, active: Int = 0) -> SubagentAccounts.Candidate {
-        .init(account: ClaudeAccount(id: id), name: id, sessionUsed: session, weeklyUsed: weekly, active: active)
+    private func candidate(_ id: String, _ session: Double?, _ weekly: Double?) -> SubagentAccounts.Candidate {
+        .init(account: ClaudeAccount(id: id), name: id, sessionUsed: session, weeklyUsed: weekly)
     }
 
     // MARK: Choosing an account
@@ -39,15 +39,19 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertEqual(SubagentAccounts.pick([ownUnknown, candidate("other", nil, nil)], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.account.id, "other")
     }
 
-    func testParallelCallsSpreadOverAccounts() {
-        let picked = SubagentAccounts.pick([candidate("A", 10, 10, active: 2), candidate("B", 20, 20)], sessionThreshold: 0.9, weeklyThreshold: 0.9)
-        XCTAssertEqual(picked?.account.id, "B")
-    }
-
-    func testRunningAgentsUseUpAnAccountsRoom() {
-        // Pro at 50% of a 90% threshold: four agents fit, a fifth goes elsewhere (or to the session's own).
-        XCTAssertEqual(SubagentAccounts.pick([candidate("Pro", 50, 25, active: 3)], sessionThreshold: 0.9, weeklyThreshold: 0.95)?.account.id, "Pro")
-        XCTAssertNil(SubagentAccounts.pick([candidate("Pro", 50, 25, active: 4)], sessionThreshold: 0.9, weeklyThreshold: 0.95))
+    /// The threshold is a ceiling and nothing else: subagents already running there, or the session being the
+    /// account's own, never turn an account under it away. 2026-11-12: a sixth build got "no room" with Ultra at
+    /// weekly 35% because five running ones and the session each held back points.
+    func testTheCeilingIsTheOnlyLimit() {
+        var ultra = candidate("main", 0, 35)
+        ultra.isOwn = true
+        ultra.size = PlanSize(plan: "Ultra")
+        var max5 = candidate("claude-2", 100, 12)
+        max5.size = PlanSize(plan: "Max 5x")
+        XCTAssertEqual(SubagentAccounts.pick([ultra, max5], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.account.id, "main")
+        XCTAssertEqual(SubagentAccounts.pick([candidate("Pro", 89, 25)], sessionThreshold: 0.9, weeklyThreshold: 0.95)?.account.id, "Pro")
+        XCTAssertNil(SubagentAccounts.pick([candidate("Pro", 90, 25)], sessionThreshold: 0.9, weeklyThreshold: 0.95))
+        XCTAssertNil(SubagentAccounts.pick([candidate("Pro", 10, 95)], sessionThreshold: 0.9, weeklyThreshold: 0.95))
     }
 
     func testAPlanWithoutAFiveHourWindowHasRoom() {
@@ -75,11 +79,11 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertNil(SubagentAccounts.pick([max], sessionThreshold: 0.9, weeklyThreshold: 0.9))
     }
 
-    func testTheSessionsOwnAccountTakesSubagentsAboveItsReserve() {
-        var own = candidate("Own", 10, 10)
+    func testTheSessionsOwnAccountTakesSubagentsUpToTheCeiling() {
+        var own = candidate("Own", 75, 10)
         own.isOwn = true
         XCTAssertEqual(SubagentAccounts.pick([own], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.name, "Own")
-        own.sessionUsed = 75   // 15 points left, under the 20 kept for the session
+        own.sessionUsed = 90
         XCTAssertNil(SubagentAccounts.pick([own], sessionThreshold: 0.9, weeklyThreshold: 0.9))
     }
 

@@ -151,6 +151,18 @@ enum ClaudeBackend: AgentBackend {
                 last = result
                 continue
             }
+            // At its limit partway through: the session forks under a new id on the next account and goes on there.
+            let entry = AgentRegistry.Entry(account: account.id, directory: result.directory ?? job.cwd,
+                                            sessionID: result.sessionID ?? req.sessionID, model: model,
+                                            subagentType: job.definition.name, effort: job.effort, at: Date())
+            let (carried, moved) = await AgentRun.carryOn(job.agentID, entry: entry, result: result, accounts: config.ordered,
+                                                          config: config, own: own, tried: tried, permissionMode: permissionMode,
+                                                          mcpConfig: job.mcpConfig, systemPrompt: job.instructions,
+                                                          disallowedTools: req.disallowedTools)
+            result = carried
+            result.account = moved.account
+            result.sessionID = moved.sessionID
+            if result.directory == nil { result.directory = moved.directory }
             return result
         }
         var none = last ?? .init(text: "", isError: true, limitReached: true, turns: 0, permissionDenials: 0)

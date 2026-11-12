@@ -310,7 +310,8 @@ enum AgentRun {
     /// limit, or the model, shows only when every account, the session's own included, is out of room or lacks it.
     static func carryOn(_ agentID: String, entry: AgentRegistry.Entry, result: SubagentRunner.Result,
                         accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, tried: Set<String>,
-                        permissionMode: String, mcpConfig: String?) async -> (SubagentRunner.Result, AgentRegistry.Entry) {
+                        permissionMode: String, mcpConfig: String?, systemPrompt: String? = nil,
+                        disallowedTools: [String] = []) async -> (SubagentRunner.Result, AgentRegistry.Entry) {
         var entry = entry, result = result, tried = tried
         var toolUses = result.toolUses, durationMs = result.durationMs
         while result.limitReached || result.modelUnavailable, !AgentRegistry.wasStopped(agentID),
@@ -341,7 +342,8 @@ enum AgentRun {
             AgentRegistry.setRunning(to.id)
             let req = SubagentRunner.Request(prompt: continuePrompt, subagentType: entry.subagentType, model: entry.model,
                                              effort: entry.effort, permissionMode: permissionMode, sessionID: entry.sessionID,
-                                             resume: true, forkTo: newID, mcpConfig: mcpConfig)
+                                             resume: true, forkTo: newID, mcpConfig: mcpConfig, systemPrompt: systemPrompt,
+                                             disallowedTools: disallowedTools)
             entry.sessionID = newID
             SessionLedger.record(session: newID, account: to.id, forkedAt: Date())
             AgentRegistry.remember(agentID, entry: entry)   // a stop or a follow-up finds it on its new account
@@ -364,7 +366,8 @@ enum AgentRun {
         return accounts.first { ClaudeProvider.signedInAccount(configDir: $0.cliConfigDir).uuid == own }
     }
 
-    /// Where an admitted agent runs next: the account with room, else the session's own past its reserve.
+    /// Where an admitted agent runs next: the account under the ceiling, else the session's own, where a
+    /// built-in agent would have run.
     static func nextAccount(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, model: String? = nil,
                             excluding tried: Set<String>) async -> ClaudeAccount? {
         if let account = await pick(accounts, config: config, own: own, model: model, excluding: tried) { return account }
@@ -387,6 +390,8 @@ enum AgentRun {
         var skipped: [(provider: AgentProvider, model: String)] = []
         var last: SubagentRunner.Result?
         var anyStarted = false
+        // An attempt at its limit partway through: the next one picks the work up where it is.
+        var handover: (prompt: String, directory: String)?
         func name(_ entry: (provider: AgentProvider, model: String)) -> String {
             // A model that appears twice in the chain is told apart by its provider.
             attempts.filter { $0.model == entry.model }.count > 1 ? "\(entry.provider.displayName) \(entry.model)" : entry.model
@@ -398,14 +403,18 @@ enum AgentRun {
                 return
             }
             let launch = Launch()
-            let job = AgentJob(agentID: agentID, definition: attempt, prompt: request.prompt, cwd: resume?.directory ?? request.cwd,
+            let continuing = handover != nil
+            let job = AgentJob(agentID: agentID, definition: attempt, prompt: handover?.prompt ?? request.prompt,
+                               cwd: handover?.directory ?? resume?.directory ?? request.cwd,
                                effort: effort(attempt, request, resume: resume), permissionMode: request.permissionMode ?? "default",
-                               worktree: request.isolation == "worktree", mcpConfig: mcpConfig, resume: resume,
+                               worktree: !continuing && request.isolation == "worktree", mcpConfig: mcpConfig, resume: resume,
                                role: resume?.role ?? request.role)
             let events = AgentEvents(
                 process: { AgentRegistry.setProcess(agentID, claude: $0) },
                 started: { place, model in
                     guard launch.begin() else { return }
+                    // The caller already has this agent started; the move went out as `moved`.
+                    if continuing { log(agentID, "Continuing as \(attempt.name) on \(place) (\(model))"); return }
                     emit(["type": "started", "agentId": agentID, "account": place, "model": model, "provider": attempt.provider.rawValue,
                           "outputFile": logURL(agentID).path])
                     log(agentID, "Started \(attempt.name) on \(place) (\(model)): \(request.description ?? "")")
@@ -439,16 +448,50 @@ enum AgentRun {
                           "reason": "\(attempt.model) can't start: \(reason)", "provider": next.provider.rawValue, "model": next.model])
                     continue
                 }
-                if attempts.count > 1 {
+                if anyStarted {
+                    result.text = "\(definition.name) stopped partway through at a usage limit, and no other model in its chain could continue it:\n"
+                        + failures.map { "- " + $0 }.joined(separator: "\n")
+                        + "\nIts work so far is in \(job.cwd); its transcript is in \(logURL(agentID).path)."
+                } else if attempts.count > 1 {
                     result.text = "No attempt of \(definition.name) could start:\n" + failures.map { "- " + $0 }.joined(separator: "\n")
                 }
             }
-            guard launch.started else { return fail(agentID, result) }
+            guard launch.started || anyStarted else { return fail(agentID, result) }
+            if !isLast, launch.started, result.limitReached, resume == nil, !AgentRegistry.wasStopped(agentID) {
+                let next = attempts[index + 1]
+                let directory = result.directory ?? job.cwd
+                handover = (handoverPrompt(request.prompt, from: attempt, result: result, agentID: agentID, directory: directory), directory)
+                SubagentLog.write("\(agentID) \(attempt.model) reached its limit partway; \(next.model) on \(next.provider.displayName) continues")
+                emit(["type": "moved", "account": result.account ?? attempt.provider.displayName,
+                      "reason": "\(attempt.model) reached its usage limit; continuing on \(next.model)",
+                      "provider": next.provider.rawValue, "model": next.model])
+                log(agentID, "\(attempt.model) reached its usage limit; \(next.model) on \(next.provider.displayName) continues the work.")
+                continue
+            }
             // The models skipped on the way: never the attempt that ran, nor the last one that failed.
             result.skipped = skipped.map(name)
             await conclude(attempt, result, request, agentID: agentID, resume: resume, job: job)
             return
         }
+    }
+
+    /// What the next attempt is told when one stopped at its usage limit partway: the task again, and where the
+    /// previous agent's thread and work are, to read if it needs to.
+    static func handoverPrompt(_ task: String, from attempt: AgentDefinition, result: SubagentRunner.Result,
+                               agentID: String, directory: String) -> String {
+        let thread = result.sessionID.map { " (\(attempt.provider.displayName) thread \($0))" } ?? ""
+        return """
+        Another agent (\(attempt.model)) started this task and stopped partway through at its usage limit. \
+        Continue its work and finish the task; don't start over.
+
+        Its thread: agent \(agentID)\(thread). Its full transcript, every tool call and output, is in \(logURL(agentID).path) \
+        up to the line saying it reached its usage limit; read it if you need to know what was done. \
+        Its changes are in \(directory).
+
+        The original task:
+
+        \(task)
+        """
     }
 
     /// What follows an attempt that ran: the report, the worktree, the entry a follow-up continues, the result line.
@@ -568,8 +611,8 @@ enum AgentRun {
         "No Claude account lastdrop can use includes \(model ?? "the model"), and no other model stands in for it. \(detail)"
     }
 
-    /// The account with room for a run on `model`: the smallest plan first, the calling session's own included
-    /// with a reserve kept for the session.
+    /// The account under the ceiling for a run on `model`: the smallest plan first, the calling session's own
+    /// included like any other.
     static func pick(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, model: String? = nil,
                              excluding tried: Set<String>, log: Bool = true) async -> ClaudeAccount? {
         var candidates: [SubagentAccounts.Candidate] = []
@@ -581,7 +624,7 @@ enum AgentRun {
             guard usage.usable else { skipped.append("\(account.id) needs sign-in"); continue }
             candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
                                     modelUsed: usage.used(model: model), isOwn: signedIn == own,
-                                    active: AgentRegistry.running(account.id), size: SubagentUsage.size(account)))
+                                    size: SubagentUsage.size(account)))
         }
         let choice = SubagentAccounts.pick(candidates, sessionThreshold: config.sessionThreshold, weeklyThreshold: config.weeklyThreshold)
         if log { SubagentLog.write("own \(own?.prefix(8) ?? "?"); " + candidates.map {

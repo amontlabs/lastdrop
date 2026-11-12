@@ -102,16 +102,48 @@ final class AgentFallbackTests: LastDropTestCase {
         XCTAssertEqual(lines[2]["provider"] as? String, "antigravity")
     }
 
-    func testAFailureAfterWorkNeverFallsBack() async throws {
+    /// A limit partway through hands the work to the next attempt, in the folder it was left in, with the task
+    /// again and the previous thread to read. The caller sees one start, a move, and the final report.
+    func testALimitPartwayHandsTheWorkToTheNextAttempt() async throws {
+        let id = "fb-" + UUID().uuidString
+        var after = limited()
+        after.toolUses = 2
+        after.sessionID = "codex-thread-1"
+        after.directory = "/tmp/wt"
+        FakeCodex.script = { _, events in events.started("Codex", "gpt-6.1-sol"); return after }
+        FakeAntigravity.script = { [self] _, events in events.started("Antigravity", "gemini-4-argon"); return answered("Antigravity") }
+        await AgentRun.runDefined(definition(), try request(#","isolation":"worktree""#), agentID: id, resume: nil, mcpConfig: nil)
+        XCTAssertEqual(types(), ["started", "moved", "result"])
+        XCTAssertEqual(lines.last?["text"] as? String, "done")
+        let job = try XCTUnwrap(FakeAntigravity.calls.first)
+        XCTAssertEqual(job.cwd, "/tmp/wt")
+        XCTAssertFalse(job.worktree, "it continues in the worktree the work is in, not a new one")
+        XCTAssertTrue(job.prompt.contains("codex-thread-1"))
+        XCTAssertTrue(job.prompt.contains(id))
+        XCTAssertTrue(job.prompt.contains(AgentRun.logURL(id).path))
+        XCTAssertTrue(job.prompt.hasSuffix("\n\np"), "the original task comes again")
+    }
+
+    func testALimitPartwayOnTheLastAttemptIsTheCallersError() async throws {
         var after = limited()
         after.toolUses = 2
         FakeCodex.script = { _, events in events.started("Codex", "gpt-6.1-sol"); return after }
-        FakeAntigravity.script = { _, _ in fatalError("the fallback must not run") }
-        await AgentRun.runDefined(definition(), try request(), agentID: "fb-" + UUID().uuidString, resume: nil, mcpConfig: nil)
+        await AgentRun.runDefined(definition(fallbacks: []), try request(), agentID: "fb-" + UUID().uuidString, resume: nil, mcpConfig: nil)
         XCTAssertEqual(types(), ["started", "result"])
-        XCTAssertEqual(lines[1]["isError"] as? Bool, true)
-        XCTAssertNil(lines[1]["unavailable"])
-        XCTAssertTrue(FakeAntigravity.calls.isEmpty)
+        XCTAssertEqual(lines.last?["isError"] as? Bool, true)
+    }
+
+    func testAHandoverNobodyCanTakeSaysTheWorkWasStarted() async throws {
+        let id = "fb-" + UUID().uuidString
+        var after = limited()
+        after.toolUses = 2
+        FakeCodex.script = { _, events in events.started("Codex", "gpt-6.1-sol"); return after }
+        FakeAntigravity.script = { [self] _, _ in limited() }
+        await AgentRun.runDefined(definition(), try request(), agentID: id, resume: nil, mcpConfig: nil)
+        XCTAssertEqual(types(), ["started", "moved", "result"])
+        let text = try XCTUnwrap(lines.last?["text"] as? String)
+        XCTAssertTrue(text.contains("stopped partway"), text)
+        XCTAssertTrue(text.contains(AgentRun.logURL(id).path), text)
     }
 
     func testOtherErrorsDoNotFallBackEither() async throws {

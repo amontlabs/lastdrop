@@ -50,8 +50,10 @@ unused once the week is read; only a failed read is unknown. Only
 accounts below 80% of their 5-hour window and 95% of their week are considered, so a long conversation
 doesn't start on an account's last points; if none is, the roomiest account not at a limit. Subagents pick
 differently (`SubagentAccounts.pick`): the smallest plan with room first, because they're short and move
-by themselves at a limit. The session's own account is a candidate too, with 20 points (`ownReserve`) kept for the
-session, and the run's model's weekly row counts like the others.
+by themselves at a limit. The thresholds are a ceiling and nothing else: an account under both, and under the
+weekly threshold of the run's model (Fable Weekly), takes a new subagent however many already run there, the
+session's own account included. (Until 2026-11-12 each running subagent held back 10 points and the session's own
+account 20; with five builds on Ultra at weekly 35% that read as no room for a sixth.)
 
 **Moving keeps no session id across accounts.** Every request carries the session id
 (`x-claude-code-session-id`, `metadata.user_id.session_id`). A thread that moves continues as
@@ -174,8 +176,7 @@ runner still supplies both. Worktree isolation belongs to the remote worker, so 
 creates no second, unused worktree.
 
 No-room calls remain built-in, as do ordinary forks, teammates, workflow agents, remote agents and calls
-from subagents. Each subagent already running on an account counts as 10 points of its usage, so a burst
-of parallel calls doesn't all land on one account's last points.
+from subagents.
 
 **Usage limits never reach the calling agent** (changed 2026-10-28, after six parallel Opus judges sent to
 Pro at 50% ran it to its session limit and each reported `You've hit your session limit` to the caller,
@@ -183,7 +184,8 @@ which then asked the user whether to wait). If an account reaches its limit befo
 starts again on the next account. If it reaches its limit partway through, the agent's Claude Code session
 has its transcript rewritten in place in `~/.claude/projects` without the trailing limit notice (a session an older
 run left in its account's folder is copied there first) and is forked and continued there with `--resume` and a neutral "continue" prompt. A follow-up
-(SendMessage) works the same way. The next account is the one with room for the model. If none
+(SendMessage) works the same way, and so does an agent from lastdrop's list on its Claude attempt (`build-hard`'s
+`Claude · opus`): `AgentBackend` hands it to `AgentRun.carryOn` with the agent's role and blocked tools. The next account is the one with room for the model. If none
 has room, it's the session's own account past its reserve, which is where a built-in subagent would have run. The same
 applies when the room an agent was admitted for is gone by the time it starts. Only when every account,
 the session's own included, is at its limit does the caller get the limit as an error. The pane shows each

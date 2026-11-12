@@ -3,9 +3,9 @@ import Foundation
 /// Which Claude account a subagent, or a T3 Code thread, runs on.
 ///
 /// Subagents are short, and move on by themselves when an account runs out, so they spend the smallest
-/// accounts first: a Pro's 5-hour window resets whether it was used or not. The calling session's own account
-/// is a candidate like any other, minus a reserve that keeps the session itself from running out. Only accounts
-/// below both thresholds, and below the weekly threshold of the run's model (Fable Weekly), take one.
+/// accounts first: a Pro's 5-hour window resets whether it was used or not. The thresholds are a ceiling and
+/// nothing else: an account below both, and below the weekly threshold of the run's model (Fable Weekly), takes
+/// a new subagent, however many already run on it, the calling session's own account included.
 ///
 /// Threads are long, and moving one costs a full re-read, so a thread starts on the account with the most
 /// room, counted in Pro-sized windows (`PlanSize`), and never on an account's last points.
@@ -17,29 +17,20 @@ enum SubagentAccounts {
         var weeklyUsed: Double?
         /// The weekly limit scoped to the run's model ("Fable Weekly"), when the account has one.
         var modelUsed: Double? = nil
-        /// The calling session runs on it: subagents leave it `ownReserve` points.
+        /// The calling session runs on it: among unknown accounts, it is tried last.
         var isOwn = false
-        /// Subagents this server is running on it right now; spreads parallel calls over accounts.
-        var active = 0
         var size = PlanSize()
     }
 
-    /// Points of usage each subagent already running on an account is expected to take before it ends.
-    static let reservedPerAgent = 10.0
-    /// Points of the calling session's own account kept for the session itself.
-    static let ownReserve = 20.0
-
-    /// The subagent's account: the smallest plan with room, and among equal plans the one with the most
-    /// room. The subagents running on an account count against its room, so a burst of calls doesn't all land
-    /// on one account's last few points. When no account is known to have room, one whose usage is unknown
-    /// (another than the session's own first) is tried: it refuses quickly if it's full, while one known to be
-    /// full surely fails. With the app running, no account stays unknown for long (`ClaudeKeeper`).
+    /// The subagent's account: the smallest plan under the ceiling, and among equal plans the one with the most
+    /// room under it. When no account is known to be under it, one whose usage is unknown (another than the
+    /// session's own first) is tried: it refuses quickly if it's full, while one known to be full surely fails.
+    /// With the app running, no account stays unknown for long (`ClaudeKeeper`).
     static func pick(_ candidates: [Candidate], sessionThreshold: Double, weeklyThreshold: Double) -> Candidate? {
         func room(_ c: Candidate) -> Double? {
             guard let s = c.sessionUsed, let w = c.weeklyUsed else { return nil }
             var r = min(sessionThreshold * 100 - s, weeklyThreshold * 100 - w)
             if let m = c.modelUsed { r = min(r, weeklyThreshold * 100 - m) }
-            r -= Double(c.active) * reservedPerAgent + (c.isOwn ? ownReserve : 0)
             return r > 0 ? r : nil
         }
         var best: (Candidate, Double)?
