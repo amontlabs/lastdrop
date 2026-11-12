@@ -17,6 +17,10 @@ enum LastDropPaths {
     static let agentCatalog = support.appendingPathComponent("agent-catalog.json")
     /// Each account's latest usage, written by the app as it refreshes, read by the subagent runner.
     static let usage = support.appendingPathComponent("usage.json")
+    /// Held around every read-modify-write of `usage.json`, by the app and by runners alike.
+    static let usageLock = support.appendingPathComponent("usage.lock")
+    /// Touched by the app on every tick: runners read usage themselves only when it's old (the app isn't running).
+    static let appHeartbeat = support.appendingPathComponent("app.heartbeat")
     /// The Claude Code version the subagent self-test last passed on.
     static let selfTest = support.appendingPathComponent("selftest.json")
     static let selfTestLock = support.appendingPathComponent("selftest.lock")

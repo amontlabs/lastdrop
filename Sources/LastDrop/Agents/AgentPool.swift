@@ -39,11 +39,9 @@ enum AgentPool {
     }
 
     /// The account the panel marks Next: only one with room, since when all are full, work stays where it is.
-    /// Claude subagents avoid the session's own account, which the panel takes to be Main, until no other has room.
     static func next(_ pool: [Account], usage: [String: SubagentUsage.Status], config: AccountsConfig, now: Date = .now) -> Account? {
         let open = pool.filter { room($0, usage: usage, config: config, now: now) != nil }
-        let others = open.filter { $0.provider == .claude && !$0.isMain }
-        return pick(others.isEmpty ? open : others, usage: usage, config: config, now: now, isFull: { _ in false })
+        return pick(open, usage: usage, config: config, now: now, isFull: { _ in false })
     }
 
     /// Points left before the nearer threshold; nil when unknown, stale or past it.
@@ -51,7 +49,7 @@ enum AgentPool {
         guard let status = usage[usageKey(account)] else { return nil }
         // An account that can't be read right now (rate limited) keeps its last reading longer.
         let blocked = status.blockedUntil.map { $0 > now } ?? false
-        guard now.timeIntervalSince(status.at) < (blocked ? SubagentUsage.readingKept : 30 * 60) else { return nil }
+        guard now.timeIntervalSince(status.at) < (blocked ? SubagentUsage.readingValid : 30 * 60) else { return nil }
         let rooms = [status.session.map { config.sessionThreshold * 100 - $0 }, status.weekly.map { config.weeklyThreshold * 100 - $0 }].compactMap { $0 }
         guard let room = rooms.min(), room > 0 else { return nil }
         return room

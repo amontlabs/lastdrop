@@ -9,6 +9,9 @@ struct ClaudeProvider: UsageProvider {
     /// A short-lived runner process: it asks the usage endpoint and nothing else. The plan name and reset grants
     /// are the app's to fetch (their caches live in one process), and the runner reads the plan from the status file.
     var lean = false
+    /// Ask Anthropic even when Claude Code's copy is recent: the account just answered "limit reached", which
+    /// the copy may predate.
+    var fresh = false
 
     /// The id this account has in the shared usage file: "main", or its folder's name.
     var usageID: String { configDir.map { ($0 as NSString).lastPathComponent } ?? ClaudeAccount.mainID }
@@ -26,7 +29,7 @@ struct ClaudeProvider: UsageProvider {
         // Claude Code asks the same endpoint for the same account and keeps the answer: while that's recent,
         // asking again only spends the account's small quota on the endpoint. The shared block stays as it
         // is: a cached answer says nothing about whether Anthropic would answer lastdrop now.
-        if let cached = cachedUsage() {
+        if !fresh, let cached = cachedUsage() {
             let (windows, credits) = Self.reading(from: cached.root)
             if lean { return UsageSnapshot(title: "Claude", plan: nil, windows: windows, credits: credits) }
             let creds = Self.storedCredentials(configDir: configDir).flatMap(Self.credentials(from:))
@@ -85,19 +88,40 @@ struct ClaudeProvider: UsageProvider {
         return snapshot
     }
 
+    /// What the keeper needs to know about a sign-in, from Claude Code's blob alone.
+    struct SignInFacts: Equatable {
+        /// When the access token expires; nil when there's none (signed out, or Claude Code cleared a dead one).
+        var expiresAt: Date?
+        /// When the sign-in itself ends (`refreshTokenExpiresAt`).
+        var endsAt: Date?
+        var hasRefreshToken: Bool
+        /// Claude Code's reason for clearing a dead sign-in: "time_limit" when it ran out.
+        var loginEnded: String?
+        /// The plan the sign-in names ("Max 20x").
+        var plan: String?
+    }
+
+    /// Nil when the blob isn't a Claude subscription sign-in at all.
+    static func signInFacts(from raw: String) -> SignInFacts? {
+        guard let json = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any],
+              let oauth = json.dict("claudeAiOauth") else { return nil }
+        let access = oauth.string("accessToken")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let refresh = oauth.string("refreshToken")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let expires = oauth.double("expiresAt").flatMap { $0 > 0 ? $0 : nil }
+        return SignInFacts(expiresAt: access.isEmpty ? nil : Dates.epoch(expires), endsAt: Dates.epoch(oauth.double("refreshTokenExpiresAt")),
+                           hasRefreshToken: !refresh.isEmpty, loginEnded: oauth.string("loginEnded"),
+                           plan: planName(type: oauth.string("subscriptionType"), tier: oauth.string("rateLimitTier")))
+    }
+
     /// The plan in the account's sign-in, read without asking Anthropic. Nil when it isn't signed in.
     func credentialPlan() async -> String? {
         Self.storedCredentials(configDir: configDir).flatMap(Self.credentials(from:))?.plan
     }
 
-    /// The plan name to keep when the profile can't be asked: the one already shown, unless the sign-in now says
-    /// a plan of another size (the account was upgraded, and "Pro" would stay forever). "Ultra" and the
-    /// sign-in's "Max 20x" are the same plan, so the nicer name stays.
-    static func plan(shown: String?, credentials: String?) -> String? {
-        guard let credentials else { return shown }
-        guard let shown else { return credentials }
-        return PlanSize(plan: shown) == PlanSize(plan: credentials) ? shown : credentials
-    }
+    /// The plan name to keep when the profile can't be asked: the one already shown, which came from Anthropic's
+    /// profile. The sign-in's plan only stands in when nothing was shown yet: Claude Code stamps it at sign-in and
+    /// never updates it, so after an upgrade it still says "Pro" (seen 2026-11-12 on a Max 5x account).
+    static func plan(shown: String?, credentials: String?) -> String? { shown ?? credentials }
 
     // MARK: Claude Code's cached reading
 
@@ -174,11 +198,14 @@ struct ClaudeProvider: UsageProvider {
         return planDisplayName(fromProfile: root)
     }
 
-    /// `{"organization": {"plan_display_name": "Ultra", …}}`; nil when missing or blank.
+    /// `{"organization": {"plan_display_name": "Ultra", "organization_type": "claude_max", "rate_limit_tier":
+    /// "default_claude_max_5x"}}`. Some accounts have no display name: then the type and tier ("Max 5x"), which
+    /// are current, unlike the sign-in's. Nil when neither is there.
     static func planDisplayName(fromProfile root: [String: Any]) -> String? {
-        guard let name = root.dict("organization")?.string("plan_display_name")?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
-        return name
+        let org = root.dict("organization")
+        if let name = org?.string("plan_display_name")?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
+        guard let type = org?.string("organization_type"), type.hasPrefix("claude_") else { return nil }
+        return planName(type: String(type.dropFirst("claude_".count)), tier: org?.string("rate_limit_tier"))
     }
 
     /// Anthropic's one-off usage-limit resets: the usage endpoint with `cedar_ember=1` adds a

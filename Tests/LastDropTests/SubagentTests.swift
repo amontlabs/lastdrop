@@ -18,8 +18,25 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertEqual(SubagentAccounts.pick([candidate("A", 89, 10)], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.account.id, "A")
     }
 
-    func testUnknownUsageIsNoRoom() {
-        XCTAssertNil(SubagentAccounts.pick([candidate("A", nil, 10)], sessionThreshold: 0.9, weeklyThreshold: 0.9))
+    func testUnknownUsageIsTheLastResort() {
+        // A known account with room wins.
+        XCTAssertEqual(SubagentAccounts.pick([candidate("A", nil, 10), candidate("B", 50, 50)], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.account.id, "B")
+        // None known to have room: the unknown one is tried rather than failing on a full one.
+        XCTAssertEqual(SubagentAccounts.pick([candidate("A", nil, 10), candidate("B", 95, 50)], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.account.id, "A")
+        XCTAssertEqual(SubagentAccounts.pickForThread([candidate("A", nil, nil), candidate("B", 100, 50)])?.account.id, "A")
+    }
+
+    func testTodaysIncidentGoesToTheUnknownAccount() {
+        // A session on Max, out of Fable; Ultra unreadable. The Fable subagent goes to Ultra, not to Max.
+        var max = candidate("claude-2", 24, 93)
+        max.modelUsed = 100
+        max.isOwn = true
+        let ultra = candidate("main", nil, nil)
+        XCTAssertEqual(SubagentAccounts.pick([ultra, max], sessionThreshold: 0.95, weeklyThreshold: 1)?.account.id, "main")
+        // Unknown accounts other than the session's own come first.
+        var ownUnknown = candidate("own", nil, nil)
+        ownUnknown.isOwn = true
+        XCTAssertEqual(SubagentAccounts.pick([ownUnknown, candidate("other", nil, nil)], sessionThreshold: 0.9, weeklyThreshold: 0.9)?.account.id, "other")
     }
 
     func testParallelCallsSpreadOverAccounts() {

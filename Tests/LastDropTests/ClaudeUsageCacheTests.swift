@@ -129,34 +129,11 @@ final class ClaudeUsageCacheTests: LastDropTestCase {
         } catch ProviderError.rateLimited {} catch { XCTFail("\(error)") }
     }
 
-    func testRunnerReadingKeepsTheBlockAndCorrectsThePlan() {
-        let at = now.addingTimeInterval(-120)
-        SubagentUsage.writeStatus(["claude-2": .init(session: 90, weekly: 50, at: now.addingTimeInterval(-3600), plan: "Pro",
-                                                     blockedUntil: now.addingTimeInterval(1800), failures: 3)])
-        // From Claude Code's copy: no sign-in was read, so the plan stays.
-        SubagentUsage.recordReading("claude-2", session: 26, weekly: 2, at: at, credentialPlan: nil)
-        var entry = SubagentUsage.readStatus()["claude-2"]
-        XCTAssertEqual(entry?.session, 26)
-        XCTAssertEqual(entry?.at.timeIntervalSince(at) ?? 1, 0, accuracy: 0.01)
-        XCTAssertEqual(entry?.plan, "Pro")
-        XCTAssertEqual(entry?.failures, 3)
-        XCTAssertNotNil(SubagentUsage.blockedUntil("claude-2", now: now))
-        // From Anthropic, with the sign-in's plan: the upgrade shows.
-        SubagentUsage.recordReading("claude-2", session: 27, weekly: 2, at: now, credentialPlan: "Max 5x")
-        entry = SubagentUsage.readStatus()["claude-2"]
-        XCTAssertEqual(entry?.plan, "Max 5x")
-        // An account never read before gets an entry.
-        SubagentUsage.recordReading("new", session: 1, weekly: 1, at: now, credentialPlan: "Max 20x")
-        XCTAssertEqual(SubagentUsage.readStatus()["new"]?.plan, "Max 20x")
-    }
 
-    func testPlanFollowsTheSignInOnlyWhenItsSizeChanged() {
-        // Upgraded from Pro: the saved name would otherwise stay forever.
-        XCTAssertEqual(ClaudeProvider.plan(shown: "Pro", credentials: "Max 5x"), "Max 5x")
-        XCTAssertEqual(ClaudeProvider.plan(shown: "Max", credentials: "Max 20x"), "Max 20x")
-        // The same plan under claude.ai's name: keep it.
+    func testTheProfilesPlanWinsOverTheSignInsStamp() {
+        // Upgraded to Max 5x: the sign-in still says Pro, the profile knows better.
+        XCTAssertEqual(ClaudeProvider.plan(shown: "Max 5x", credentials: "Pro"), "Max 5x")
         XCTAssertEqual(ClaudeProvider.plan(shown: "Ultra", credentials: "Max 20x"), "Ultra")
-        XCTAssertEqual(ClaudeProvider.plan(shown: "Max", credentials: "Max 5x"), "Max")
         XCTAssertEqual(ClaudeProvider.plan(shown: nil, credentials: "Pro"), "Pro")
         XCTAssertEqual(ClaudeProvider.plan(shown: "Ultra", credentials: nil), "Ultra")
     }

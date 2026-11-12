@@ -107,8 +107,12 @@ struct LimitsList: View {
             EmptyPanel(text: "No accounts yet.", action: "Add an Account…") { WindowPresenter.settings(model, page: .accounts) }
         } else {
             VStack(alignment: .leading, spacing: 4) {
+                ForEach(model.accountsNeedingSignIn) { info in
+                    SignInBanner(name: info.name) { model.signInAgain(info.account.key) }
+                }
                 ForEach(providers) { provider in
-                    ProviderGroup(provider: provider, accounts: model.accounts(provider), now: now)
+                    ProviderGroup(provider: provider, accounts: model.accounts(provider), now: now,
+                                  signIn: { model.signInAgain($0.account.key) })
                 }
             }
         }
@@ -135,11 +139,12 @@ private struct ProviderGroup: View {
     let provider: ProviderID
     let accounts: [AccountInfo]
     let now: Date
+    let signIn: (AccountInfo) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if accounts.count == 1, let only = accounts.first {
-                AccountRow(info: only, title: provider.displayName, logo: provider, now: now)
+                AccountRow(info: only, title: provider.displayName, logo: provider, now: now, signIn: signIn)
             } else {
                 HStack(spacing: 7) {
                     ProviderLogo(id: provider, size: 14)
@@ -148,21 +153,44 @@ private struct ProviderGroup: View {
                 .padding(.horizontal, 6)
                 .padding(.top, 6)
                 ForEach(accounts) { info in
-                    AccountRow(info: info, title: info.name, logo: nil, now: now)
+                    AccountRow(info: info, title: info.name, logo: nil, now: now, signIn: signIn)
                 }
             }
         }
     }
 }
 
-/// One account: name and plan, then Session and Weekly side by side. Hovering shows every limit it has.
+/// A Claude account only you can bring back: on top of the panel, with the button that does it.
+private struct SignInBanner: View {
+    let name: String
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Text("Claude \(name) needs you to sign in again").font(.caption.weight(.medium)).lineLimit(2)
+            Spacer(minLength: 4)
+            Button("Sign In", action: action).controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// One account: name and plan, then Session and Weekly side by side, and a slim line per model-scoped limit
+/// (Fable). Claude accounts carry badges for the work that goes to them. Hovering shows every limit it has.
 private struct AccountRow: View {
     let info: AccountInfo
     let title: String
     /// The provider's logo, when the row stands for the whole provider.
     let logo: ProviderID?
     let now: Date
+    let signIn: (AccountInfo) -> Void
     @State private var hovering = false
+
+    /// Only signing in again brings it back.
+    private var needsSignIn: Bool { info.signIn.map { !$0.state.isUsable } ?? false }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -173,6 +201,14 @@ private struct AccountRow: View {
                 ResetBadge(resets: info.state.snapshot?.resets, now: now)
                 Spacer(minLength: 4)
                 status
+                if !needsSignIn {
+                    ForEach(info.badges, id: \.self) { badge in
+                        Text(badge).font(.caption2.weight(.semibold)).foregroundStyle(Brand.accent).lineLimit(1)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Brand.accent.opacity(0.12), in: Capsule())
+                            .help(Self.badgeHelp(badge))
+                    }
+                }
             }
             content.padding(.leading, 20)
             if let credits = info.state.snapshot?.credits {
@@ -186,8 +222,21 @@ private struct AccountRow: View {
         .hoverTip { AccountDetail(info: info, now: now) }
     }
 
+    static func badgeHelp(_ badge: String) -> String {
+        switch badge {
+        case "Threads": "New T3 Code threads start here: it has the most room, counted in plan sizes."
+        case "Subagents": "New Claude subagents run here: the smallest plan with room. A session's own account keeps 20 points for itself."
+        default: "New \(badge) subagents run here: the smallest plan with \(badge) room left."
+        }
+    }
+
     @ViewBuilder private var status: some View {
-        if info.state.isLoading {
+        if needsSignIn {
+            Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+        } else if let signIn = info.signIn, signIn.endsSoon(now: now), let ends = signIn.endsAt {
+            Text("Sign-in ends \(Format.clock(ends, now: now))").font(.caption2).foregroundStyle(.orange)
+                .help("Claude Code can't renew this sign-in past then. Sign in again in Settings → Accounts to keep it.")
+        } else if info.state.isLoading {
             ProgressView().controlSize(.mini)
         } else if info.state.isStale(now: now) {
             Text("Outdated").font(.caption2).foregroundStyle(.orange)
@@ -195,20 +244,30 @@ private struct AccountRow: View {
             Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
         } else if info.isNext {
             Text("Next").font(.caption2.weight(.semibold)).foregroundStyle(Brand.accent)
-                .help(info.account.provider != .claude ? "New \(info.account.provider.displayName) agents run on this account: it has the most room."
-                      : info.account.isMain ? "New subagents run on this account: no other account has room."
-                      : "New subagents run on this account: of the accounts your sessions don't use, it has the most room.")
+                .help("New \(info.account.provider.displayName) agents run on this account: it has the most room.")
         }
     }
 
     @ViewBuilder private var content: some View {
-        if let snapshot = info.state.snapshot {
-            let main = ProviderSection.split(snapshot.windows).main
-            if main.count == 1, let only = main.first {
-                CompactMeter(window: only, now: now)
-            } else {
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(main.prefix(2), id: \.label) { CompactMeter(window: $0, now: now) }
+        if needsSignIn {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Caption("\(info.signIn?.detail ?? "Signed out.") Nothing runs on it until you sign in.")
+                Spacer(minLength: 4)
+                Button("Sign In") { signIn(info) }.controlSize(.small)
+            }
+        } else if let snapshot = info.state.snapshot {
+            let split = ProviderSection.split(snapshot.windows)
+            VStack(alignment: .leading, spacing: 6) {
+                if split.main.count == 1, let only = split.main.first {
+                    CompactMeter(window: only, now: now)
+                } else {
+                    HStack(alignment: .top, spacing: 14) {
+                        ForEach(split.main.prefix(2), id: \.label) { CompactMeter(window: $0, now: now) }
+                    }
+                }
+                let weekReset = snapshot.windows.first { $0.label == "Weekly" }?.resetsAt
+                ForEach(split.more.filter { $0.label.hasSuffix(" Weekly") }, id: \.label) { window in
+                    ModelMeter(window: window, now: now, weekReset: weekReset)
                 }
             }
         } else if let error = info.state.error {
@@ -255,6 +314,27 @@ private struct CompactMeter: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A model-scoped weekly limit on one line: "Fable", a slim bar, what's left and when it resets.
+private struct ModelMeter: View {
+    let window: UsageWindow
+    let now: Date
+    /// The account's weekly reset: the same moment isn't repeated on this line.
+    var weekReset: Date?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(SubagentUsage.modelName(window.label)).foregroundStyle(.secondary)
+            ResetBadge(resets: window.resets, now: now)
+            Meter(remaining: window.remainingPercent ?? 0, height: 3)
+            Text(Format.left(window)).monospacedDigit()
+            if let reset = window.resetsAt, weekReset.map({ abs($0.timeIntervalSince(reset)) > 60 }) ?? true {
+                Text(Format.duration(max(reset.timeIntervalSince(now), 0))).foregroundStyle(.tertiary).monospacedDigit()
+            }
+        }
+        .font(.caption)
     }
 }
 

@@ -82,8 +82,12 @@ final class AppModel {
     /// lastdrop's Claude Code plugin is installed and enabled (`~/.claude/settings.json`).
     var subagentsInstalled = false
     var claudeError: String?
-    /// When lastdrop last started Claude Code to renew an account's expired sign-in.
-    @ObservationIgnored var renewedAt: [String: Date] = [:]
+    /// Keeps the Claude accounts' sign-ins renewed ahead of expiry.
+    let keeper = ClaudeKeeper()
+    /// Where new work goes, by Claude account: "Threads", "Subagents", and one per model-scoped limit ("Fable").
+    var claudeBadges: [String: [String]] = [:]
+    /// Sign-in problems already announced, by account and state; cleared once the account is fine again.
+    @ObservationIgnored var announcedSignIns: Set<String> = []
     /// Plugin installs or removals still to finish; until then, its state says nothing about the feature.
     @ObservationIgnored private var pluginChanges = 0
     @ObservationIgnored private var pluginTask: Task<Void, Never>?
@@ -163,13 +167,17 @@ final class AppModel {
     var isRefreshing: Bool { enabledAccounts.contains { states[$0.id]?.isLoading == true } }
 
     /// The accounts the menu bar shows, by provider in the panel's order: those set to show something and
-    /// with usage to show. Empty leaves the icon alone.
+    /// with usage to show, and any Claude account that needs you to sign in again, as a "!". Empty leaves the
+    /// icon alone.
     var menuBarGroups: [MenuBarGroup] {
         connectedProviders.compactMap { provider in
-            let shown = accounts(provider).filter { $0.account.menuBar != nil && $0.state.snapshot != nil }
+            let shown = accounts(provider).filter {
+                ($0.account.menuBar != nil && $0.state.snapshot != nil) || $0.signIn.map { !$0.state.isUsable } == true
+            }
             guard !shown.isEmpty else { return nil }
             return MenuBarGroup(provider: provider, entries: shown.map {
-                MenuBarEntry(name: shown.count > 1 ? $0.name : nil, snapshot: $0.state.snapshot, mode: $0.account.menuBar ?? .session)
+                MenuBarEntry(name: shown.count > 1 ? $0.name : nil, snapshot: $0.state.snapshot, mode: $0.account.menuBar ?? .session,
+                             needsSignIn: $0.signIn.map { !$0.state.isUsable } == true)
             })
         }
     }
@@ -186,6 +194,18 @@ final class AppModel {
         // The wrapper T3 Code points at, kept current with where this app's executable is.
         Task.detached { ThreadLauncher.writeWrapper() }
         refreshLocalChecks()
+        keeper.onRenewed = { [weak self] account in
+            Task { await self?.refresh([Account(provider: .claude, key: account.id)]) }
+        }
+        // After sleep, tokens may have expired and readings aged: check everything now, not at the next tick.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.keeper.recheck()
+                await self.claudeTick()
+                await self.refresh(self.enabledAccounts)
+            }
+        }
         loop = Task { [weak self] in
             var lastReaperCheck = Date.distantPast
             while !Task.isCancelled {
@@ -303,16 +323,17 @@ final class AppModel {
     }
 
     private func fetch(_ account: Account) async throws -> UsageSnapshot {
-        do {
+        guard account.provider == .claude, var claude = account.usageProvider as? ClaudeProvider else {
             return try await account.usageProvider.fetch()
-        } catch ProviderError.unauthorized where account.provider == .claude && !account.isMain
-                    && Date().timeIntervalSince(renewedAt[account.key] ?? .distantPast) > 600 {
-            // Unused for a while: Claude Code renews the sign-in when started.
-            renewedAt[account.key] = Date()
-            guard let renewed = await ClaudeSignIn.renew(ClaudeAccount(id: account.key)) else {
-                throw ProviderError.unauthorized("Claude Code sign-in expired. Run `claude` to refresh it.")
-            }
-            return renewed
+        }
+        // It answered "limit reached" since the last reading: Claude Code's copy may predate that, so ask.
+        if let full = AgentRegistry.fullSince(account.key), (states[account.id]?.lastSuccess ?? .distantPast) < full { claude.fresh = true }
+        do {
+            return try await claude.fetch()
+        } catch ProviderError.unauthorized {
+            // The keeper renews sign-ins ahead of expiry; a 401 means it should look again now.
+            keeper.recheck(account.key)
+            throw ProviderError.unauthorized("Claude Code sign-in expired. lastdrop is renewing it.")
         }
     }
 
@@ -411,6 +432,7 @@ final class AppModel {
         var config = AccountsConfig()
         config.update("claude.main") { $0.menuBar = .both }
         config.append(Account(provider: .claude, key: "work", name: "Team", menuBar: .both))
+        config.append(Account(provider: .claude, key: "old", name: "Pro", menuBar: nil))
         config.update("codex.main") { $0.menuBar = .both }
         config.update("zai.main") { $0.menuBar = .session }
         config.update("antigravity.main") { $0.notifyAt = 0.9 }
@@ -431,6 +453,10 @@ final class AppModel {
         for (id, snapshot) in usage {
             states[id] = ProviderState(snapshot: snapshot, lastAttempt: now, lastSuccess: now)
         }
+        states["claude.old"] = ProviderState(snapshot: UsageSnapshot(title: "Claude", plan: "Pro", windows: [w("Session", 5, 3), w("Weekly", 10, 100)]),
+                                             lastAttempt: now, lastSuccess: now)
+        claudeBadges = ["main": ["Fable"], "work": ["Threads", "Subagents"]]
+        keeper.preview("old", ClaudeKeeper.SignIn(state: .needsSignIn, detail: "Its sign-in ran out."))
         let emails = ["claude.main": "you@example.com", "claude.work": "you@company.com", "antigravity.main": "you@example.com"]
         localChecks = Dictionary(uniqueKeysWithValues: config.accounts.map { ($0.id, LocalCheck(connected: true, email: emails[$0.id], agents: .ready)) })
         agentsEnabled = true
@@ -493,13 +519,49 @@ final class AppModel {
         guard Self.isBundled else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = NotificationPresenter.shared
+        center.setNotificationCategories([UNNotificationCategory(
+            identifier: NotificationPresenter.signInCategory,
+            actions: [UNNotificationAction(identifier: NotificationPresenter.signInAction, title: "Sign In", options: [.foreground])],
+            intentIdentifiers: [])])
+        NotificationPresenter.shared.onSignIn = { [weak self] id in Task { @MainActor in self?.signInAgain(id) } }
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// Takes a sign-in notification back once the account is fine, so its button can't start a needless sign-in.
+    func withdrawSignIn(account: String) {
+        guard Self.isBundled else { return }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["signin-\(account)"])
+    }
+
+    /// A sign-in problem: sent whatever the account's limit notifications are set to, since it's about lastdrop
+    /// working at all. Its Sign In button signs the account in again.
+    func postSignIn(_ text: String, account: String) {
+        guard Self.isBundled else { return }
+        requestNotificationPermission()
+        let content = UNMutableNotificationContent()
+        content.body = text
+        content.categoryIdentifier = NotificationPresenter.signInCategory
+        content.userInfo = ["account": account]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "signin-\(account)", content: content, trigger: nil))
     }
 }
 
 /// Shows banners even while the panel is open and the app is active.
 final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let shared = NotificationPresenter()
+    static let signInCategory = "signin"
+    static let signInAction = "signin.now"
+    /// Signs the named Claude account in again.
+    var onSignIn: ((String) -> Void)?
+
+    /// The Sign In button of a sign-in notification.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.actionIdentifier == Self.signInAction, let id = response.notification.request.content.userInfo["account"] as? String {
+            onSignIn?(id)
+        }
+        completionHandler()
+    }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -518,4 +580,6 @@ struct MenuBarEntry {
     var name: String?
     var snapshot: UsageSnapshot?
     var mode: MenuBarMode
+    /// Shows "!" instead of numbers: only signing in again brings it back.
+    var needsSignIn = false
 }

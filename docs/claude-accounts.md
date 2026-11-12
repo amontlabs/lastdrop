@@ -86,19 +86,49 @@ lasts until the next start: change those in Main. The sign-in folder itself is u
 from `CLAUDE_SECURESTORAGE_CONFIG_DIR`. With no readable `~/.claude.json` there is no profile and the run is as
 before.
 
-**Reading usage without getting rate limited.** `/api/oauth/usage` allows few requests per account, and the app and
-every runner process read it.
+**Sign-ins are kept fresh by the app (2026-11-12).** On 2026-11-11 and 11-12 Ultra's sign-in expired while it
+sat idle, because main threads had moved to Max. lastdrop renewed every account but Main, so for about 3.5 hours each
+day Ultra read as unknown. Fable subagents then ran on Max, which was out of Fable, and failed. Now
+`ClaudeKeeper`, in the app, keeps every account's sign-in renewed, Main included:
+- lastdrop never asks Anthropic for tokens: Claude Code stays the only OAuth client. Claude Code 2.1.322 renews a
+  token whenever it starts with under 5 minutes left (`now + 300 s >= expiresAt`). So the keeper starts
+  `claude -p` with no prompt in the account's folder 4 minutes before expiry, which costs no usage
+  (`ClaudeSignIn.renew`). Success is the keychain item's `expiresAt` moving.
+- If that didn't take, it tries again 5 s after expiry, then after 1, 2, 5, then every 15 minutes, only while
+  online. It reads each blob every 5 minutes anyway (sessions renew sign-ins too) and at once after sleep or a 401.
+- When only you can fix it, the account needs a sign-in. That happens when the blob is gone, when Claude Code
+  cleared a sign-in Anthropic refused (empty tokens, `expiresAt: 0`, `loginEnded: "time_limit"` when it ran out),
+  when `refreshTokenExpiresAt` has passed, or when three renewals failed while online, 30 minutes past expiry.
+  The panel then shows a banner and a Sign In button on the row (`claude auth login --email <its address>`), the
+  menu bar shows "!", and one notification comes with a Sign In button. Three days before `refreshTokenExpiresAt`,
+  the row says when the sign-in ends.
+
+**Reading usage, and why no account stays unknown.** The app is the one reader of `/api/oauth/usage` and the one
+writer of Claude entries in `usage.json` (under `usage.lock`). Runners and the T3 launcher only read the file, so a
+pick costs a file read.
 - Claude Code's own answer comes first: a `cachedUsageUtilization` for the account, under 10 minutes old, in
   `~/.claude.json`, the account's profile or its folder, costs no request (`ClaudeProvider.cachedUsage`).
-- The app refreshes every 5 minutes and saves each reading. A runner uses a saved reading under 15 minutes old and
-  asks Anthropic only when it is older (`SubagentUsage.usage`).
-- A 429 is recorded once for every process: no one asks again until the server's Retry-After (kept between 1 and
-  60 minutes), or else after 5, 10, 20, then 30 minutes. A successful read ends it. Meanwhile a reading up to two
-  hours old stands in.
+- The app reads every account every 5 minutes. It saves the reading with each window's reset time and the
+  sign-in's state.
+- A window past its reset counts as unused, so an old reading stays right. A reading routes for 2 hours
+  (`SubagentUsage.readingValid`). With the app running it is never that old.
+- A 429 is recorded in the file: nobody asks again until the server's Retry-After (kept between 1 and 60 minutes),
+  or else after 5, 10, 20, then 30 minutes. A successful read ends it.
+- After "limit reached", the account counts as full until the app reads it again, at once, without Claude Code's
+  copy (`AgentRegistry.fullSince`, `ClaudeProvider.fresh`), rather than for a blind 10 minutes.
+- Without the app (its heartbeat, `app.heartbeat`, is over a minute old), a runner reads an account itself when its
+  reading is over 5 minutes old, within 3 s, and never renews.
+- Routing never sends work to an account that needs a sign-in. An account whose usage is unknown is the last
+  resort, another than the session's own first. It refuses quickly if full, while a known-full account surely fails.
 - Requests carry Claude Code's own headers (`ClaudeCodeHeaders`), because Anthropic lists reset grants
   (`cedar_ember`) only to Claude Code: with lastdrop's own User-Agent the block came back ineligible. Grants and
   the plan's name are asked for at most once an hour. A grant that clears only one model's weekly limit shows on
   that model's weekly row.
+
+**What the panel shows.** Each model-scoped weekly limit (Fable) has a line under Session and Weekly. Badges show
+where new work goes, worked out from the same file with the runners' rules: **Threads** (`pickForThread`),
+**Subagents** (`pick`), and one per model-scoped limit (**Fable**: `pick` for that model). They replace the old
+Next mark, which still assumed subagents avoid Main.
 
 **The session's own account.** `SubagentAccounts.ownAccountUUID` reads `CLAUDE_SECURESTORAGE_CONFIG_DIR` first (the
 account signed in at that folder), then `CLAUDE_CODE_ACCOUNT_UUID`, then `CLAUDE_CONFIG_DIR`, so a T3 thread
@@ -117,8 +147,8 @@ Checked: T3's handling of the binary path, process exits and session ids, read i
 with Haiku: `--resume X --fork-session --session-id N` on another account continues the conversation under
 exactly `N`, and the launcher starts and resumes a thread. Also live (Claude Code 2.1.319): claude in the main profile with
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` set uses that account's sign-in and account_uuid, and changed nothing in
-`~/.claude.json` or either keychain item. Not yet exercised in this mode: a real token refresh (Claude Code does it
-itself, with its lock in the secure-storage folder, shared with `ClaudeSignIn.renew`), and a live move between accounts.
+`~/.claude.json` or either keychain item. Not yet exercised in this mode: a live move between accounts. Token refreshes happen in Claude Code itself, with its
+lock in the secure-storage folder, shared with `ClaudeSignIn.renew`.
 
 ## Current design (2026-10-27): subagents on accounts with room
 

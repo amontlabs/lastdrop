@@ -145,13 +145,16 @@ enum ThreadLauncher {
         let warm = transcript.lastActivityAt.map { now.timeIntervalSince($0) < warmAfter } ?? false
         let free = !warm || transcript.justCompacted
         let candidate = candidates.first { $0.account.id == onCurrent }
-        // An account that is gone (removed, signed out) can't answer at all: the thread leaves it even when
-        // warm. Only a KNOWN limit counts as full; an account whose usage couldn't be read stays while warm
-        // (it is never a destination, though: `pickForThread` skips unknown usage).
+        // An account that is gone (removed, signed out, or waiting for you to sign in again) can't answer at
+        // all: the thread leaves it even when warm. Only a KNOWN limit counts as full; an account whose usage
+        // couldn't be read stays while warm (and is a destination only when no known account has room).
         let gone = candidate == nil
         let full = candidate.map { Self.isKnownFull($0, isFull: isFull) } ?? false
         if !free && !gone && !full { return stay("warm") }
-        let destination = SubagentAccounts.pickForThread(candidates)?.account.id ?? (gone ? ClaudeAccount.mainID : onCurrent)
+        // Moving costs a full re-read: only toward known room, unless it can't stay where it is.
+        let pickedThread = SubagentAccounts.pickForThread(candidates)
+        let known = pickedThread.map { $0.sessionUsed != nil && $0.weeklyUsed != nil } ?? false
+        let destination = (known || gone || full ? pickedThread?.account.id : nil) ?? (gone ? ClaudeAccount.mainID : onCurrent)
         guard destination != onCurrent else {
             return stay(full ? "full, no other account has room" : "already the roomiest")
         }
@@ -384,6 +387,8 @@ enum ThreadLauncher {
                 // An account nobody is signed in to can't run anything.
                 guard ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid != nil else { continue }
                 let usage = await SubagentUsage.shared.usage(account)
+                // Only signing in again would let it run anything: threads on it move.
+                guard usage.usable else { continue }
                 candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
                                         modelUsed: usage.used(model: parsed.model), size: SubagentUsage.size(account)))
             }

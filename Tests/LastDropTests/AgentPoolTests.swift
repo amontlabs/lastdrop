@@ -32,15 +32,14 @@ final class AgentPoolTests: LastDropTestCase {
         XCTAssertNil(AgentPool.room(work, usage: ["codex.work": status(nil, nil)], config: AccountsConfig(), now: now))
     }
 
-    func testNextLeavesClaudesMainAccountForLast() {
-        let max = Account.main(.claude), pro = Account(provider: .claude, key: "Pro"), team = Account(provider: .claude, key: "Team")
+    func testNextIsTheAccountWithMostRoom() {
+        let main = Account.main(.codex)
         func next(_ usage: [String: SubagentUsage.Status]) -> String? {
-            AgentPool.next([max, pro, team], usage: usage, config: AccountsConfig(), now: now)?.key
+            AgentPool.next([main, work], usage: usage, config: AccountsConfig(), now: now)?.key
         }
-        XCTAssertEqual(next(["main": status(nil, 28), "Pro": status(5, 48)]), "Pro", "more room on Main doesn't matter")
-        XCTAssertEqual(next(["main": status(1, 1), "Pro": status(5, 48), "Team": status(5, 20)]), "Team", "most room among the others")
-        XCTAssertEqual(next(["main": status(1, 1), "Pro": status(95, 48), "Team": status(5, 95)]), "main", "no other has room")
-        XCTAssertNil(next(["main": status(95, 1), "Pro": status(95, 48), "Team": status(5, 95)]), "nothing has room")
+        XCTAssertEqual(next(["codex.main": status(1, 1), "codex.work": status(5, 48)]), "main")
+        XCTAssertEqual(next(["codex.main": status(95, 1), "codex.work": status(5, 48)]), "work")
+        XCTAssertNil(next(["codex.main": status(95, 1), "codex.work": status(95, 48)]), "nothing has room")
     }
 
     func testNextTreatsOtherProvidersMainLikeAnyAccount() {

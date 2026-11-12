@@ -129,6 +129,7 @@ struct AccountsSections: View {
                     Button("Move down") { model.moveAccount(info.id, by: 1) }.disabled(index == count - 1)
                 }
                 if info.account.provider == .claude {
+                    Button("Sign in again") { model.signInAgain(info.account.key) }
                     Button("Sign in again in Terminal") { model.signInInTerminal(info.account) }
                 }
                 if model.canRemove(info.account) {

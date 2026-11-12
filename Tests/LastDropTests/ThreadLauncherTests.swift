@@ -77,6 +77,18 @@ final class ThreadLauncherTests: LastDropTestCase {
 
     // MARK: Moving when it costs nothing
 
+    func testAColdThreadNeverForksOntoAnAccountNothingIsKnownAbout() {
+        // Nothing has a reading (the app just started): moving would cost a full re-read for no known gain.
+        let decision = decide(["--resume", "X"], sessions: ["X": "work"],
+                              candidates: [candidate("main", nil, nil), candidate("work", nil, nil)], transcript: .cold)
+        XCTAssertEqual(decision.account, "work")
+        XCTAssertEqual(decision.action, .stay)
+        // But a thread whose account is known full goes to the unknown one rather than failing.
+        let full = decide(["--resume", "X"], sessions: ["X": "work"],
+                          candidates: [candidate("main", nil, nil), candidate("work", 100, 50)], transcript: .cold)
+        XCTAssertEqual(full.account, "main")
+    }
+
     func testAColdThreadMovesToTheRoomiestAccount() {
         let decision = decide(["--resume", "X", "--verbose"], sessions: ["X": "A"],
                               candidates: [candidate("A", 10, 10), candidate("B", 0, 0)],

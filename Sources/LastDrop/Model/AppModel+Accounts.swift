@@ -27,8 +27,13 @@ struct AccountInfo: Identifiable {
     var plan: String?
     var state: ProviderState
     var limits: Capability
-    /// The account new subagents or agents of its provider go to: the one with the most room.
+    /// The account new agents of its provider go to: the one with the most room. Not for Claude, which has
+    /// `badges` instead.
     var isNext = false
+    /// Claude: the kinds of new work that go to this account ("Threads", "Subagents", "Fable").
+    var badges: [String] = []
+    /// Claude: its sign-in, as the keeper judged it.
+    var signIn: ClaudeKeeper.SignIn?
     var id: String { account.id }
 
     func used(_ label: String) -> Double? { state.snapshot?.windows.first { $0.label == label }?.usedPercent }
@@ -57,14 +62,18 @@ extension AppModel {
         }.map { (info: AccountInfo) -> AccountInfo in
             var info = info
             info.isNext = info.id == next
+            if provider == .claude {
+                info.badges = claudeBadges[info.account.key] ?? []
+                info.signIn = keeper.signIns[info.account.key]
+            }
             return info
         }
     }
 
-    /// The account new work of this provider goes to, when there's a choice and agents use it: Claude
-    /// subagents, or an extra model of the Agent tool on this provider.
+    /// The account new agents of this provider go to, when there's a choice and an extra model of the Agent
+    /// tool runs on it. Claude accounts show where each kind of work goes instead (`claudeBadges`).
     private func nextAccountID(_ provider: ProviderID) -> String? {
-        guard showsAgents else { return nil }
+        guard showsAgents, provider != .claude else { return nil }
         let pool = accountsConfig.pool(provider).filter { localChecks[$0.id]?.agents == .ready }
         guard pool.count > 1 else { return nil }
         if provider != .claude {

@@ -573,18 +573,22 @@ enum AgentRun {
     static func pick(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, model: String? = nil,
                              excluding tried: Set<String>, log: Bool = true) async -> ClaudeAccount? {
         var candidates: [SubagentAccounts.Candidate] = []
+        var skipped: [String] = []
         for account in accounts where !tried.contains(account.id) {
             guard let signedIn = ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid else { continue }
             let usage = await SubagentUsage.shared.usage(account)
+            // Only signing in again would let it run anything.
+            guard usage.usable else { skipped.append("\(account.id) needs sign-in"); continue }
             candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
                                     modelUsed: usage.used(model: model), isOwn: signedIn == own,
                                     active: AgentRegistry.running(account.id), size: SubagentUsage.size(account)))
         }
         let choice = SubagentAccounts.pick(candidates, sessionThreshold: config.sessionThreshold, weeklyThreshold: config.weeklyThreshold)
         if log { SubagentLog.write("own \(own?.prefix(8) ?? "?"); " + candidates.map {
-            "\($0.name)\($0.isOwn ? " (own)" : "") session \($0.sessionUsed.map { "\(Int($0))%" } ?? "?") weekly \($0.weeklyUsed.map { "\(Int($0))%" } ?? "?")"
+            $0.sessionUsed == nil || $0.weeklyUsed == nil ? "\($0.name)\($0.isOwn ? " (own)" : "") unknown"
+                : "\($0.name)\($0.isOwn ? " (own)" : "") session \(Int($0.sessionUsed!))% weekly \(Int($0.weeklyUsed!))%"
                 + ($0.modelUsed.map { " \(model ?? "model") \(Int($0))%" } ?? "")
-        }.joined(separator: ", ") + " → \(choice?.name ?? "none")") }
+        }.joined(separator: ", ") + skipped.map { ", \($0)" }.joined() + " → \(choice?.name ?? "none")") }
         return choice?.account
     }
 
@@ -881,9 +885,20 @@ enum AgentRegistry {
         }.sorted { $0.entry.at > $1.entry.at }
     }
 
-    static func markFull(_ account: String) { withStore { $0.fullUntil[account] = Date().addingTimeInterval(600) } }
+    static func markFull(_ account: String) { withStore { $0.fullUntil[account] = Date().addingTimeInterval(fullFor) } }
 
     static func isFull(_ account: String) -> Bool { withStore { ($0.fullUntil[account] ?? .distantPast) > Date() } }
+
+    /// How long an account stays full after "limit reached", unless a newer reading says otherwise.
+    static let fullFor: TimeInterval = 600
+
+    /// When the account answered "limit reached", while that still counts; nil when it doesn't.
+    static func fullSince(_ account: String, now: Date = .now) -> Date? {
+        withStore { store in
+            guard let until = store.fullUntil[account], until > now else { return nil }
+            return until.addingTimeInterval(-fullFor)
+        }
+    }
 
     /// Marks this runner as working on `account` (nil: on none) for `running(_:)`.
     static func setRunning(_ account: String?) {

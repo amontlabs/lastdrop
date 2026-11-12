@@ -38,7 +38,9 @@ struct MenuBarLabel: View {
 
     @ViewBuilder private func numbers(_ entry: MenuBarEntry) -> some View {
         let mode = squeezed && entry.mode == .both ? .session : entry.mode
-        if let text = entry.snapshot?.menuBarText {
+        if entry.needsSignIn {
+            Text("!").font(.system(size: 13, weight: .heavy))
+        } else if let text = entry.snapshot?.menuBarText {
             Text(text).font(.system(size: 13, weight: .medium))
         } else {
             switch mode {

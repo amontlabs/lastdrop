@@ -145,6 +145,9 @@ final class ClaudeMappingTests: LastDropTestCase {
         XCTAssertEqual(ClaudeProvider.planDisplayName(fromProfile: profile), "Ultra")
         XCTAssertNil(ClaudeProvider.planDisplayName(fromProfile: ["organization": ["plan_display_name": " "]]))
         XCTAssertNil(ClaudeProvider.planDisplayName(fromProfile: [:]))
+        // No display name (seen on an upgraded Max 5x account): the type and tier say it.
+        let max = try! JSONSerialization.jsonObject(with: Data(#"{"organization":{"plan_display_name":null,"organization_type":"claude_max","rate_limit_tier":"default_claude_max_5x"}}"#.utf8)) as! [String: Any]
+        XCTAssertEqual(ClaudeProvider.planDisplayName(fromProfile: max), "Max 5x")
     }
 }
 

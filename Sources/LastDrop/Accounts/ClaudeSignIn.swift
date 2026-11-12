@@ -16,7 +16,7 @@ enum ClaudeSignIn {
         let export = account.cliConfigDir.map { "export CLAUDE_CONFIG_DIR=\(shellQuote($0))\n" } ?? ""
         try """
         #!/bin/zsh -l
-        \(export)echo "Claude Code for \(name): sign in with the same account as its Claude window."
+        \(export)echo "Claude Code for \(name): sign in with the account lastdrop shows for it."
         echo "If it doesn't ask, type /login. lastdrop reads this sign-in to show the account's usage."
         exec claude
         """.write(to: script, atomically: true, encoding: .utf8)
@@ -41,23 +41,26 @@ enum ClaudeSignIn {
 
     /// Signs the account in through `claude auth login`, which opens the browser and returns once the sign-in
     /// lands. Cancelling the task stops it.
-    static func browserSignIn(_ account: ClaudeAccount) async throws {
+    static func browserSignIn(_ account: ClaudeAccount, email: String? = nil) async throws {
         try prepareFolder(account)
         guard let claude = SubagentRunner.executable() else { throw ProviderError.message("Claude Code (`claude`) was not found on this Mac.") }
         var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("CLAUDE") }
         if let dir = account.cliConfigDir { environment["CLAUDE_CONFIG_DIR"] = dir }
-        try await CLILogin.run(claude, ["auth", "login"], environment: environment)
+        // The account's address, filled in on the sign-in page, so the browser signs the right one in.
+        try await CLILogin.run(claude, ["auth", "login"] + (email.map { ["--email", $0] } ?? []), environment: environment)
         guard ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid != nil else {
             throw ProviderError.message("The sign-in didn't finish. Try again.")
         }
     }
 
-    /// Claude Code renews an account's sign-in when it starts; lastdrop only reads it. So when an account's
-    /// sign-in has expired (unused for a while), lastdrop starts Claude Code on it with no prompt, which costs
-    /// no usage, and waits for the renewed sign-in to land in the keychain. Watching the keychain asks Anthropic
-    /// nothing; the usage is then read once. Nil when that didn't renew it, or the usage still can't be read.
-    static func renew(_ account: ClaudeAccount, lean: Bool = false) async -> UsageSnapshot? {
-        guard !account.isMain, let claude = SubagentRunner.executable() else { return nil }
+    /// Claude Code renews a sign-in when it starts and the token has under 5 minutes left (2.1.322: `now + 300 s
+    /// >= expiresAt`); lastdrop never asks Anthropic for tokens itself. So the keeper (`ClaudeKeeper`) starts
+    /// Claude Code with no prompt in the account's folder, which costs no usage, and watches the keychain for the
+    /// token's expiry to move. True when it did. Takes up to 30 s; only the app's keeper calls it, in the background.
+    static func renew(_ account: ClaudeAccount) async -> Bool {
+        guard let claude = SubagentRunner.executable() else { return false }
+        func expiry() -> Date? { ClaudeProvider.storedCredentials(configDir: account.cliConfigDir).flatMap(ClaudeProvider.signInFacts(from:))?.expiresAt }
+        let before = expiry()
         SubagentLog.write("renewing the \(account.id) sign-in")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: claude)
@@ -72,19 +75,26 @@ enum ClaudeSignIn {
         process.standardInput = input
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        defer { try? input.fileHandleForWriting.close() }   // no prompt: it exits by itself
-        var renewed = false
+        guard (try? process.run()) != nil else { return false }
+        defer {
+            // No prompt: it exits by itself once stdin closes. One still running after that is stuck: stop it,
+            // so a retry never adds a second process.
+            try? input.fileHandleForWriting.close()
+            if process.isRunning {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if process.isRunning { process.terminate() } }
+            }
+        }
         for _ in 0..<15 {
             try? await Task.sleep(for: .seconds(2))
             let running = process.isRunning   // before the read: a sign-in written as it exits still counts
-            renewed = isSignedIn(ClaudeProvider.storedCredentials(configDir: account.cliConfigDir))
-            if renewed || !running { break }
+            if let after = expiry(), after != before, after > Date() {
+                SubagentLog.write("renewed the \(account.id) sign-in, until \(Format.clock(after))")
+                return true
+            }
+            if !running { break }
         }
-        guard renewed else { return nil }
-        var provider = ClaudeProvider(configDir: account.cliConfigDir)
-        provider.lean = lean
-        return try? await provider.fetch()
+        SubagentLog.write("the \(account.id) sign-in wasn't renewed")
+        return false
     }
 
     /// True when the stored sign-in (Claude Code's credentials blob) holds a token that hasn't expired.
