@@ -171,7 +171,10 @@ with no extra providers or accounts set up in T3.
   Agent; the report starts with `Ran on <account> (<model>).` A run the runner hands back (no room, nothing
   done) leaves the child on its own model from then on, reading the task with the tag line. Messages are sent
   once: the cursor moves as soon as the runner has them, and without stored state lastdrop's last answer marks
-  where the run got to. The child's conversation is never compacted (`session.compact` is skipped), since no
+  where the run got to. The cursor counts the user's text blocks, not messages: a T3 steer stops the running
+  turn before its answer is written, so Claude Code merges the steer into the message before it (the task's,
+  after the tag), and the tag is looked for at the end of each of the first message's blocks. Without that, a
+  steered child lost its tag and ran on its own model (seen 2026-11-13). The child's conversation is never compacted (`session.compact` is skipped), since no
   model reads it and a summary would drop the tag.
 - **What the model reads of T3's answers.** T3 describes a child by its thread's instance and model, and lists
   only its own providers, with Antigravity and the like as disabled. Models read that as the added model not

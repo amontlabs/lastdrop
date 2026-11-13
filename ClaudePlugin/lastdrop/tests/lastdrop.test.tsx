@@ -1155,6 +1155,40 @@ test('a follow-up to a delegated child resumes the same run with only the new me
   expect(e.modelSteps).toBe(0)
 })
 
+test('a steer during a delegated child’s turn resumes the same run, though the engine merges it into the task', async ($, on) => {
+  const e = engine([$, on])
+  const task = 'Act as the sub-agent.\n\nfix it\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol"} -->'
+  e.messages(child(task))
+  await mainStep($, 'turn-1')
+  // The steer stopped turn 1 before its answer was written: Claude Code sends task and steer as one message.
+  e.messages([{ role: 'user', content: [{ type: 'text', text: '<system-reminder>\nctx\n</system-reminder>' },
+    { type: 'text', text: task }, { type: 'text', text: 'stop opening windows' }] }])
+  expect(report(await mainStep($, 'turn-2'))).toBe(RESULT.text)
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request)
+    .toMatchObject({ prompt: 'stop opening windows', resume: 't3-abc', id: 't3-abc', agent: 'sol' })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a steer before a delegated child’s first run reaches the runner with the task', async ($, on) => {
+  const e = engine([$, on])
+  e.messages([{ role: 'user', content: [{ type: 'text', text: 'fix it\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol"} -->' },
+    { type: 'text', text: 'stop opening windows' }] }])
+  await mainStep($, 'turn-1')
+  expect(e.calls.find(c => c.flag === '--agent-run')!.request).toMatchObject({ prompt: 'fix it\n\nstop opening windows' })
+  expect(e.calls.find(c => c.flag === '--agent-run')!.request.resume).toBeUndefined()
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a delegated child stored with a message cursor still sends only its new message', async ($, on) => {
+  const e = engine([$, on])
+  const task = 'go\n\n<!-- lastdrop {"id":"t3-abc"} -->'
+  e.store.set('delegated:t3-abc', { ran: true, native: false, cursor: 2 })
+  e.messages(child(task, { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: 'next' }] }))
+  await mainStep($, 'turn-2')
+  expect(e.calls.find(c => c.flag === '--agent-run')!.request).toMatchObject({ prompt: 'next', resume: 't3-abc' })
+})
+
 test('after a long remote turn, a delegated child’s follow-up goes through', async ($, on) => {
   const e = engine([$, on], { outputs: [LONG] })
   const task = 'note the word\n\n<!-- lastdrop {"id":"t3-abc","model":"claude-haiku-5-5"} -->'

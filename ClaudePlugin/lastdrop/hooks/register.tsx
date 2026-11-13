@@ -810,8 +810,11 @@ async function rewriteT3<T extends { result?: unknown; text?: unknown }>($: Engi
 
 /** A delegated child's run, as its tag carries it. */
 type Delegated = { id: string; agent?: string; model?: string; effort?: string; description?: string }
-/** What the child's turns did so far: `cursor` is where its next turn's new messages start. */
-type DelegatedState = { ran: boolean; native: boolean; cursor: number }
+/**
+ * What the child's turns did so far: `sent` counts the user's texts (see `userBlocks`) the runner has. A state
+ * stored before `sent` has `cursor`, the index of the first message its next turn hadn't sent.
+ */
+type DelegatedState = { ran: boolean; native: boolean; sent?: number; cursor?: number }
 
 function tag(task: string, run: Delegated): string {
   return `${task}\n\n${TAG}${JSON.stringify(run)}${TAG_END}`
@@ -837,6 +840,12 @@ function userText(message: ApiMessage): string {
     .map(b => String(b.text)).join('\n\n')
 }
 
+/** A user message's own texts, one per block, without the engine's reminders or interruption notes. */
+function userBlocks(message: ApiMessage): string[] {
+  return message.content.filter(b => b.type === 'text' && typeof b.text === 'string' && !b.text.startsWith('<system-reminder>')
+    && !b.text.startsWith('[Request interrupted')).map(b => String(b.text))
+}
+
 /** `effort` from delegate_task's options, given as a list or an object. */
 function effortOf(options: unknown): string | undefined {
   const value = Array.isArray(options) ? options.find(o => o?.id === 'effort')?.value : (options as Record<string, unknown> | undefined)?.effort
@@ -851,27 +860,37 @@ async function delegatedChild($: EngineInterface) {
   const messages = await $.session.messages({ as: 'api' })
   if (!Array.isArray(messages)) return undefined
   const first = messages.findIndex(m => m.role === 'user')
-  const found = first < 0 ? undefined : untag(userText(messages[first] as ApiMessage))
+  if (first < 0) return undefined
+  // A message sent while lastdrop's answer was still running (a T3 steer) has no answer before it, so the
+  // engine merges it into the message before: the task's, after the tag. The tag ends one of the first blocks.
+  const blocks = userBlocks(messages[first] as ApiMessage)
+  let found: ReturnType<typeof untag>
+  let tagged = 0
+  while (!found && tagged < blocks.length) found = untag(blocks.slice(0, ++tagged).join('\n\n'))
   if (!found) return undefined
+  const texts = (from: number, to?: number) => messages.slice(from, to).filter(m => m.role === 'user')
+    .flatMap(m => userBlocks(m as ApiMessage))
+  const all = [...blocks, ...texts(first + 1)]
   const key = `delegated:${found.run.id}`
   // Without its state (the store refused it, or pruned it), lastdrop's earlier answers say how far the run got.
   const answered = messages.map(m => m.role).lastIndexOf('assistant')
   const state = (await $.store.get(key) as DelegatedState | undefined)
     ?? { ran: answered >= 0, native: false, cursor: answered >= 0 ? answered + 1 : first + 1 }
-  return { ...found, messages, key, state }
+  // A cursor (a message index) counts the task's own blocks, never what was merged after its tag.
+  if (state.sent === undefined) state.sent = tagged + texts(first + 1, Math.max(first + 1, state.cursor ?? 0)).length
+  return { ...found, messages, all, key, state: state as DelegatedState & { sent: number } }
 }
 
 async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: AbortSignal,
                              report: (text: string) => void = () => {}): Promise<Line | undefined> {
   const child = await delegatedChild($)
   if (!child) return undefined
-  const { run, task, messages, key, state } = child
+  const { run, task, all, key, state } = child
   if (state.native) return undefined
   if (e.index !== 0) throw new Error('Claude Code requested another model step after lastdrop’s answer.')
-  if (messages.length < state.cursor) throw new Error('The child’s transcript was compacted before lastdrop read its messages.')
-  const prompt = state.ran
-    ? messages.slice(state.cursor).filter(m => m.role === 'user').map(m => userText(m as ApiMessage)).filter(Boolean).join('\n\n')
-    : task
+  if (all.length < state.sent) throw new Error('The child’s transcript was compacted before lastdrop read its messages.')
+  // A first run also takes what came before it: a steer merged after the tag, or a message queued meanwhile.
+  const prompt = [state.ran ? '' : task, ...all.slice(state.sent)].filter(Boolean).join('\n\n')
   if (!prompt) throw new Error('The child got a new turn without a text message.')
   const request: Request = {
     prompt, description: run.description, subagentType: 'general-purpose', model: run.model, effort: run.effort,
@@ -899,8 +918,9 @@ async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: Abort
     if ('error' in begun) throw new Error(begun.error)
     stream = begun.run
     state.ran = true
-    // The messages so far reached the runner: a failure or a stop from here never sends them again.
-    state.cursor = messages.length
+    // The texts so far reached the runner: a failure or a stop from here never sends them again.
+    state.sent = all.length
+    delete state.cursor
     await put($, key, state)
     const show = progress(report, plain)
     for (const line of begun.early) show(line)
