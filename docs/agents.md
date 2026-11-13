@@ -238,6 +238,12 @@ the final report. When no later attempt can continue, the error says the work wa
 attempt's own. The read-only role and worktree isolation apply to every attempt, and a worktree a failed attempt
 made is removed before the next starts.
 
+A passing API error (a Cloudflare page, a 5xx, 529 overloaded, the network; see `TransientError` and
+[claude-accounts.md](claude-accounts.md#t3-code-threads-on-accounts-with-room-2026-11-09)) is retried on the same
+session first, after 10 s, 30 s, 90 s and 3 min. Once the retries are spent it counts as an availability reason: before
+any work the chain moves on, and partway the work is handed on as at a usage limit, the next attempt told the previous
+agent stopped after repeated temporary API errors.
+
 For the plugin, each switch is a `moved` line (with the next `provider` and `model`), followed by a new `started`
 line with the same `agentId` and the attempt's own `account`, `model` and `provider`, which updates the same row.
 The `result` line carries `provider` (what ran) and `unavailable`, the models tried and skipped, when there are

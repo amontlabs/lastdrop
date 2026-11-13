@@ -71,6 +71,7 @@ enum AgentRun {
             }
             if routeOnly { emit(await route(request)) } else {
                 startTicks()
+                Nap.wakeOnSignal()
                 await run(request)
             }
             AgentRegistry.setRunning(nil)
@@ -205,14 +206,15 @@ enum AgentRun {
             let req = SubagentRunner.Request(prompt: request.prompt, subagentType: entry.subagentType, model: entry.model,
                                              effort: entry.effort, permissionMode: permissionMode, sessionID: entry.sessionID,
                                              resume: true, mcpConfig: mcpConfig)
-            var result = await SubagentRunner.run(req, on: account, in: entry.directory,
-                                                  onProcess: { AgentRegistry.setProcess(agentID, claude: $0) },
-                                                  check: launch.check(subagentType: entry.subagentType, account: account.id) { event in
+            var result = await SubagentRunner.runRetrying(req, on: account, in: entry.directory, label: agentID,
+                                                          stopped: { AgentRegistry.wasStopped(agentID) }, note: { log(agentID, $0) },
+                                                          onProcess: { AgentRegistry.setProcess(agentID, claude: $0) },
+                                                          check: launch.check(subagentType: entry.subagentType, account: account.id) { event in
                 AgentRegistry.remember(agentID, entry: entry, at: event["cwd"] as? String)
                 emit(["type": "started", "agentId": agentID, "account": account.id, "model": entry.model ?? "", "outputFile": logURL(agentID).path])
             }) { step(agentID, $0) } onItem: { item(agentID, $0) }
             if result.limitReached { await SubagentUsage.shared.markFull(account) }
-            guard launch.started else { return fail(agentID, result) }
+            guard launch.started else { return fail(agentID, explained(result, on: account.id)) }
             var moved = entry
             if let directory = result.directory { moved.directory = directory }
             (result, moved) = await carryOn(agentID, entry: moved, result: result, accounts: accounts, config: config,
@@ -267,9 +269,19 @@ enum AgentRun {
                                              permissionMode: permissionMode, sessionID: UUID().uuidString.lowercased(),
                                              mcpConfig: mcpConfig)
             let onProcess: @Sendable (Int32) -> Void = { AgentRegistry.setProcess(agentID, claude: $0) }
-            var result = await SubagentRunner.run(req, on: account, in: request.cwd, onProcess: onProcess, check: check) {
+            var result = await SubagentRunner.runRetrying(req, on: account, in: request.cwd, label: agentID,
+                                                          stopped: { AgentRegistry.wasStopped(agentID) }, note: { log(agentID, $0) },
+                                                          onProcess: onProcess, check: check) {
                 step(agentID, $0)
             } onItem: { item(agentID, $0) }
+            // Kept failing with a passing error before any work: another account takes the task whole.
+            if let reason = result.transient, result.toolUses == 0, !AgentRegistry.wasStopped(agentID) {
+                AgentRegistry.markTroubled(account.id)
+                tried.insert(account.id)
+                refused = explained(result, on: account.id)
+                emit(["type": "moved", "account": account.id, "reason": "\(account.id) kept failing (\(reason))"])
+                continue
+            }
             if !launch.started { return fail(agentID, result) }
             // Plans differ in models (Pro has no Fable): another account may have it. Never another model.
             if result.modelUnavailable && result.toolUses == 0 && !AgentRegistry.wasStopped(agentID) {
@@ -304,6 +316,15 @@ enum AgentRun {
     /// What a moved agent is told: nothing about accounts or limits, only to go on.
     static let continuePrompt = "Continue the task from where you left off and finish it."
 
+    /// A result that kept failing with a passing error, said as such: never a bare "Failed to authenticate".
+    static func explained(_ result: SubagentRunner.Result, on account: String) -> SubagentRunner.Result {
+        guard let reason = result.transient, !result.text.hasPrefix("Claude Code kept failing") else { return result }
+        var result = result
+        result.text = "Claude Code kept failing on the \(account) account with a temporary API error (\(reason)), "
+            + "through \(SubagentRunner.retryPolicy.retries) retries, and no other account could continue: \(result.text)"
+        return result
+    }
+
     /// An agent an account stopped at its usage limit partway through: its session moves to the next account
     /// with room that has its model, else to the calling session's own, and continues there. An account that
     /// refuses the model passes it on the same way. Whoever called the agent only ever gets its report; the
@@ -314,11 +335,15 @@ enum AgentRun {
                         disallowedTools: [String] = []) async -> (SubagentRunner.Result, AgentRegistry.Entry) {
         var entry = entry, result = result, tried = tried
         var toolUses = result.toolUses, durationMs = result.durationMs
-        while result.limitReached || result.modelUnavailable, !AgentRegistry.wasStopped(agentID),
+        while result.limitReached || result.modelUnavailable || result.transient != nil, !AgentRegistry.wasStopped(agentID),
               let from = accounts.first(where: { $0.id == entry.account }) {
             let cause: String
             if result.modelUnavailable {
                 cause = "\(from.id) doesn't include \(entry.model ?? "the model")"
+            } else if let reason = result.transient {
+                // Its retries are spent: the account's API path is failing, so the work goes on elsewhere.
+                AgentRegistry.markTroubled(from.id)
+                cause = "\(from.id) kept failing with a temporary API error (\(reason))"
             } else {
                 await SubagentUsage.shared.markFull(from)
                 cause = "\(from.id) is at its usage limit"
@@ -348,13 +373,19 @@ enum AgentRun {
             SessionLedger.record(session: newID, account: to.id, forkedAt: Date())
             AgentRegistry.remember(agentID, entry: entry)   // a stop or a follow-up finds it on its new account
             let onProcess: @Sendable (Int32) -> Void = { AgentRegistry.setProcess(agentID, claude: $0) }
-            result = await SubagentRunner.run(req, on: to, in: entry.directory, onProcess: onProcess) {
+            result = await SubagentRunner.runRetrying(req, on: to, in: entry.directory, label: agentID,
+                                                      stopped: { AgentRegistry.wasStopped(agentID) }, note: { log(agentID, $0) },
+                                                      onProcess: onProcess) {
                 step(agentID, $0)
             } onItem: { item(agentID, $0) }
             toolUses += result.toolUses
             durationMs += result.durationMs
         }
         if result.modelUnavailable, let model = entry.model { result.text = modelRefusal(model, result.text) }
+        if result.transient != nil, !AgentRegistry.wasStopped(agentID) {
+            result = explained(result, on: entry.account)
+            result.text += "\nIts work so far is in \(entry.directory); its session is \(entry.sessionID), and its transcript is in \(logURL(agentID).path)."
+        }
         result.toolUses = toolUses
         result.durationMs = durationMs
         return (result, entry)
@@ -449,7 +480,7 @@ enum AgentRun {
                     continue
                 }
                 if anyStarted {
-                    result.text = "\(definition.name) stopped partway through at a usage limit, and no other model in its chain could continue it:\n"
+                    result.text = "\(definition.name) stopped partway through, and no other model in its chain could continue it:\n"
                         + failures.map { "- " + $0 }.joined(separator: "\n")
                         + "\nIts work so far is in \(job.cwd); its transcript is in \(logURL(agentID).path)."
                 } else if attempts.count > 1 {
@@ -457,15 +488,16 @@ enum AgentRun {
                 }
             }
             guard launch.started || anyStarted else { return fail(agentID, result) }
-            if !isLast, launch.started, result.limitReached, resume == nil, !AgentRegistry.wasStopped(agentID) {
+            if !isLast, launch.started, result.handsOn, resume == nil, !AgentRegistry.wasStopped(agentID) {
                 let next = attempts[index + 1]
                 let directory = result.directory ?? job.cwd
+                let why = result.transient.map { "kept failing with a temporary API error (\($0))" } ?? "reached its usage limit"
                 handover = (handoverPrompt(request.prompt, from: attempt, result: result, agentID: agentID, directory: directory), directory)
-                SubagentLog.write("\(agentID) \(attempt.model) reached its limit partway; \(next.model) on \(next.provider.displayName) continues")
+                SubagentLog.write("\(agentID) \(attempt.model) \(why) partway; \(next.model) on \(next.provider.displayName) continues")
                 emit(["type": "moved", "account": result.account ?? attempt.provider.displayName,
-                      "reason": "\(attempt.model) reached its usage limit; continuing on \(next.model)",
+                      "reason": "\(attempt.model) \(why); continuing on \(next.model)",
                       "provider": next.provider.rawValue, "model": next.model])
-                log(agentID, "\(attempt.model) reached its usage limit; \(next.model) on \(next.provider.displayName) continues the work.")
+                log(agentID, "\(attempt.model) \(why); \(next.model) on \(next.provider.displayName) continues the work.")
                 continue
             }
             // The models skipped on the way: never the attempt that ran, nor the last one that failed.
@@ -480,12 +512,14 @@ enum AgentRun {
     static func handoverPrompt(_ task: String, from attempt: AgentDefinition, result: SubagentRunner.Result,
                                agentID: String, directory: String) -> String {
         let thread = result.sessionID.map { " (\(attempt.provider.displayName) thread \($0))" } ?? ""
+        let why = result.transient == nil ? "at its usage limit" : "after repeated temporary API errors"
+        let line = result.transient == nil ? "saying it reached its usage limit" : "saying its retries were spent"
         return """
-        Another agent (\(attempt.model)) started this task and stopped partway through at its usage limit. \
+        Another agent (\(attempt.model)) started this task and stopped partway through \(why). \
         Continue its work and finish the task; don't start over.
 
         Its thread: agent \(agentID)\(thread). Its full transcript, every tool call and output, is in \(logURL(agentID).path) \
-        up to the line saying it reached its usage limit; read it if you need to know what was done. \
+        up to the line \(line); read it if you need to know what was done. \
         Its changes are in \(directory).
 
         The original task:
@@ -622,6 +656,8 @@ enum AgentRun {
             let usage = await SubagentUsage.shared.usage(account)
             // Only signing in again would let it run anything.
             guard usage.usable else { skipped.append("\(account.id) needs sign-in"); continue }
+            // Its API kept failing with passing errors a moment ago: new work goes elsewhere for a while.
+            guard !AgentRegistry.isTroubled(account.id) else { skipped.append("\(account.id) failing for now"); continue }
             candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
                                     modelUsed: usage.used(model: model), isOwn: signedIn == own,
                                     size: SubagentUsage.size(account)))
@@ -711,6 +747,8 @@ enum AgentRun {
         }
         AgentRegistry.markStopped(id)
         if let pid = AgentRegistry.process(id) { SubagentRunner.terminate(pid) }
+        // Waiting to retry after a passing error: no process to end, so the wait is cut short.
+        else if let runner = AgentRegistry.runner(id) { kill(runner, SIGUSR1) }
         emit(["type": "stopped"])
         exit(0)
     }
@@ -758,8 +796,11 @@ enum AgentRun {
 
 /// One line per decision in ~/Library/Logs/lastdrop/subagents.log, to see why an account was or wasn't used.
 enum SubagentLog {
+    /// Tests write their lines here instead.
+    nonisolated(unsafe) static var fileOverride: URL?
+
     static func write(_ line: String) {
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/lastdrop/subagents.log")
+        let url = fileOverride ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/lastdrop/subagents.log")
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let entry = Data("\(ISO8601DateFormatter().string(from: Date())) \(line)\n".utf8)
         if let handle = try? FileHandle(forWritingTo: url) {
@@ -804,10 +845,11 @@ enum AgentRegistry {
         var fullUntil: [String: Date] = [:]     // account → when to try it again after "limit reached"
         var processes: [String: Processes]? = [:]
         var stopped: [String]? = []             // agents TaskStop ended, until their runner reported it
+        var troubledUntil: [String: Date]? = [:] // account → when to try it again after its retries were spent
 
         init() {}
 
-        private enum Keys: String, CodingKey { case agents, lacking, fullUntil, processes, stopped }
+        private enum Keys: String, CodingKey { case agents, lacking, fullUntil, processes, stopped, troubledUntil }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
@@ -815,6 +857,7 @@ enum AgentRegistry {
             fullUntil = try c.decodeIfPresent([String: Date].self, forKey: .fullUntil) ?? [:]
             processes = try c.decodeIfPresent([String: Processes].self, forKey: .processes) ?? [:]
             stopped = try c.decodeIfPresent([String].self, forKey: .stopped) ?? []
+            troubledUntil = try c.decodeIfPresent([String: Date].self, forKey: .troubledUntil) ?? [:]
         }
 
         func encode(to encoder: Encoder) throws {
@@ -825,6 +868,7 @@ enum AgentRegistry {
             try c.encode(fullUntil, forKey: .fullUntil)
             try c.encode(processes ?? [:], forKey: .processes)
             try c.encode(stopped ?? [], forKey: .stopped)
+            try c.encode((troubledUntil ?? [:]).filter { $0.value > Date() }, forKey: .troubledUntil)
         }
 
         mutating func forget(_ id: String) {
@@ -887,6 +931,11 @@ enum AgentRegistry {
         }
     }
 
+    /// The runner of `id`, while it is alive.
+    static func runner(_ id: String) -> Int32? {
+        withStore { store in store.processes?[id].flatMap { kill($0.runner, 0) == 0 ? $0.runner : nil } }
+    }
+
     /// Whether the runner of `id` is alive, whether or not a process of its own is running right now.
     static func runnerAlive(_ id: String) -> Bool {
         withStore { store in store.processes?[id].map { kill($0.runner, 0) == 0 } ?? false }
@@ -930,6 +979,16 @@ enum AgentRegistry {
     }
 
     static func markFull(_ account: String) { withStore { $0.fullUntil[account] = Date().addingTimeInterval(fullFor) } }
+
+    /// An account whose API kept failing with passing errors through every retry: new subagents and threads go
+    /// elsewhere for `troubledFor`. Its usage reading is left alone: it says nothing about its room.
+    static func markTroubled(_ account: String) {
+        withStore { $0.troubledUntil = ($0.troubledUntil ?? [:]).merging([account: Date().addingTimeInterval(troubledFor)]) { $1 } }
+    }
+
+    static func isTroubled(_ account: String, now: Date = .now) -> Bool { withStore { ($0.troubledUntil?[account] ?? .distantPast) > now } }
+
+    static let troubledFor: TimeInterval = 10 * 60
 
     static func isFull(_ account: String) -> Bool { withStore { ($0.fullUntil[account] ?? .distantPast) > Date() } }
 

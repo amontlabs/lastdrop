@@ -354,6 +354,9 @@ enum ThreadLauncher {
     struct Plan {
         var args: [String]
         var environment: [String: String]
+        /// The account it runs on, and the thread's name in the log, for the relay's retries.
+        var account: ClaudeAccount
+        var label: String
     }
 
     /// `Entry.main` hands the arguments after `--claude-thread` here, and never comes back. Whatever goes
@@ -364,7 +367,11 @@ enum ThreadLauncher {
             exit(127)
         }
         if let plan = choose(args) {
-            exec(claude, args: plan.args, environment: plan.environment)
+            // Passing API errors are retried by the relay (`ThreadRelay`); `LASTDROP_THREAD_RELAY=0` turns it off.
+            if ProcessInfo.processInfo.environment["LASTDROP_THREAD_RELAY"] == "0" {
+                exec(claude, args: plan.args, environment: plan.environment)
+            }
+            ThreadRelay.run(claude, args: plan.args, environment: plan.environment, account: plan.account, label: plan.label)
         }
         exec(claude, args: args, environment: ProcessInfo.processInfo.environment)
     }
@@ -389,6 +396,8 @@ enum ThreadLauncher {
                 let usage = await SubagentUsage.shared.usage(account)
                 // Only signing in again would let it run anything: threads on it move.
                 guard usage.usable else { continue }
+                // Its API kept failing through every retry a moment ago: a thread there moves, a new one goes elsewhere.
+                guard !AgentRegistry.isTroubled(account.id) else { continue }
                 candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
                                         modelUsed: usage.used(model: parsed.model), size: SubagentUsage.size(account)))
             }
@@ -401,7 +410,7 @@ enum ThreadLauncher {
             let session = ledger.resolvedSession(ofThread: resume)
             let account = ClaudeAccount(id: ledger.account(session) ?? ClaudeAccount.mainID)
             return Plan(args: replacingResume(resume, with: session, in: args),
-                        environment: account.runEnvironment(from: environment))
+                        environment: account.runEnvironment(from: environment), account: account, label: String(resume.prefix(8)))
         }
         // No account to run on (nobody is signed in anywhere): leave the choice to claude itself.
         guard !candidates.isEmpty else { return nil }
@@ -417,7 +426,9 @@ enum ThreadLauncher {
                                         thread: parsed.resume ?? decision.session, at: Date()))
         }
         SubagentLog.write("thread \(String((parsed.resume ?? decision.session).prefix(8))): \(decision.action.rawValue) on \(decision.account) (\(decision.reason))")
-        return Plan(args: decision.args, environment: ClaudeAccount(id: decision.account).runEnvironment(from: ProcessInfo.processInfo.environment))
+        let account = ClaudeAccount(id: decision.account)
+        return Plan(args: decision.args, environment: account.runEnvironment(from: ProcessInfo.processInfo.environment), account: account,
+                    label: String((parsed.resume ?? decision.session).prefix(8)))
     }
 
     /// The real claude: the native install, then PATH — but never this launcher again, which T3's

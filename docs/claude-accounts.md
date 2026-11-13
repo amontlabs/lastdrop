@@ -15,7 +15,8 @@ lastdrop chooses the account for each T3 Code thread too, not only for subagents
 a **Binary path** setting. It points to `~/Library/Application Support/lastdrop/bin/claude-thread`, a
 wrapper that runs `lastdrop --claude-thread <T3's arguments>`. The launcher (`ThreadLauncher`) chooses the
 account, sets its sign-in and profile in the environment (`ClaudeAccount.runEnvironment`, below; nothing for
-Main), and `execve`s the real `claude`. T3 keeps every
+Main), and runs the real `claude` behind a line relay (`ThreadRelay`, below; it `execve`d claude until
+2026-11-13, and `LASTDROP_THREAD_RELAY=0` still does). T3 keeps every
 Claude-only feature, because it still talks to Claude Code. A generic ACP provider would have lost idle
 compaction, limit display, forks and steering.
 
@@ -141,6 +142,38 @@ launched on Max routes its subagents away from Max.
 account full, ends that process with SIGTERM, and posts a notification. The notice is written when the turn
 ends, so the process is between turns, which T3 handles cleanly. The next message starts Claude again, and the
 launcher moves the thread. Waiting for the reset is just not sending.
+
+**Passing API errors (2026-11-13).** On 2026-11-13 claude-2 answered `503 credential validation failed`, then
+`403 Attention Required! | Cloudflare`, on and off from 09:46:53 to at least 09:50:33Z, while its sign-in was valid;
+Claude Code retries a 5xx itself but takes a 403 as final, so two subagents and two T3 threads on it stopped. Such an
+error (`TransientError`: a Cloudflare or other HTML page, a 5xx, 529 overloaded, a dropped connection, or
+"Failed to authenticate" while the account's stored sign-in is fine) is now retried, never final:
+
+- A subagent (`SubagentRunner.runRetrying`, for every Claude run: plain reroutes, follow-ups, `carryOn`'s forks,
+  an agent's Claude attempt and the Z.ai/OpenRouter endpoints) resumes the same session (`--resume`, same account,
+  folder and model) told to continue, after 10 s, 30 s, 90 s and 3 min, each jittered by up to a fifth. One that
+  failed before Claude Code wrote its transcript starts again as asked. A stop cuts a wait short (`--agent-stop`
+  sends the runner SIGUSR1). Once the retries are spent the work is handed on as at a usage limit: before any work,
+  to the next account (or the next attempt in an agent's chain) whole; partway, `carryOn` forks the session onto
+  the next account, and an agent's chain hands it to its next attempt with the transcript. The account is marked as
+  failing for 10 minutes (`AgentRegistry.markTroubled`): new subagents and threads go elsewhere meanwhile. Only when
+  nothing can continue does the caller get an error, saying what happened and where the work is.
+- A thread: the launcher now stays between T3 and Claude Code (`ThreadRelay`), passing every line through. A
+  `result` that ends a turn at a passing error is held back from T3, and after the same waits the same process is
+  sent a user message telling it to continue; T3 sees one longer turn. A message or a stop from T3 during a wait
+  lets the held error through first and cancels the retry. Once the retries are spent T3 gets the error, the
+  account is marked as failing, and the process ends, so the next message starts the thread through the launcher,
+  which moves it to another account. The relay forwards SIGTERM, SIGINT and SIGHUP to claude and exits as it does.
+
+Each error, retry and hand-on is a line in subagents.log (`… temporary API error (…); retry 1 of 4 in 10 s,
+resuming session …`) and, for a subagent, in its `agents/<id>.log`. lastdrop's own requests to Anthropic (usage,
+reset grants, profile) log any answer that isn't a success with its status, content type and `cf-ray`, and a
+Cloudflare page on the usage request no longer reads as an expired sign-in.
+
+What lastdrop sent to Anthropic at the time, as far as the logs tell: no keeper renewal (claude-2's was at
+06:13Z), warm processes started on claude-2 at 09:45:01, 09:46:56 and 09:47:48, and usage reads at most every
+5 minutes per account, normally answered from Claude Code's own cached reading. No burst. Other claude-2 requests
+went through between the failures (09:47:40, 09:47:58, 09:50:29), and from 09:57 on everything did.
 
 **Known limit.** A fork gives every copied message a new id. Rewinding or forking a moved thread from a turn
 before the move may not find that turn.

@@ -67,10 +67,18 @@ enum SubagentRunner {
         var unavailable = false
         /// For an agent with fallbacks: the models tried before this one ran and skipped.
         var skipped: [String] = []
+        /// Claude Code's `api_error_status`, when it reported one.
+        var apiErrorStatus: Int?
+        /// Why the error is a passing one (a Cloudflare page, a 5xx, overloaded, the network), when it is: the
+        /// same session is retried, then the work is handed on as at a usage limit (`TransientError`).
+        var transient: String?
 
-        /// Failed with nothing done, because the provider, account or model couldn't take it: what a fallback is for.
-        /// Anything after a tool use, and any other error, is not.
-        var failedToStart: Bool { isError && toolUses == 0 && (unavailable || limitReached || modelUnavailable) }
+        /// Failed with nothing done, because the provider, account or model couldn't take it, or kept failing with
+        /// a passing error: what a fallback is for. Anything after a tool use, and any other error, is not.
+        var failedToStart: Bool { isError && toolUses == 0 && (unavailable || limitReached || modelUnavailable || transient != nil) }
+
+        /// The error is one the work should be handed on for, as at a usage limit, once retries are spent.
+        var handsOn: Bool { limitReached || transient != nil }
     }
 
     /// What a run needs to know Claude Code is the one it expects, from its `system`/`init` event: nil when
@@ -161,6 +169,8 @@ enum SubagentRunner {
                     onStep: @escaping @Sendable (String) -> Void,
                     onItem: @escaping @Sendable ([String: Any]) -> Void = { _ in }) async -> Result {
         let base = ProcessInfo.processInfo.environment
+        // An authentication failure is a passing one only while the account's own sign-in is fine.
+        let signInWorks = { request.endpoint == nil && TransientError.signInWorks(account) }
         var output: FileHandle!, errors: FileHandle!
         var lines: AsyncLineSequence<FileHandle.AsyncBytes>.AsyncIterator!
         var process: Process?
@@ -286,15 +296,16 @@ enum SubagentRunner {
         guard let final else {
             let message = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let endpoint = request.endpoint else {
-                return Result(text: message.isEmpty ? "The subagent stopped without an answer." : String(message.suffix(2000)),
-                              isError: true, limitReached: mentionsLimit(message), turns: 0, permissionDenials: 0,
-                              sessionID: sessionID, directory: ranIn)
+                return classify(Result(text: message.isEmpty ? "The subagent stopped without an answer." : String(message.suffix(2000)),
+                                       isError: true, limitReached: mentionsLimit(message), turns: 0, permissionDenials: 0,
+                                       toolUses: toolUses, sessionID: sessionID, directory: ranIn), signInWorks: signInWorks)
             }
             var result = parse(["is_error": true, "result": message.isEmpty ? "The subagent stopped without an answer." : String(message.suffix(2000))],
                                provider: endpoint.provider)
+            result.toolUses = toolUses
             result.sessionID = sessionID
             result.directory = ranIn
-            return result
+            return classify(result, signInWorks: signInWorks)
         }
         var result = parse(final, provider: request.endpoint?.provider)
         result.model = startedOn
@@ -302,6 +313,83 @@ enum SubagentRunner {
         result.context = context
         result.sessionID = sessionID
         result.directory = ranIn
+        return classify(result, signInWorks: signInWorks)
+    }
+
+    // MARK: Passing errors
+
+    /// What a run that stopped at a passing error is told when its session is resumed.
+    static let retryPrompt = "The previous request failed with a temporary API error. Continue the task from where you left off and finish it."
+
+    /// The waits between retries; tests shorten them.
+    nonisolated(unsafe) static var retryPolicy = RetryPolicy.standard
+    /// How a retry waits; tests return at once.
+    nonisolated(unsafe) static var nap: @Sendable (TimeInterval) async -> Void = { await Nap.sleep($0) }
+    /// Whether Claude Code wrote the session's transcript (so the session can be resumed); tests stand a fake in.
+    nonisolated(unsafe) static var hasTranscript: @Sendable (_ session: String, _ request: Request) -> Bool = { session, request in
+        let projects = request.endpoint.map { URL(fileURLWithPath: $0.directory).appendingPathComponent("projects") } ?? SessionTransfer.mainProjects
+        return SessionTransfer.transcript(session, in: projects) != nil
+    }
+
+    /// `run`, retried while it ends at a passing error (`TransientError`), on the same account and folder: the same
+    /// session is resumed (`--resume`) and told to continue, after 10 s, 30 s, 90 s and 3 min, jittered. A run that
+    /// failed before Claude Code wrote anything starts again as it was asked. Each error and retry goes to
+    /// subagents.log and to `note` (the agent's log). The result adds up the attempts' tool uses and time; its
+    /// `transient` is still set when the retries are spent, for the caller to hand the work on.
+    static func runRetrying(_ request: Request, on account: ClaudeAccount, in directory: String, label: String,
+                            policy: RetryPolicy? = nil,
+                            stopped: @escaping @Sendable () -> Bool = { false },
+                            note: @escaping @Sendable (String) -> Void = { _ in },
+                            onProcess: @escaping @Sendable (Int32) -> Void = { _ in },
+                            check: @escaping @Sendable ([String: Any]) -> String? = { _ in nil },
+                            onStep: @escaping @Sendable (String) -> Void,
+                            onItem: @escaping @Sendable ([String: Any]) -> Void = { _ in },
+                            once: ((Request, String) async -> Result)? = nil) async -> Result {
+        let policy = policy ?? retryPolicy
+        let attempt: (Request, String) async -> Result = once ?? { req, dir in
+            await run(req, on: account, in: dir, onProcess: onProcess, check: check, onStep: onStep, onItem: onItem)
+        }
+        var req = request, dir = directory
+        var result = await attempt(req, dir)
+        var toolUses = result.toolUses, durationMs = result.durationMs, failures = 0
+        while let reason = result.transient, !stopped() {
+            let session = result.sessionID ?? req.forkTo ?? req.sessionID
+            guard let wait = policy.delay(after: failures) else {
+                SubagentLog.write("\(label) on \(account.id): \(reason) again; \(policy.retries) retries spent, handing the work on")
+                note("Temporary API error again (\(reason)); \(policy.retries) retries spent.")
+                break
+            }
+            failures += 1
+            let resumable = hasTranscript(session, req)
+            SubagentLog.write("\(label) on \(account.id): temporary API error (\(reason)): \(result.text.prefix(160)); "
+                              + "retry \(failures) of \(policy.retries) in \(Int(wait.rounded())) s, "
+                              + (resumable ? "resuming session \(session)" : "starting again"))
+            note("Temporary API error (\(reason)): \(result.text.prefix(300)). Retry \(failures) of \(policy.retries) in \(Int(wait.rounded())) s.")
+            onStep("Temporary API error; retrying in \(Int(wait.rounded())) s")
+            onProcess(0)   // nothing runs while it waits; a stop wakes the wait instead
+            await nap(wait)
+            if stopped() { break }
+            if resumable {
+                // The same conversation, on the same account and in the folder it ran in, told to go on.
+                req = Request(prompt: retryPrompt, subagentType: req.subagentType, model: req.model, effort: req.effort,
+                              permissionMode: req.permissionMode, sessionID: session, resume: true, mcpConfig: req.mcpConfig,
+                              systemPrompt: req.systemPrompt, endpoint: req.endpoint, disallowedTools: req.disallowedTools)
+                dir = result.directory ?? dir
+            } else if req.forkTo != nil {
+                req.forkTo = UUID().uuidString.lowercased()
+            } else if !req.resume {
+                req.sessionID = UUID().uuidString.lowercased()
+            }
+            result = await attempt(req, dir)
+            toolUses += result.toolUses
+            durationMs += result.durationMs
+            if result.transient == nil {
+                SubagentLog.write("\(label) on \(account.id): retry \(failures) \(result.isError ? "ended: \(result.text.prefix(120))" : "went through")")
+                note(result.isError ? "Retry \(failures) ended with an error." : "Retry \(failures) went through; continuing.")
+            }
+        }
+        result.toolUses = toolUses
+        result.durationMs = durationMs
         return result
     }
 
@@ -417,7 +505,19 @@ enum SubagentRunner {
                       outputTokens: Int(usage?.double("output_tokens") ?? 0),
                       cacheReadInputTokens: Int(usage?.double("cache_read_input_tokens") ?? 0),
                       cacheCreationInputTokens: Int(usage?.double("cache_creation_input_tokens") ?? 0),
-                      declined: declined, unavailable: unauthorized)
+                      declined: declined, unavailable: unauthorized, apiErrorStatus: status)
+    }
+
+    /// Marks a failed result whose error is a passing one (`TransientError`). A usage limit, a model the plan
+    /// lacks, or a refusal by the run's own check is never one. `signInWorks` is asked only for an
+    /// authentication failure; an endpoint's never counts (its key is the user's to fix).
+    static func classify(_ result: Result, signInWorks: () -> Bool) -> Result {
+        var result = result
+        guard result.isError, !result.limitReached, !result.modelUnavailable, !result.refused,
+              let reason = TransientError.reason(result.text, status: result.apiErrorStatus, signInWorks: signInWorks) else { return result }
+        result.transient = reason
+        result.unavailable = false   // not a sign-in to fix
+        return result
     }
 
     /// Provider business codes survive Claude Code's flattened "API Error" strings.

@@ -180,7 +180,9 @@ struct EndpointProfile: Equatable, Sendable {
                 sessionID: job.resume?.sessionID ?? UUID().uuidString.lowercased(), resume: job.resume != nil,
                 mcpConfig: job.mcpConfig, systemPrompt: job.instructions, endpoint: profile,
                 disallowedTools: job.role == nil ? [] : SubagentRunner.editingTools)
-            var result = await SubagentRunner.run(request, on: ClaudeAccount(id: "main"), in: job.resume?.directory ?? job.cwd,
+            let agentID = job.agentID
+            var result = await SubagentRunner.runRetrying(request, on: ClaudeAccount(id: "main"), in: job.resume?.directory ?? job.cwd,
+                label: "\(agentID) (\(provider.displayName))", stopped: { AgentRegistry.wasStopped(agentID) }, note: events.note,
                 onProcess: events.process, check: { event in
                     if let reason = SubagentRunner.checkInit(event, subagentType: nil) { return "\(reason) on \(place)" }
                     events.started(place, model)

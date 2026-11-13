@@ -16,6 +16,7 @@ class LastDropTestCase: XCTestCase {
         ledgerFolder = folder
         SessionLedger.fileOverride = folder.appendingPathComponent("sessions.json")
         AgentRegistry.fileOverride = folder.appendingPathComponent("subagents.json")
+        SubagentLog.fileOverride = folder.appendingPathComponent("subagents.log")
         SubagentUsage.fileOverride = folder.appendingPathComponent("usage.json")
         // As if the app were running: a runner reads the file and never asks Anthropic itself.
         SubagentUsage.appRunningOverride = true
@@ -27,6 +28,7 @@ class LastDropTestCase: XCTestCase {
     override func tearDown() {
         SessionLedger.fileOverride = nil
         AgentRegistry.fileOverride = nil
+        SubagentLog.fileOverride = nil
         SubagentUsage.fileOverride = nil
         SubagentUsage.appRunningOverride = nil
         ClaudeProvider.sharedConfigOverride = nil

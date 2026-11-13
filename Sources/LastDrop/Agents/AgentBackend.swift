@@ -114,11 +114,14 @@ enum ClaudeBackend: AgentBackend {
             let req = SubagentRunner.Request(prompt: job.prompt, model: entry.model, effort: entry.effort, permissionMode: permissionMode,
                                              sessionID: entry.sessionID, resume: true, mcpConfig: job.mcpConfig,
                                              systemPrompt: job.instructions, disallowedTools: job.role == nil ? [] : SubagentRunner.editingTools)
-            var result = await SubagentRunner.run(req, on: account, in: entry.directory, onProcess: onProcess, check: check(account, entry.model, events),
-                                                  onStep: events.step, onItem: events.item)
+            var result = await SubagentRunner.runRetrying(req, on: account, in: entry.directory, label: job.agentID,
+                                                          stopped: { AgentRegistry.wasStopped(job.agentID) }, note: events.note,
+                                                          onProcess: onProcess, check: check(account, entry.model, events),
+                                                          onStep: events.step, onItem: events.item)
             if result.limitReached { await SubagentUsage.shared.markFull(account) }
             result.account = account.id
-            return result
+            // A follow-up stays on its account and session; spent retries say so rather than a bare API error.
+            return AgentRun.explained(result, on: account.id)
         }
 
         let own = SubagentAccounts.ownAccountUUID()
@@ -131,9 +134,10 @@ enum ClaudeBackend: AgentBackend {
                                              permissionMode: permissionMode, sessionID: UUID().uuidString.lowercased(),
                                              mcpConfig: job.mcpConfig, systemPrompt: job.instructions,
                                              disallowedTools: job.role == nil ? [] : SubagentRunner.editingTools)
-            var result = await SubagentRunner.run(req, on: account, in: job.cwd, onProcess: onProcess,
-                                                  check: check(account, model, events),
-                                                  onStep: events.step, onItem: events.item)
+            var result = await SubagentRunner.runRetrying(req, on: account, in: job.cwd, label: job.agentID,
+                                                          stopped: { AgentRegistry.wasStopped(job.agentID) }, note: events.note,
+                                                          onProcess: onProcess, check: check(account, model, events),
+                                                          onStep: events.step, onItem: events.item)
             result.account = account.id
             if result.sessionID == nil { result.sessionID = req.sessionID }
             if result.limitReached { await SubagentUsage.shared.markFull(account) }
@@ -142,6 +146,14 @@ enum ClaudeBackend: AgentBackend {
                 tried.insert(account.id)
                 events.step("Moved off \(account.id): it is at its usage limit")
                 last = result
+                continue
+            }
+            // Kept failing with a passing error before any work: another account takes the task whole.
+            if let reason = result.transient, result.toolUses == 0 && !AgentRegistry.wasStopped(job.agentID) {
+                AgentRegistry.markTroubled(account.id)
+                tried.insert(account.id)
+                events.step("Moved off \(account.id): it kept failing (\(reason))")
+                last = AgentRun.explained(result, on: account.id)
                 continue
             }
             // The plan doesn't include the model: another account may. It is never swapped for another model.
@@ -168,6 +180,7 @@ enum ClaudeBackend: AgentBackend {
         var none = last ?? .init(text: "", isError: true, limitReached: true, turns: 0, permissionDenials: 0)
         none.unavailable = true
         none.text = none.modelUnavailable ? AgentRun.modelRefusal(model, none.text)
+            : none.transient != nil ? none.text
             : "No other Claude account has room for \(job.definition.name) right now."
         return none
     }
