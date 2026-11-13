@@ -194,6 +194,7 @@ struct ClaudeProvider: UsageProvider {
     static func planDisplayName(accessToken: String) async throws -> String? {
         let headers = ClaudeCodeHeaders.oauth(accessToken: accessToken)
         let (body, http) = try await HTTP.json(HTTP.request(profileURL, headers: headers))
+        logFailure("profile", http)
         guard (200..<300).contains(http.statusCode), let root = body as? [String: Any] else { throw ProviderError.http(http.statusCode) }
         return planDisplayName(fromProfile: root)
     }
@@ -214,6 +215,7 @@ struct ClaudeProvider: UsageProvider {
     static func resetGrants(accessToken: String) async throws -> [ResetGrant]? {
         let headers = ClaudeCodeHeaders.oauth(accessToken: accessToken)
         let (body, http) = try await HTTP.json(HTTP.request(usageURL + "?cedar_ember=1&skip_spend=1", headers: headers))
+        logFailure("reset grants", http)
         guard (200..<300).contains(http.statusCode), let root = body as? [String: Any] else { throw ProviderError.http(http.statusCode) }
         return resetGrants(from: root["cedar_ember"])
     }
@@ -278,6 +280,9 @@ struct ClaudeProvider: UsageProvider {
     static func usage(accessToken: String, expired: String) async throws -> ([UsageWindow], ExtraCredits?) {
         let headers = ClaudeCodeHeaders.oauth(accessToken: accessToken)
         let (body, http) = try await HTTP.json(HTTP.request(usageURL, headers: headers))
+        logFailure("usage", http)
+        // A Cloudflare page in front of the API says nothing about the sign-in: a passing error, read again later.
+        if isCloudflarePage(http) { throw ProviderError.http(http.statusCode) }
         if http.statusCode == 401 || http.statusCode == 403 { throw ProviderError.unauthorized(expired) }
         if http.statusCode == 429 {
             throw UsageRateLimited(retryAfter: http.value(forHTTPHeaderField: "Retry-After").flatMap { Double($0.trimmingCharacters(in: .whitespaces)) })
@@ -285,6 +290,21 @@ struct ClaudeProvider: UsageProvider {
         guard (200..<300).contains(http.statusCode) else { throw ProviderError.http(http.statusCode) }
         guard let root = body as? [String: Any] else { throw ProviderError.invalidResponse }
         return reading(from: root)
+    }
+
+    /// An answer that is an HTML page (Cloudflare's block or challenge) rather than the API's JSON.
+    static func isCloudflarePage(_ http: HTTPURLResponse) -> Bool {
+        let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        return !(200..<300).contains(http.statusCode) && type.contains("text/html")
+    }
+
+    /// One line in subagents.log for each of lastdrop's own requests to Anthropic that didn't succeed, so a
+    /// failure in Claude Code can be set against what lastdrop asked at the time.
+    private static func logFailure(_ what: String, _ http: HTTPURLResponse) {
+        guard !(200..<300).contains(http.statusCode) else { return }
+        let type = http.value(forHTTPHeaderField: "Content-Type") ?? "?"
+        let ray = http.value(forHTTPHeaderField: "cf-ray").map { ", cf-ray \($0)" } ?? ""
+        SubagentLog.write("anthropic: lastdrop's \(what) request answered \(http.statusCode) (\(type)\(ray))")
     }
 
     /// The windows and extra usage in a usage answer, from Anthropic or from Claude Code's copy of one.
