@@ -23,6 +23,8 @@ enum ACPSessions {
         var ran: Bool
         /// The task, kept until the runner starts it: a prompt cancelled before then sends it again with the next one.
         var task: String?
+        /// The first prompt had no lastdrop tag, so no plugin checked room: the server does before the run starts.
+        var checksRoom: Bool?
         var updated: Date
     }
 

@@ -170,13 +170,90 @@ final class ACPServerTests: LastDropTestCase {
         t3.end()
     }
 
-    func testAnUntaggedPromptIsRefusedAndRunsNothing() throws {
-        try scenario([[["type": "result", "text": "Ok.", "isError": false]]])
+    func testAnUntaggedPromptRunsTheSessionsModelUnderANewIDAfterARoomCheck() throws {
+        try scenario([[["type": "started", "agentId": "x", "account": "Antigravity", "model": "gemini-3.8-flash"],
+                       ["type": "result", "text": "Done.", "isError": false, "account": "Antigravity", "model": "gemini-3.8-flash"]],
+                      [["type": "started", "agentId": "x", "account": "Antigravity"],
+                       ["type": "result", "text": "Again.", "isError": false, "account": "Antigravity"]]])
         let t3 = try client()
         let session = try open(t3, model: "flash")
-        let message = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
-        XCTAssertTrue(message?.contains("only runs background tasks that lastdrop starts") ?? false, message ?? "no error")
+        // As T3 hands a delegate_task child to an ACP provider: the task as the model wrote it, inside T3's wrapper.
+        let task = "Act as the review sub-agent for this task.\n\nCheck a.txt <!-- not a tag -->"
+        let answer = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt(task, first: true)])
+        XCTAssertEqual(answer["stopReason"] as? String, "end_turn")
+
+        let request = try runnerRequests()[0]
+        let id = try XCTUnwrap(request["id"] as? String)
+        XCTAssertTrue(id.hasPrefix("acp-"), id)
+        XCTAssertEqual(NSDictionary(dictionary: request), NSDictionary(dictionary: [
+            "prompt": task, "subagentType": "general-purpose", "cwd": folder.path, "agent": "flash", "id": id,
+        ]), "no effort, description or permission mode: the runner maps a missing mode to auto")
+        let routes = try jsonLines("routes.jsonl")
+        XCTAssertEqual(routes.count, 1)
+        XCTAssertEqual(NSDictionary(dictionary: routes[0]), NSDictionary(dictionary: [
+            "prompt": task, "subagentType": "general-purpose", "cwd": folder.path, "agent": "flash",
+        ]), "the request the plugin's admission sends, without the run's id")
+        XCTAssertEqual(ACPSessions.lookup(session)?.run, id)
+
+        // A follow-up resumes the run and checks no room again.
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("And b.txt?", first: false)])
+        let second = try runnerRequests()[1]
+        XCTAssertEqual(second["resume"] as? String, id)
+        XCTAssertEqual(second["prompt"] as? String, "And b.txt?")
+        XCTAssertEqual(try jsonLines("routes.jsonl").count, 1)
+        t3.end()
+        XCTAssertTrue(t3.noise.isEmpty, "\(t3.noise)")
+    }
+
+    func testAnUntaggedClaudeModelRunsThatModel() throws {
+        try scenario([[["type": "started", "agentId": "x", "account": "work"],
+                       ["type": "result", "text": "Ok.", "isError": false, "account": "work", "model": "claude-opus-5-5"]]])
+        let t3 = try client()
+        let session = try open(t3, model: "opus")
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
+        let request = try runnerRequests()[0]
+        XCTAssertEqual(request["model"] as? String, "opus")
+        XCTAssertNil(request["agent"])
+        XCTAssertEqual(try jsonLines("routes.jsonl")[0]["model"] as? String, "opus")
+        t3.end()
+    }
+
+    func testAnUntaggedPromptWithNoRoomAnswersAnErrorAndRunsNothing() throws {
+        try JSONSerialization.data(withJSONObject: ["type": "no_room"]).write(to: folder.appendingPathComponent("route.json"))
+        let t3 = try client()
+        let flash = try open(t3, model: "flash")
+        XCTAssertEqual(try t3.callError("session/prompt", ["sessionId": flash, "prompt": t3Prompt("Do it", first: true)]),
+                       "lastdrop found nowhere to run flash.")
+        let opus = try open(t3, model: "opus")
+        let plain = try t3.callError("session/prompt", ["sessionId": opus, "prompt": t3Prompt("Do it", first: true)])
+        XCTAssertTrue(plain?.hasPrefix("lastdrop found no account with room for opus") ?? false, plain ?? "no error")
+        try JSONSerialization.data(withJSONObject: ["type": "error", "text": "No agent flash is enabled in lastdrop (Settings → Agents)."])
+            .write(to: folder.appendingPathComponent("route.json"))
+        XCTAssertEqual(try t3.callError("session/prompt", ["sessionId": flash, "prompt": t3Prompt("Again", first: false)]),
+                       "No agent flash is enabled in lastdrop (Settings → Agents).")
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("requests.jsonl").path), "no runner started")
+        XCTAssertEqual(try jsonLines("routes.jsonl").count, 3)
+        t3.end()
+    }
+
+    func testAnUntaggedPromptForAModelLastdropDoesntHaveIsRefused() throws {
+        let t3 = try client()
+        let session = try open(t3, model: "sol")   // disabled in the catalog
+        let message = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
+        XCTAssertEqual(message, "lastdrop has no model sol. Pick one of lastdrop's agents, or fable, opus, sonnet or haiku.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("routes.jsonl").path))
+        t3.end()
+    }
+
+    func testATaggedPromptIsNotCheckedForRoomAgain() throws {
+        try scenario([[["type": "started", "agentId": "task-t", "account": "Codex"], ["type": "result", "text": "Ok.", "isError": false]]])
+        try JSONSerialization.data(withJSONObject: ["type": "no_room"]).write(to: folder.appendingPathComponent("route.json"))
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let answer = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Do it", ["id": "task-t", "agent": "flash"]), first: true)])
+        XCTAssertEqual(answer["stopReason"] as? String, "end_turn")
+        XCTAssertEqual(try runnerRequests()[0]["id"] as? String, "task-t")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("routes.jsonl").path), "the plugin checked it")
         t3.end()
     }
 
@@ -323,7 +400,8 @@ final class ACPServerTests: LastDropTestCase {
     private func client(cancelWait: TimeInterval = 7) throws -> FakeT3 {
         let runner = try script("runner", Self.runnerScript)
         let stopper = try script("stopper", Self.stopperScript)
-        var options = ACPServer.Options(runner: [runner], stopper: [stopper], catalog: LastDropPaths.agentCatalog, sessions: ACPSessions.file)
+        let router = try script("router", Self.routerScript)
+        var options = ACPServer.Options(runner: [runner], stopper: [stopper], router: [router], catalog: LastDropPaths.agentCatalog, sessions: ACPSessions.file)
         options.catalogPoll = 0.2
         options.cancelWait = cancelWait
         options.killGrace = 0.5
@@ -334,8 +412,10 @@ final class ACPServerTests: LastDropTestCase {
         try JSONSerialization.data(withJSONObject: turns).write(to: folder.appendingPathComponent("scenario.json"))
     }
 
-    private func runnerRequests() throws -> [[String: Any]] {
-        let text = try String(contentsOf: folder.appendingPathComponent("requests.jsonl"), encoding: .utf8)
+    private func runnerRequests() throws -> [[String: Any]] { try jsonLines("requests.jsonl") }
+
+    private func jsonLines(_ name: String) throws -> [[String: Any]] {
+        let text = try String(contentsOf: folder.appendingPathComponent(name), encoding: .utf8)
         return text.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
     }
 
@@ -383,6 +463,17 @@ final class ACPServerTests: LastDropTestCase {
             while not os.path.exists(os.path.join(here, 'stopped-' + request['id'])): time.sleep(0.05)
             line = {'type': 'result', 'text': 'Stopped.', 'isError': True, 'stopped': True}
         sys.stdout.write(json.dumps(line) + '\n'); sys.stdout.flush()
+    """#
+
+    /// Records the routing check and answers `route.json`, or `routed`.
+    private static let routerScript = #"""
+    #!/usr/bin/env python3
+    import json, os, sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    request = json.loads(sys.stdin.read())
+    with open(os.path.join(here, 'routes.jsonl'), 'a') as f: f.write(json.dumps(request) + '\n')
+    path = os.path.join(here, 'route.json')
+    sys.stdout.write(json.dumps(json.load(open(path)) if os.path.exists(path) else {'type': 'routed'}) + '\n')
     """#
 
     private static let stopperScript = #"""

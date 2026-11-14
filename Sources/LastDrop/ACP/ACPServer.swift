@@ -5,9 +5,14 @@ import Foundation
 /// process per thread and talks JSON-RPC 2.0 on its stdin and stdout, one object per line; everything else (logs,
 /// stray prints) goes to stderr and `subagents.log`.
 ///
-/// Phase 1 answers T3 children that lastdrop's plugin hands to this provider. Each turn runs as the plugin's
-/// `delegatedTurn` runs it: `lastdrop --agent-run` with the same request (the task without its lastdrop tag first,
-/// then each new message with `resume`), its lines shown as ACP updates, `lastdrop --agent-stop` to cancel.
+/// Phase 1 answers T3 background children on this provider. The model calls `delegate_task` with
+/// `target: {providerInstanceId: "lastdrop", model}` and the plugin passes the call unchanged (auto mode refuses a
+/// changed call), so a first prompt is usually untagged: the run gets a new id, runs the session's model, and is
+/// checked for room here (`lastdrop --agent-route`) the way the plugin's `admission` checks an Agent call. A first
+/// prompt with lastdrop's tag (a child the plugin started before, or on its tag path) runs what the tag says.
+/// Each turn runs as the plugin's `delegatedTurn` runs it: `lastdrop --agent-run` with the same request (the task
+/// without its lastdrop tag first, then each new message with `resume`), its lines shown as ACP updates,
+/// `lastdrop --agent-stop` to cancel.
 /// Nothing is recorded and nothing starts until a session's first prompt: T3's probe opens a session every 15
 /// minutes only to read the model list, then kills the process.
 final class ACPServer: @unchecked Sendable {
@@ -16,6 +21,8 @@ final class ACPServer: @unchecked Sendable {
         var runner: [String]
         /// Stops a run: the run's id is appended.
         var stopper: [String]
+        /// Checks room for an untagged run before it starts: the request on its stdin, one line on its stdout.
+        var router: [String]
         var catalog: URL
         var sessions: URL
         /// How often a live session checks the catalog for a changed model list.
@@ -29,7 +36,7 @@ final class ACPServer: @unchecked Sendable {
         /// This same binary.
         static func live() -> Options {
             let binary = Bundle.main.executablePath ?? CommandLine.arguments[0]
-            return Options(runner: [binary, "--agent-run"], stopper: [binary, "--agent-stop"],
+            return Options(runner: [binary, "--agent-run"], stopper: [binary, "--agent-stop"], router: [binary, "--agent-route"],
                            catalog: LastDropPaths.agentCatalog, sessions: ACPSessions.file)
         }
     }
@@ -385,16 +392,18 @@ final class ACPServer: @unchecked Sendable {
             let catalog = AgentCatalog.load(from: options.catalog)
             var agent = run?.agent, model = run?.model
             if found == nil {
-                // Only children lastdrop's plugin tagged run here: it checked room, mode and effort first. A thread
-                // or a child started on this provider directly would skip all of that.
-                throw PromptError(code: -32000, message: "lastdrop's T3 provider only runs background tasks that lastdrop starts. Ask for the model through delegate_task's target.model, without providerInstanceId.")
+                // A child the model started on this instance itself (the plugin never changes the call): it runs the
+                // model T3 picked for the session, with no effort or description, and is checked for room first.
+                if catalog.agent(picked) != nil { agent = picked } else if Self.claudeModels.contains(where: { $0.id == picked }) { model = picked } else {
+                    throw PromptError(code: -32602, message: "lastdrop has no model \(picked). Pick one of lastdrop's agents, or fable, opus, sonnet or haiku.")
+                }
             }
             if agent == nil && found != nil, run?.model == nil, catalog.agent(picked) != nil { agent = picked }
             let runID = run?.id ?? "acp-\(UUID().uuidString.lowercased())"
             let parent = Self.claudeModels.contains(where: { $0.id == picked }) ? picked : nil
             session.entry = ACPSessions.Entry(run: runID, model: picked, agent: agent, runModel: model, effort: run?.effort,
                                               description: run?.description, permissionMode: run?.permissionMode, parentModel: parent,
-                                              cwd: session.cwd, ran: false, task: task, updated: .now)
+                                              cwd: session.cwd, ran: false, task: task, checksRoom: found == nil ? true : nil, updated: .now)
             SubagentLog.write("acp: session \(session.id) runs \(runID) (\(agent ?? model ?? parent ?? "session model"))\(found == nil ? ", untagged" : "")")
         } else if session.entry?.ran == false {
             // The run never started (the turn was cancelled first): the task goes again, with what came since.
@@ -440,10 +449,18 @@ final class ACPServer: @unchecked Sendable {
     }
 
     private func drive(_ turn: Turn, _ request: [String: Any], _ session: Session, _ view: TurnView) throws -> Outcome {
+        let plain = request["agent"] == nil && request["resume"] == nil
+        if request["resume"] == nil, lock.withLock({ session.entry?.checksRoom == true }) {
+            switch Self.admit(options.router, request) {
+            case .routed: break
+            case .noRoom: return .failed(Self.noRoom(request, plain: plain))
+            case .failed(let message): return .failed(message)
+            }
+            if turn.cancelled { return .cancelled }
+        }
         let data = try JSONSerialization.data(withJSONObject: request, options: [.withoutEscapingSlashes])
         try turn.start(options.runner, input: data, directory: request["cwd"] as? String)
         var started = false
-        let plain = request["agent"] == nil && request["resume"] == nil
         while let line = turn.nextLine() {
             let type = line["type"] as? String ?? ""
             switch type {
@@ -474,6 +491,37 @@ final class ACPServer: @unchecked Sendable {
         }
         if turn.cancelled { return .cancelled }
         return .failed(started ? "lastdrop’s runner ended without the agent’s report." : "lastdrop’s runner ended before the agent started.")
+    }
+
+    enum Admission: Equatable { case routed, noRoom, failed(String) }
+
+    /// `lastdrop --agent-route` with the request the plugin's `admission` sends for a delegate_task child (the
+    /// turn's request without its run id): it picks nothing and starts nothing, it only says whether there is room.
+    static func admit(_ router: [String], _ turnRequest: [String: Any]) -> Admission {
+        var request = turnRequest
+        request["id"] = nil
+        guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.withoutEscapingSlashes]) else {
+            return .failed("lastdrop couldn't write its routing check.")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: router[0])
+        process.arguments = Array(router.dropFirst())
+        let stdin = Pipe(), stdout = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = stdout
+        process.standardError = FileHandle.standardError
+        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        do { try process.run() } catch { return .failed("lastdrop’s routing check failed: \(error.localizedDescription)") }
+        try? stdin.fileHandleForWriting.write(contentsOf: data)
+        try? stdin.fileHandleForWriting.close()
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let line = output.split(separator: 0x0A).lazy.compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }.first
+        switch line?["type"] as? String {
+        case "routed": return .routed
+        case "no_room": return .noRoom
+        default: return .failed(line?["text"] as? String ?? "lastdrop’s routing check ended without an answer.")
+        }
     }
 
     /// What the plugin denies with when lastdrop has nowhere to run the child: here no Claude model of T3's stands by.

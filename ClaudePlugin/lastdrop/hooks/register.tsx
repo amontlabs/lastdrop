@@ -48,6 +48,8 @@ let savingInstruction = SAVING_INSTRUCTION
 let nativeTasks: boolean | undefined
 /** Whether the app knows added agents (an older one doesn't). */
 let agentModels = false
+/** Whether T3 Code runs lastdrop's own provider instance (`lastdrop`), as the app last said (an older one never does). */
+let t3Instance = false
 
 /** Claude's own Agent models. */
 const NATIVE = new Set(['sonnet', 'opus', 'haiku', 'fable'])
@@ -120,6 +122,8 @@ const LISTING = 'Available agent types'
 const TYPES = 'The lastdrop: agent types are agents the user added; each runs on the provider and model its description names.'
 /** In T3 Code, whose delegate_task runs background children: lastdrop runs those too (see DELEGATE). */
 const TYPES_T3 = "The lastdrop: agent types are agents the user added; each runs on the provider and model its description names. delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work."
+/** In T3 Code with lastdrop's own T3 instance set up: background children go there, in a call no hook changes. */
+const TYPES_T3_INSTANCE = 'The lastdrop: agent types are agents the user added; each runs on the provider and model its description names. They run through the Agent tool like Claude\'s own agents, so the rule to use delegate_task for another provider\'s model doesn\'t apply to them: use Agent for foreground work. For background work on one of them or on Claude, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<the agent\'s name without lastdrop:, or fable, opus, sonnet or haiku>" }.'
 /** The headers of the frozen list of versions from before the types, which they added at each read. */
 const OLD_ADDED = "The Agent tool's model parameter also accepts these models the user added:\n"
 const OLD_ADDED_T3 = "The Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n"
@@ -228,9 +232,11 @@ async function syncCatalog($: EngineInterface): Promise<void> {
   }
   const parsed = JSON.parse(text.trim() || '{}') as {
     revision?: number; agents?: Defined[]; saveClaude?: boolean; saveClaudeText?: string; nativeTasks?: boolean; agentModels?: boolean
+    t3Instance?: boolean
   }
   nativeTasks = parsed.nativeTasks === true
   agentModels = parsed.agentModels === true
+  t3Instance = parsed.t3Instance === true
   if (parsed.revision === undefined || parsed.revision !== revision) {
     catalog = new Map((parsed.agents ?? []).map(agent => [agent.name, agent] as const))
     revision = parsed.revision
@@ -785,10 +791,13 @@ function agentBlock($: EngineInterface, e: Parameters<EngineInterface['ui']['res
 
 /**
  * T3 Code's tool for a child thread, the way to run background work there: T3 replaces a thread's Claude
- * Code process (a model change, Stop), which ends its native background agents. The child is an ordinary
- * T3 Claude thread; lastdrop's plugin inside it answers its turns with `lastdrop --agent-run`, as for an
- * Agent subagent, so the child's own model never runs on the session's account. The tag at the end of the
- * task carries the run; when lastdrop hands the run back (no room), the child's model reads the task.
+ * Code process (a model change, Stop), which ends its native background agents. With lastdrop's own T3 instance
+ * set up, the model names it in the call and lastdrop's ACP server runs the child; nothing here changes the call.
+ * Otherwise (and outside auto mode, which refuses a changed call) the tag path: the child is an ordinary T3 Claude
+ * thread whose turns lastdrop's plugin answers with `lastdrop --agent-run`, as for an Agent subagent, so the
+ * child's own model never runs on the session's account. The tag at the end of the task carries the run; when
+ * lastdrop hands the run back (no room), the child's model reads the task. Children started on that path before
+ * an update keep it.
  */
 const DELEGATE = 'mcp__t3-code__delegate_task'
 const TAG = '<!-- lastdrop '
@@ -797,19 +806,11 @@ const TAG_END = ' -->'
 const T3_CLAUDE = 'claudeAgent'
 
 /**
- * lastdrop's own T3 provider instance (an ACP server, `lastdrop --acp`): a child created on it is run by lastdrop
- * and T3 names its real model and instance, so none of T3's answers about it need a rewrite.
+ * lastdrop's own T3 provider instance (an ACP server, `lastdrop --acp`): the model names it in `delegate_task`'s
+ * target and the call goes to T3 as written. The server checks room and runs the child; T3 names its real model
+ * and instance, so none of T3's answers about it need a rewrite.
  */
 const T3_LASTDROP = 'lastdrop'
-/** How long a refused attempt on that instance keeps the next children on T3's Claude instance. */
-const T3_LASTDROP_SKIP_MS = 10 * 60_000
-const T3_LASTDROP_FAILED = 't3-lastdrop:failed'
-/**
- * What T3's `delegate_task` answers (isError) when it refused the target before creating anything: the
- * instance unknown, disabled or unhealthy, the model not offered (OrchestratorMcpService resolveTarget, and
- * ThreadManagementProviderInstanceDisabledError). Any other error is returned as it is, never retried.
- */
-const T3_REFUSED_TARGET = /provider_unavailable|model_unavailable|is not registered|cannot run a child task|is not advertised by provider|is disabled for project|No available V2 provider|No V2 provider adapter|No instance of driver|has no model available/i
 
 const CAPABILITIES = 'mcp__t3-code__orchestrator_capabilities'
 const T3_TOOLS = /^mcp__t3-code__/
@@ -922,13 +923,6 @@ function listsLastdrop(answers: unknown[], models: string[]): boolean {
       return models.every(m => ids.has(m)) || (typeof p.omittedModels === 'number' && p.omittedModels > 0)
     })
   })
-}
-
-/** Whether a delegate_task answer is T3 refusing the target before it created anything. */
-function refusedTarget(answer: { isError?: unknown; text?: unknown; result?: unknown }): boolean {
-  if (answer.isError !== true) return false
-  const text = [answer.text, ...textsOf(answer)].filter((t): t is string => typeof t === 'string').join('\n')
-  return T3_REFUSED_TARGET.test(text)
 }
 
 /** A delegated child's run, as its tag carries it. */
@@ -1100,7 +1094,7 @@ export const register: Register = on => {
     const t3 = Boolean(await $.env.get('T3CODE_THREAD_ID'))
     let text = await $.store.get(`listing:${id}`)
     if (typeof text !== 'string') {
-      text = catalog.size === 0 ? '' : `${t3 ? TYPES_T3 : TYPES}${POINTER}${await runner($)} --agents --help`
+      text = catalog.size === 0 ? '' : `${t3 ? (t3Instance ? TYPES_T3_INSTANCE : TYPES_T3) : TYPES}${POINTER}${await runner($)} --agents --help`
       // A store that refuses leaves this request on the current text; the next one tries again.
       await put($, `listing:${id}`, text)
     } else if (text !== '' && !text.startsWith(TYPES)) {
@@ -1224,23 +1218,33 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => ({ deny: `lastdrop failed: ${next.error.message ?? next.error.kind}` }))
 
-  // A T3 Code child thread runs where an Agent call would: lastdrop picks the account, or the added model's
-  // provider, and the child's turns run there (delegatedTurn). No room: T3 starts the child unchanged.
+  // A T3 Code child thread runs where an Agent call would. Auto mode refuses a call a hook changed, so a call is
+  // passed as the model wrote it, or refused with the form that works:
+  // - on lastdrop's own T3 instance: unchanged; its server checks room and runs the child (`lastdrop --acp`);
+  // - a plain Claude child (no model, or a Claude model) on T3's Claude instance: unchanged, an ordinary T3 Claude
+  //   thread on the account lastdrop's thread launcher picks;
+  // - an added agent on T3's Claude instance, with lastdrop's instance set up: refused, naming the instance;
+  // - lastdrop's instance not set up: the tag path (delegatedTurn), outside auto mode only, where a changed call
+  //   still runs. In auto mode an added agent is refused and a plain child goes unchanged.
   on('tool.call', { tool: DELEGATE }, async ($, e, next) => {
     const call = e as unknown as Record<string, unknown>
-    const asked = (call.target ?? {}) as Record<string, unknown>
-    // A call naming lastdrop's own instance goes through the same checks as one on T3's Claude instance: the
-    // instance only runs children this hook tagged.
-    const { providerInstanceId: named, driverKind: kind, ...unnamed } = asked
-    const target = named === T3_LASTDROP && (kind === undefined || kind === 'acpRegistry') ? unnamed : asked
-    if (target !== asked) e = { ...e, target: Object.keys(target).length > 0 ? target : undefined } as typeof e
+    const target = (call.target ?? {}) as Record<string, unknown>
     if (typeof call.task !== 'string' || target.environmentId !== undefined) return next(e)
+    if (target.providerInstanceId === T3_LASTDROP) return next(e)
     if ((target.providerInstanceId ?? T3_CLAUDE) !== T3_CLAUDE || (target.driverKind ?? T3_CLAUDE) !== T3_CLAUDE) return next(e)
     const model = typeof target.model === 'string' ? target.model : undefined
-    if (model !== undefined && !model.startsWith('claude-') && !NATIVE.has(model) && !catalog.has(model)) await syncCatalog($)
+    if (revision === undefined || (model !== undefined && !model.startsWith('claude-') && !NATIVE.has(model) && !catalog.has(model))) await syncCatalog($)
     const agent = model !== undefined && agentModels && catalog.has(model) ? model : undefined
     // Another provider's model on this instance: T3 answers it.
     if (model !== undefined && agent === undefined && !model.startsWith('claude-') && !NATIVE.has(model)) return next(e)
+    if (t3Instance) {
+      if (agent === undefined) return next(e)
+      return { deny: `${agent} runs on lastdrop's T3 instance: call delegate_task with target: { providerInstanceId: "${T3_LASTDROP}", model: "${agent}" }.` }
+    }
+    if (permissionMode === 'auto') {
+      if (agent === undefined) return next(e)
+      return { deny: `lastdrop can't start ${agent} through delegate_task in auto mode until its T3 provider is set up (lastdrop's T3 Code setting). Use the Agent tool with subagent_type: "${TYPE_PREFIX}${agent}".` }
+    }
     const effort = effortOf(target.options)
     const description = typeof call.title === 'string' ? call.title : undefined
     const request: Request = {
@@ -1251,28 +1255,13 @@ export const register: Register = on => {
       return agent ? { deny: `lastdrop found nowhere to run ${agent}.` } : next(e)
     }
     const id = `t3-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
-    // The parent's permission mode: lastdrop's T3 instance learns no mode from T3, and a child runs in its parent's.
     const run: Delegated = { id, agent, model: agent ? undefined : model, effort, description, permissionMode }
     // T3 doesn't know an added model; the child keeps the session's, which never runs for it.
     const { model: _, ...rest } = target
     const childTarget = agent ? rest : target
     const { target: __, ...args } = call
     const routed = Object.keys(childTarget).length > 0 ? { ...args, target: childTarget } : args
-    const task = tag(call.task, run)
-    // First on lastdrop's own T3 instance (the same tagged task; the instance has no options, effort is in the
-    // tag). T3 refusing the target before creating anything falls back to the call as it always was. Only for an
-    // added model that inherits its parent's modes: a plain Claude child keeps its own model when lastdrop hands it
-    // back, and a child T3 gives other modes runs in those, which the instance can't learn.
-    const inherits = (mode: unknown) => mode === undefined || mode === 'inherit'
-    const hosted = inherits(call.runtimeMode) && inherits(call.interactionMode) ? agent : undefined
-    const failedAt = await $.store.get(T3_LASTDROP_FAILED)
-    if (hosted !== undefined && !(typeof failedAt === 'number' && Date.now() - failedAt < T3_LASTDROP_SKIP_MS)) {
-      const { options: ___, driverKind: ____, ...own } = target
-      const first = await next({ ...args, task, target: { ...own, providerInstanceId: T3_LASTDROP, model: hosted } } as unknown as typeof e)
-      if (!refusedTarget(first)) return first
-      await put($, T3_LASTDROP_FAILED, Date.now())
-    }
-    const answer = await next({ ...routed, task } as unknown as typeof e)
+    const answer = await next({ ...routed, task: tag(call.task, run) } as unknown as typeof e)
     if (answer.deny !== undefined || !agent) return answer
     // The answer names the child thread's own model: the model reads the added one, and where it runs.
     // The child exists now, so a failure here keeps T3's answer instead of failing (or repeating) the call.

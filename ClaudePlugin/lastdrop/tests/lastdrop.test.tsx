@@ -35,6 +35,8 @@ type Options = {
   storeFailure?: boolean; selfTest?: object; nativeTasks?: boolean; liveCatalog?: () => object; runnerFails?: boolean; agentModels?: boolean; before?: object[]; spawnId?: () => string; noAgentTool?: boolean; storeLimit?: number; sessionId?: () => string; env?: Record<string, string>; t3?: Record<string, object>; t3Throws?: boolean
   /** How T3 answers a delegate_task on the `lastdrop` instance: refuses (the default, so the tests of the call as it was run on it), accepts, or answers a given error. */
   lastdrop?: 'accept' | { error: string }
+  /** What `--agent-catalog` says of lastdrop's own T3 instance: set up (true), or not (absent, as an older app). */
+  t3Instance?: boolean
 }
 
 function engine([$test, on]: Body, options: Options = {}) {
@@ -99,7 +101,7 @@ function engine([$test, on]: Body, options: Options = {}) {
     calls.push({ flag, request })
     if (options.runnerFails) throw new Error('no runner')
     if (flag === '--agent-route') yield { stream: 'stdout', text: lines(options.route ?? { type: 'routed' }) }
-    else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true }) }
+    else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }) }) }
     else if (flag === '--agent-selftest') yield { stream: 'stdout', text: lines(options.selfTest ?? { type: 'ok' }) }
     else if (flag === '--agent-run') {
       runCount++
@@ -1356,119 +1358,112 @@ test('delegate_task’s answer names the added model and where it runs, not the 
   expect(e.store.get('delegated-child:thread-1')).toBe('sol')
 })
 
-// The first try is lastdrop's own T3 instance; T3 refusing it falls back to the call as it always was.
+// Auto mode refuses a call a hook changed: with lastdrop's T3 instance set up, every call goes to T3 as written.
 const delegateCalls = (e: ReturnType<typeof engine>) => e.nativeInputs.filter((_, i) => e.nativeCalls[i] === DELEGATE)
+const AUTO = { prompt: 'hi', permission_mode: 'auto' }
 
-test('delegate_task goes first to the lastdrop instance with the tag, the model and no options', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3: { [DELEGATE]: SHELL } })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  const answer = await delegate($, { target: { model: 'sol', options: { effort: 'high' } }, mode: 'async' })
-  const calls = delegateCalls(e)
-  expect(calls.length).toBe(1)
-  expect(calls[0]!.target).toEqual({ providerInstanceId: 'lastdrop', model: 'sol' })
-  expect(calls[0]!.mode).toBe('async')
-  expect(tagOf(String(calls[0]!.task))).toMatchObject({ agent: 'sol', effort: 'high', description: 'review' })
-  // T3 names the child's real model: nothing is rewritten or remembered.
-  expect(json(answer)).toEqual(SHELL)
-  expect(e.store.has('delegated-child:task-1')).toBe(false)
-})
-
-test('the tag carries the parent permission mode for the lastdrop instance', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3: { [DELEGATE]: SHELL } })
-  await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'bypassPermissions' } as never)
-  await delegate($, { target: { model: 'sol' }, mode: 'async' })
-  expect(tagOf(String(delegateCalls(e)[0]!.task))).toMatchObject({ agent: 'sol', permissionMode: 'bypassPermissions' })
-})
-
-test('a plain or Claude-model child keeps today\'s call: it never tries the lastdrop instance', async ($, on) => {
-  const e = engine([$, on], { lastdrop: 'accept' })
-  await delegate($)
-  await delegate($, { target: { model: 'claude-opus-5-5', driverKind: 'claudeAgent', options: [{ id: 'effort', value: 'max' }] } })
-  const [plain, opus, ...more] = delegateCalls(e)
-  expect(more.length).toBe(0)
-  expect((plain!.target as Record<string, unknown> | undefined)?.providerInstanceId).toBeUndefined()
-  expect(opus!.target).toEqual({ model: 'claude-opus-5-5', driverKind: 'claudeAgent', options: [{ id: 'effort', value: 'max' }] })
-  expect(tagOf(String(opus!.task))).toMatchObject({ model: 'claude-opus-5-5', effort: 'max' })
-})
-
-test('an added model with its own runtime or interaction mode keeps today\'s call', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3: { [DELEGATE]: SHELL } })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await delegate($, { target: { model: 'sol' }, runtimeMode: 'approval-required' })
-  await delegate($, { target: { model: 'sol' }, interactionMode: 'plan' })
-  await delegate($, { target: { model: 'sol' }, runtimeMode: 'inherit', interactionMode: 'inherit' })
-  const [runtime, interaction, inherited, ...more] = delegateCalls(e)
-  expect(more.length).toBe(0)
-  expect((runtime!.target as Record<string, unknown> | undefined)?.providerInstanceId).toBeUndefined()
-  expect((interaction!.target as Record<string, unknown> | undefined)?.providerInstanceId).toBeUndefined()
-  expect((inherited!.target as Record<string, unknown>).providerInstanceId).toBe('lastdrop')
-})
-
-test('a call naming the lastdrop instance itself goes through the same checks and gets the tag', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3: { [DELEGATE]: SHELL } })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await delegate($, { target: { providerInstanceId: 'lastdrop', model: 'sol' } })
-  await delegate($, { target: { providerInstanceId: 'lastdrop', model: 'opus' } })
-  const [added, claude, ...more] = delegateCalls(e)
-  expect(more.length).toBe(0)
-  expect(added!.target).toEqual({ providerInstanceId: 'lastdrop', model: 'sol' })
-  expect(tagOf(String(added!.task)).agent).toBe('sol')
-  // A Claude model asked of the instance runs as a plain child on T3's Claude instance, as today.
-  expect(claude!.target).toEqual({ model: 'opus' })
-  expect(tagOf(String(claude!.task)).model).toBe('opus')
-})
-
-const REFUSALS = ['Provider instance lastdrop is not registered.', 'Provider lastdrop cannot run a child task: Provider instance is disabled.',
-  'Model sol is not advertised by provider lastdrop.', 'Provider instance "lastdrop" is disabled for project p1.', 'provider_unavailable']
-
-for (const error of REFUSALS) {
-  test(`T3 refusing the lastdrop instance (${error.slice(0, 40)}) falls back to today's call, once`, async ($, on) => {
-    const e = engine([$, on], { catalog: CATALOG, lastdrop: { error }, t3: { [DELEGATE]: SHELL } })
-    await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-    const answer = await delegate($, { target: { model: 'sol', options: { effort: 'high' } } })
-    const [first, second, ...more] = delegateCalls(e)
-    expect(more.length).toBe(0)
-    expect((first!.target as Record<string, unknown>).providerInstanceId).toBe('lastdrop')
-    expect(second!.target).toEqual({ options: { effort: 'high' } })
-    expect(tagOf(String(second!.task)).agent).toBe('sol')
-    expect(tagOf(String(second!.task)).id).toBe(tagOf(String(first!.task)).id)
-    // Today's rewrite of the fallback child's answer.
-    expect(json(answer)).toEqual({ ...SHELL, model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high' })
-    expect(e.store.get('delegated-child:task-1')).toBe('sol')
+for (const mode of ['auto', 'bypassPermissions']) {
+  test(`a call on the lastdrop instance reaches T3 byte for byte (${mode}), with no room check`, async ($, on) => {
+    const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3Instance: true, t3: { [DELEGATE]: SHELL } })
+    await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: mode } as never)
+    const call = { tool: DELEGATE, tool_use_id: 'toolu_d', task: 'review the diff', title: 'review',
+                   target: { providerInstanceId: 'lastdrop', model: 'sol' }, mode: 'async' }
+    const answer = await $.tool.call(call as never)
+    expect(exact(delegateCalls(e)[0]!)).toEqual(exact(call))
+    expect(exact(delegateCalls(e)[0]!.target as object)).toEqual(exact(call.target))
+    expect(delegateCalls(e).length).toBe(1)
+    expect(e.calls.some(c => c.flag === '--agent-route')).toBe(false)
+    // T3 names the child's real model: nothing is rewritten or remembered.
+    expect(json(answer)).toEqual(SHELL)
+    expect(e.store.has('delegated-child:task-1')).toBe(false)
   })
 }
 
-test('an error T3 gives after creating something, or none it explains, is never retried', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, lastdrop: { error: 'Delegated tasks require an active run owned by this MCP provider session.' } })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  const answer = await delegate($, { target: { model: 'sol' } })
-  expect(answer.isError).toBe(true)
-  expect(delegateCalls(e).length).toBe(1)
+test('a Claude model on the lastdrop instance, or one lastdrop doesn\'t know, also goes unchanged', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3Instance: false })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  await delegate($, { target: { providerInstanceId: 'lastdrop', model: 'opus' } })
+  await delegate($, { target: { providerInstanceId: 'lastdrop', model: 'nope' } })
+  expect(delegateCalls(e).map(c => [c.task, c.target])).toEqual([
+    ['review the diff', { providerInstanceId: 'lastdrop', model: 'opus' }],
+    ['review the diff', { providerInstanceId: 'lastdrop', model: 'nope' }],
+  ])
 })
 
-test('a refused lastdrop instance is skipped for ten minutes, then tried again', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, t3: { [DELEGATE]: SHELL } })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await delegate($, { target: { model: 'sol' } })
-  expect(delegateCalls(e).length).toBe(2)
-  await delegate($, { target: { model: 'sol' } })
-  expect(delegateCalls(e).length).toBe(3)
-  expect((delegateCalls(e)[2]!.target as Record<string, unknown> | undefined)?.providerInstanceId).toBeUndefined()
-  e.store.set('t3-lastdrop:failed', Date.now() - 11 * 60_000)
-  await delegate($, { target: { model: 'sol' } })
-  expect(delegateCalls(e).length).toBe(5)
+test('with the lastdrop instance set up, an added model on T3\'s Claude instance is denied with the instance\'s form', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, t3Instance: true })
+  await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'default' } as never)
+  const form = 'sol runs on lastdrop\'s T3 instance: call delegate_task with target: { providerInstanceId: "lastdrop", model: "sol" }.'
+  expect((await delegate($, { target: { model: 'sol', options: { effort: 'high' } } })).deny).toBe(form)
+  expect((await delegate($, { target: { providerInstanceId: 'claudeAgent', model: 'sol' } })).deny).toBe(form)
+  expect(delegateCalls(e).length).toBe(0)
 })
 
-test('no room never tries the lastdrop instance', async ($, on) => {
-  const e = engine([$, on], { route: { type: 'no_room' }, lastdrop: 'accept' })
+for (const mode of ['auto', 'default']) {
+  test(`with the lastdrop instance set up, a plain Claude child goes unchanged (${mode})`, async ($, on) => {
+    const e = engine([$, on], { catalog: CATALOG, t3Instance: true })
+    await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: mode } as never)
+    const calls = [{}, { target: { model: 'opus' } }, { target: { model: 'claude-opus-5-5', driverKind: 'claudeAgent', options: [{ id: 'effort', value: 'max' }] } },
+                   { target: { providerInstanceId: 'claudeAgent' } }]
+    for (const fields of calls) await delegate($, fields)
+    expect(delegateCalls(e).map(c => exact(c))).toEqual(calls.map(fields => exact({ tool: DELEGATE, tool_use_id: 'toolu_d', task: 'review the diff', title: 'review', ...fields })))
+    expect(e.calls.some(c => c.flag === '--agent-route')).toBe(false)
+  })
+}
+
+test('without the lastdrop instance, auto mode passes a plain child unchanged and denies an added model', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  await $.classic.UserPromptSubmit(AUTO as never)
   await delegate($)
-  expect(delegateCalls(e).map(c => c.target)).toEqual([undefined])
+  await delegate($, { target: { model: 'opus' } })
+  expect(delegateCalls(e).map(c => [c.task, c.target])).toEqual([['review the diff', undefined], ['review the diff', { model: 'opus' }]])
+  expect((await delegate($, { target: { model: 'sol' } })).deny)
+    .toBe('lastdrop can\'t start sol through delegate_task in auto mode until its T3 provider is set up (lastdrop\'s T3 Code setting). Use the Agent tool with subagent_type: "lastdrop:sol".')
+  expect(delegateCalls(e).length).toBe(2)
+  expect(e.calls.some(c => c.flag === '--agent-route')).toBe(false)
 })
 
-test('another instance is left to T3 without trying the lastdrop instance', async ($, on) => {
-  const e = engine([$, on], { lastdrop: 'accept' })
+test('without the lastdrop instance, outside auto mode, the tag path stays, with the parent\'s mode in the tag', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, t3Instance: false, t3: { [DELEGATE]: SHELL } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'bypassPermissions' } as never)
+  const answer = await delegate($, { target: { model: 'sol', options: { effort: 'high' } } })
+  const [call, ...more] = delegateCalls(e)
+  expect(more.length).toBe(0)
+  expect(call!.target).toEqual({ options: { effort: 'high' } })
+  expect(tagOf(String(call!.task))).toMatchObject({ agent: 'sol', effort: 'high', permissionMode: 'bypassPermissions' })
+  expect(json(answer)).toEqual({ ...SHELL, model: 'sol', runsOn: 'lastdrop · Codex · gpt-6.1-sol · high' })
+})
+
+test('no room never changes a plain call', async ($, on) => {
+  const e = engine([$, on], { route: { type: 'no_room' } })
+  await delegate($)
+  expect(delegateCalls(e).map(c => [c.task, c.target])).toEqual([['review the diff', undefined]])
+})
+
+test('another instance is left to T3', async ($, on) => {
+  const e = engine([$, on], { t3Instance: true })
   await delegate($, { target: { providerInstanceId: 'codex', model: 'gpt-6.1-sol' } })
   expect(delegateCalls(e).length).toBe(1)
+})
+
+test('in T3 Code with the lastdrop instance set up, the listing sends background work there', async ($, on) => {
+  engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' }, t3Instance: true })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent for foreground work. For background work on one of them or on Claude, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<the agent's name without lastdrop:, or fable, opus, sonnet or haiku>" }.${COMMAND}`)
+})
+
+test('the T3 listing stays frozen for the session when the instance is set up later', async ($, on) => {
+  let ready = false
+  const e = engine([$, on], { liveCatalog: () => ({ ...CATALOG, t3Instance: ready }), env: { T3CODE_THREAD_ID: 'thread-1' } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  const first = await listing($)
+  expect(first).toContain("delegate_task's target.model also accepts their names")
+  ready = true
+  await $.classic.UserPromptSubmit({ prompt: 'again' } as never)
+  expect(await listing($)).toBe(first)
+  // The call itself follows what lastdrop says now.
+  expect((await delegate($, { target: { model: 'sol' } })).deny).toContain('providerInstanceId: "lastdrop"')
+  expect(delegateCalls(e).length).toBe(0)
 })
 
 test('orchestrator_capabilities adds no models when T3 already lists a healthy lastdrop instance with them', async ($, on) => {
