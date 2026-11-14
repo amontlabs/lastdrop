@@ -120,6 +120,9 @@ const LISTING = 'Available agent types'
 const TYPES = 'The lastdrop: agent types are agents the user added; each runs on the provider and model its description names.'
 /** In T3 Code, whose delegate_task runs background children: lastdrop runs those too (see DELEGATE). */
 const TYPES_T3 = "The lastdrop: agent types are agents the user added; each runs on the provider and model its description names. delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work."
+/** The headers of the frozen list of versions from before the types, which they added at each read. */
+const OLD_ADDED = "The Agent tool's model parameter also accepts these models the user added:\n"
+const OLD_ADDED_T3 = "The Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n"
 /** Ends the frozen text, so the command's instructions cost nothing until they're read. */
 const POINTER = '\nOnly if the user asks to change these, run '
 /** The engine announces added and removed types; a description changed in place it doesn't. */
@@ -256,9 +259,12 @@ async function listNote($: EngineInterface): Promise<string | undefined> {
 }
 
 type Request = Record<string, unknown>
-/** `worktree`: the engine's worktree the agent runs in, for the report's header (the runner made none). */
+/**
+ * `worktree`: the engine's worktree the agent runs in (the runner made none), and `parentCwd` the folder the
+ * call came from, where a follow-up goes once the engine removed the worktree.
+ */
 type Route = { request: Request; description: string; toolUseId: string; ran: boolean; cursor: number; handback?: boolean; resumePrompt?: string; error?: string
-               worktree?: { path: string; branch?: string } }
+               worktree?: { path: string; branch?: string }; parentCwd?: string }
 const claims = new Map<string, Request>()
 const routes = new Map<string, Route>()
 /** A native step can arrive before its spawn's reply has crossed the worker boundary. */
@@ -580,10 +586,45 @@ function usageOf(line: Line, model: string): TurnUsage | null {
 async function engineWorktree($: EngineInterface, route: Route): Promise<void> {
   const cwd = await $.session.cwd()
   if (cwd === route.request.cwd) return
-  const branch = await $.process.run(['git', '-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'])
-    .then(result => (result.exitCode === 0 ? result.stdout.trim() || undefined : undefined), () => undefined)
+  // As the runner names a branch: none for a detached HEAD.
+  const branch = await git($, ['-C', cwd, 'symbolic-ref', '--short', '-q', 'HEAD'])
+  route.parentCwd = String(route.request.cwd)
   route.request = { ...route.request, cwd, isolation: undefined }
-  route.worktree = { path: cwd, branch }
+  route.worktree = { path: cwd, branch: branch || undefined }
+}
+
+/** A git command's trimmed output, or undefined when it failed. */
+async function git($: EngineInterface, args: string[]): Promise<string | undefined> {
+  try {
+    const result = await $.process.run(['git', ...args])
+    return result.exitCode === 0 ? result.stdout.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Claude Code removes the worktree of an agent that changed nothing once the agent ends: a follow-up then runs
+ * in the folder the call came from, with no worktree to report, as the runner does with one it made.
+ */
+async function leftWorktree($: EngineInterface, route: Route): Promise<void> {
+  if (!route.worktree || await $.fs.exists(route.worktree.path)) return
+  route.request = { ...route.request, cwd: route.parentCwd ?? route.request.cwd }
+  route.worktree = undefined
+}
+
+/**
+ * The worktree for the report's header: none once it is gone or the agent left it unchanged (clean, and its
+ * branch never moved), which is when Claude Code removes it. The same test as the runner's (`AgentWorktree`).
+ */
+async function reportedWorktree($: EngineInterface, route: Route): Promise<Route['worktree']> {
+  const worktree = route.worktree
+  if (!worktree || !await $.fs.exists(worktree.path)) return undefined
+  const status = await git($, ['-C', worktree.path, 'status', '--porcelain'])
+  const branch = await git($, ['-C', worktree.path, 'symbolic-ref', '--short', '-q', 'HEAD'])
+  if (status !== '' || !branch) return worktree
+  const log = await git($, ['-C', worktree.path, 'reflog', 'show', '--format=%H', branch])
+  return log !== undefined && log.split('\n').length === 1 ? undefined : worktree
 }
 
 /** One remote run per native turn; the engine schedules new turns for messages queued while it worked. */
@@ -593,6 +634,7 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
   if (route.error) throw new Error(route.error)
   if (e.index !== 0) throw new Error('Claude Code requested another model step after lastdrop’s handback.')
   if (!route.ran && route.request.isolation === 'worktree') await engineWorktree($, route)
+  else await leftWorktree($, route)
   const previous = route.cursor
   const message = await inbox($, id, route)
   const nextPrompt = route.resumePrompt || message
@@ -1017,12 +1059,17 @@ export const register: Register = on => {
     // a downgrade the stored message changes, which only a rare downgrade can cause.
     if (!agentModels) return answer
     const id = await $.session.id()
+    // Truthy, as the earlier versions read it.
+    const t3 = Boolean(await $.env.get('T3CODE_THREAD_ID'))
     let text = await $.store.get(`listing:${id}`)
     if (typeof text !== 'string') {
-      const types = (await $.env.get('T3CODE_THREAD_ID')) ? TYPES_T3 : TYPES
-      text = catalog.size === 0 ? '' : `${types}${POINTER}${await runner($)} --agents --help`
+      text = catalog.size === 0 ? '' : `${t3 ? TYPES_T3 : TYPES}${POINTER}${await runner($)} --agents --help`
       // A store that refuses leaves this request on the current text; the next one tries again.
       await put($, `listing:${id}`, text)
+    } else if (text !== '' && !text.startsWith(TYPES)) {
+      // Frozen by a version from before the types: its bare list, headed as that version headed it at each
+      // read, so the replayed message stays byte for byte what it was. Its `model` form is refused with the type.
+      text = `${t3 ? OLD_ADDED_T3 : OLD_ADDED}${text}`
     }
     return text === '' ? answer : { ...answer, text: `${answer.text}\n\n${text}` }
   }).catch(($, e, next) => next(e))
@@ -1106,6 +1153,9 @@ export const register: Register = on => {
       const bare = typeof type === 'string' && !AGENT_TYPES.has(type) && !offered.has(type) ? type : undefined
       if ((model !== undefined && !isAdded(model)) || (bare !== undefined && !isAdded(bare))) await syncCatalog($)
       const added = [bare, model].find(name => name !== undefined && isAdded(name))
+      if (added !== undefined && e.agentId !== undefined) {
+        return { deny: `lastdrop's agents (${TYPE_PREFIX}${added}) run only from the main session.` }
+      }
       if (added !== undefined) {
         return { deny: `${added} is an agent type: call the Agent tool with subagent_type: "${TYPE_PREFIX}${added}" and no model. It runs as a general agent, never as Explore or Plan.` }
       }
@@ -1278,7 +1328,7 @@ export const register: Register = on => {
       active.add(e.agentId)
       result = yield* live(report => remoteTurn($, e, route, next.signal, report), shown)
       native = result.type === 'native'
-      if (!native) lead = header(route.request, result, route.worktree)
+      if (!native) lead = header(route.request, result, await reportedWorktree($, route))
     } catch (error) {
       if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
       result = { type: 'result', isError: true, text: `lastdrop agent failed: ${String(error)}` }

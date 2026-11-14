@@ -52,7 +52,10 @@ function engine([$test, on]: Body, options: Options = {}) {
   let messages: Message[] = context([{ role: 'user', content: [{ type: 'text', text: 'initial task' }] }])
   let modelSteps = 0
   let runCount = 0
-  on('fs.exists', () => ({ value: true }))
+  // Folders that are gone (a worktree the engine removed); git answers by subcommand.
+  const missing = new Set<string>()
+  const gitAnswers: Record<string, string> = { 'status': ' M notes.txt', 'symbolic-ref': 'worktree-agent-x', 'reflog': 'a\nb' }
+  on('fs.exists', (_, e) => ({ value: !missing.has(e.path) }))
   on('env.get', (_, e) => ({ value: options.env?.[e.name] }))
   on('session.cwd', () => ({ value: cwd }))
   on('session.id', () => ({ value: options.sessionId?.() ?? 'session-1' }))
@@ -80,7 +83,11 @@ function engine([$test, on]: Body, options: Options = {}) {
   on('prompt.attachment', (_, e) => ({ text: e.text }))
   on('command.register', (_, e) => ({ value: { command: `lastdrop:${e.name}` } }))
   on('agent.register', (_, e) => { registered.push(e as never); return { value: { agent: `lastdrop:${e.name}` } } })
-  on('process.run', () => ({ value: { exitCode: 0, stdout: 'worktree-agent-x\n', stderr: '' } }) as never)
+  on('process.run', (_, e) => {
+    const sub = (e.argv as string[])[3] ?? ''
+    const out = gitAnswers[sub]
+    return { value: { exitCode: out === undefined ? 1 : 0, stdout: out === undefined ? '' : `${out}\n`, stderr: '' } } as never
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('classic.UserPromptSubmit', () => ({}))
   on('prompt.submit', (_, e) => { submitted.push(e.context); return { text: e.text, context: e.context } })
@@ -126,6 +133,8 @@ function engine([$test, on]: Body, options: Options = {}) {
   })
   return { calls, spawned, nativeCalls, nativeInputs, statuses, submitted, invalidated, store, registered,
     cwd(value: string) { cwd = value },
+    remove(path: string) { missing.add(path) },
+    git(sub: string, out: string | undefined) { if (out === undefined) delete gitAnswers[sub]; else gitAnswers[sub] = out },
     get modelSteps() { return modelSteps }, get opened() { return opened }, get runCount() { return runCount },
     messages(value: Message[]) { messages = context(value) },
     async launch(fields: object = {}) {
@@ -144,6 +153,9 @@ async function resume($: Body[0], prompt: string) {
   await $.agent.spawn({ tool_use_id: '', prompt, description: 'read a note', subagentType: 'general-purpose',
     parentModel: 'haiku', permissionMode: 'auto', background: true, fork: false, resume: { agentId: ID } } as never)
 }
+/** A call's keys and values in order, so an added key (even one set to undefined) shows. */
+const exact = (value: object) => Object.entries(value)
+
 function report(chunks: Awaited<ReturnType<typeof step>>): string {
   return chunks.filter(c => c.kind === 'input' || c.kind === 'text').map(c => c.kind === 'input' ? JSON.parse(c.json).message : c.text).join('')
 }
@@ -450,7 +462,7 @@ test('failure to persist a route produces an error report, never a local request
 test('a worktree call reaches the engine unchanged, and the runner works in the engine’s worktree', async ($, on) => {
   const e = engine([$, on])
   await e.launch({ isolation: 'worktree' })
-  expect(e.nativeInputs[0]).toEqual({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', isolation: 'worktree' })
+  expect(exact(e.nativeInputs[0]!)).toEqual(exact({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', isolation: 'worktree' }))
   e.cwd('/work/.claude/worktrees/agent-x')
   expect(report(await step($))).toBe(`Worktree: /work/.claude/worktrees/agent-x (branch worktree-agent-x).\n\n${RESULT.text}`)
   const run = e.calls.find(c => c.flag === '--agent-run')!.request
@@ -460,18 +472,38 @@ test('a worktree call reaches the engine unchanged, and the runner works in the 
   expect(e.calls.find(c => c.flag === '--agent-route')?.request.isolation).toBe('worktree')
 })
 
-test('a resumed worktree agent stays in the engine’s worktree', async ($, on) => {
+test('a follow-up stays in the engine’s worktree while it exists, then goes to the caller’s folder', async ($, on) => {
   const e = engine([$, on])
   await e.launch({ isolation: 'worktree' })
   e.cwd('/work/.claude/worktrees/agent-x')
   await step($)
   e.cwd('/work')
-  e.messages([{ role: 'user', content: [{ type: 'text', text: 'initial task' }] }, { role: 'user', content: [{ type: 'text', text: 'more' }] }])
+  const more = (text: string) => e.messages([{ role: 'user', content: [{ type: 'text', text: 'initial task' }] }, { role: 'user', content: [{ type: 'text', text }] }])
+  more('more')
   await resume($, 'more')
-  await step($, 'turn-2')
+  expect(report(await step($, 'turn-2'))).toContain('Worktree: /work/.claude/worktrees/agent-x')
+  // The agent left it unchanged and ended: Claude Code removed it.
+  e.remove('/work/.claude/worktrees/agent-x')
+  more('again')
+  await resume($, 'again')
+  expect(report(await step($, 'turn-3'))).toBe(RESULT.text)
   const runs = e.calls.filter(c => c.flag === '--agent-run').map(c => c.request)
-  expect(runs.map(r => r.cwd)).toEqual(['/work/.claude/worktrees/agent-x', '/work/.claude/worktrees/agent-x'])
-  expect(runs[1]?.isolation).toBeUndefined()
+  expect(runs.map(r => r.cwd)).toEqual(['/work/.claude/worktrees/agent-x', '/work/.claude/worktrees/agent-x', '/work'])
+  expect(runs.map(r => r.isolation)).toEqual([undefined, undefined, undefined])
+})
+
+test('an unchanged worktree is left out of the header, and a detached one names no branch', async ($, on) => {
+  const e = engine([$, on])
+  await e.launch({ isolation: 'worktree' })
+  e.cwd('/work/.claude/worktrees/agent-x')
+  e.git('status', '')
+  e.git('reflog', 'a')
+  expect(report(await step($))).toBe(RESULT.text)
+  e.git('symbolic-ref', undefined)
+  await e.launch({ isolation: 'worktree', tool_use_id: 'toolu_2' })
+  e.cwd('/work/.claude/worktrees/agent-y')
+  // Detached and clean: changed or not can't be told from a branch, so it is named, without one.
+  expect(report(await step($, 'turn-2'))).toBe(`Worktree: /work/.claude/worktrees/agent-y.\n\n${RESULT.text}`)
 })
 
 test('with no worktree from the engine the runner makes its own, as before', async ($, on) => {
@@ -583,12 +615,16 @@ test('with no added agents an unknown model lists only Claude models', async ($,
   expect((await e.launch({ subagent_type: 'lastdrop:nova' })).deny).toBe("Agent type lastdrop:nova isn't available. The user has no added agents.")
 })
 
-test('an agent added since the last read is found by the call', async ($, on) => {
+test('an agent added since the last read is registered by the call, which reaches the engine unchanged', async ($, on) => {
   let live: object = { revision: 1, agents: [] }
   const e = engine([$, on], { liveCatalog: () => live })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(e.registered).toEqual([])
   live = CATALOG
-  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).result).toEqual(NATIVE)
+  await e.launch({ subagent_type: 'lastdrop:sol' })
+  // Registered now, the type dispatches from the next turn on: whether this call runs is the engine's to say.
+  expect(e.registered.map(r => r.name)).toEqual(['sol', 'argon'])
+  expect(exact(e.nativeInputs[0]!)).toEqual(exact({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', subagent_type: 'lastdrop:sol' }))
 })
 
 test('Claude models and calls without a model stay native', async ($, on) => {
@@ -639,7 +675,10 @@ test('the old forms are denied with the type that replaces them, and never rewri
                         { subagent_type: 'sol' }, { subagent_type: 'sol', model: 'opus' }]) {
     expect((await e.launch(fields)).deny).toBe(guidance)
   }
-  expect((await e.launch({ model: 'argon', agentId: 'parent-agent' })).deny).toContain('subagent_type: "lastdrop:argon"')
+  // From inside a subagent no form of it runs: the answer says so rather than naming a type it can't call.
+  for (const fields of [{ model: 'argon' }, { subagent_type: 'argon' }]) {
+    expect((await e.launch({ ...fields, agentId: 'parent-agent' })).deny).toBe("lastdrop's agents (lastdrop:argon) run only from the main session.")
+  }
   expect(e.nativeCalls).toEqual([])
   expect(e.calls.some(c => c.flag === '--agent-route')).toBe(false)
 })
@@ -653,8 +692,8 @@ test('an added agent with no room is denied, never run by the built-in agent', a
 test('an added agent with a worktree reaches the engine unchanged and runs in its worktree', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   await e.launch({ subagent_type: 'lastdrop:sol', isolation: 'worktree' })
-  expect(e.nativeInputs[0]).toEqual({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task',
-                                      subagent_type: 'lastdrop:sol', isolation: 'worktree' })
+  expect(exact(e.nativeInputs[0]!)).toEqual(exact({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task',
+                                                  subagent_type: 'lastdrop:sol', isolation: 'worktree' }))
   e.cwd('/work/.claude/worktrees/agent-x')
   expect(report(await step($))).toBe(`Ran on claude-haiku-5-5. Worktree: /work/.claude/worktrees/agent-x (branch worktree-agent-x).\n\n${RESULT.text}`)
   const run = e.calls.find(c => c.flag === '--agent-run')!.request
@@ -758,7 +797,7 @@ test('a routed call reaches the engine byte-identical, and its spawn is claimed 
   const e = engine([$, on], { catalog: CATALOG })
   const call = { subagent_type: 'lastdrop:sol', effort: 'high', run_in_background: true }
   await e.launch(call)
-  expect(e.nativeInputs[0]).toEqual({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', ...call })
+  expect(exact(e.nativeInputs[0]!)).toEqual(exact({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', ...call }))
   expect(e.spawned.map(s => (s as { model?: string }).model)).toEqual(['sol'])
   expect(e.calls.find(c => c.flag === '--agent-route')?.request.effort).toBe('high')
   await step($)
@@ -778,9 +817,21 @@ test('the pointer to the command stays out of notes, and a listing frozen by an 
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   await listing($)
   expect(await submit($)).toBeUndefined()
-  const old = '- sol: Reviews: hard bugs. (Codex · gpt-6.1-sol · high)'
+  // As the version before the types stored it, and the message it produced at each read.
+  const old = `- sol: Reviews: hard bugs. (Codex · gpt-6.1-sol · high)${COMMAND}`
   e.store.set('listing:session-1', old)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${old}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\nThe Agent tool's model parameter also accepts these models the user added:\n${old}`)
+  // A list frozen before the pointer existed.
+  e.store.set('listing:session-1', '- sol: x')
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\nThe Agent tool's model parameter also accepts these models the user added:\n- sol: x`)
+  e.store.set('listing:session-1', '')
+  expect(await listing($)).toBe(NATIVE_LISTING)
+})
+
+test('in T3 Code a listing frozen by an earlier version keeps that version’s T3 header', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' } })
+  e.store.set('listing:session-1', `- sol: x${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\nThe Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n- sol: x${COMMAND}`)
 })
 
 test('an empty list appends nothing', async ($, on) => {

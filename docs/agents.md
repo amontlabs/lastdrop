@@ -299,12 +299,19 @@ Claude Code makes the subagent's worktree itself: `<repo>/.claude/worktrees/agen
 `worktree-agent-<id>`. `agent.spawn` doesn't carry its path (`e.cwd` is undefined), but the subagent's own loop runs
 there, and the plugin's `turn.step` for it reads it as the session's folder (`$.session.cwd()`). On the agent's first
 run the plugin gives the runner that folder as `cwd`, with no `isolation`, so the runner makes no worktree of its own,
-and keeps it in the route for follow-ups. The report's header names it (`Worktree: <path> (branch <branch>).`, the
-branch read with `git rev-parse`). If the folder is still the parent's (no worktree was made), the runner is asked for
-its own worktree, as before.
+and keeps it in the route, with the folder the call came from, for follow-ups. The report's header names it
+(`Worktree: <path> (branch <branch>).`, the branch read with `git symbolic-ref --short -q HEAD`, none when detached)
+only when the worktree is there and changed: not clean, or its branch moved (the reflog has more than its first
+entry), the same test as the runner's `AgentWorktree.isUnchanged`. If the folder is still the parent's (no worktree
+was made), the runner is asked for its own worktree, as before.
 
 Claude Code handles the worktree as for its own agents: one the agent left unchanged is removed when the agent ends,
-and one it changed is kept and named in the Agent result (`worktreePath`). `SendMessage` continues in it. As for native
+and one it changed is kept and named in the Agent result (`worktreePath`). `SendMessage` continues in it while it
+exists. Once it is gone, a follow-up runs in the folder the call came from, with no worktree in its header: the plugin
+checks the path on each turn, and the runner (`AgentRun.resumable`) moves a saved entry whose folder is missing to
+the request's folder and drops its worktree. Claude Code resumes a session there (checked 2026-11-14: a session
+started in `.claude/worktrees/agent-x`, its worktree removed, resumed from the repository's root and remembered the
+conversation). As for native
 worktrees, git sees `.claude/worktrees/` as untracked unless the repository ignores it.
 
 Evidence (2026-11-14, Claude Code 2.1.322, `claude -p --permission-mode auto`): a probe mod's registered type called
@@ -400,12 +407,13 @@ drops `judges` (its encoder doesn't know it), which puts the defaults back.
 
 ## Limits
 
-- Main session only: subagents don't get the list and can't call added agents.
-- Added agents run only as `general-purpose`, `claude`, `Explore` or `Plan`.
+- Main session only. A subagent gets no list of agent types at all (checked 2026-11-14, Claude Code 2.1.322: a
+  native general-purpose subagent's loop raised no `agent_listing_delta`, and it reported no named types beside a
+  main listing that had the probe's type), so it doesn't see the `lastdrop:` types. One that names a type anyway, in
+  any form, is denied: "lastdrop's agents (lastdrop:x) run only from the main session."
+- An added agent is always a general agent: it can't be combined with `Explore` or `Plan` (see Roles).
 - On Claude-runner providers a read-only role still allows `Bash`, which can write. Native Explore has the same
   gap there; its restriction is by instruction.
-- The Agent tool's schema still shows four values for `model`; Claude follows the listing, and the plugin
-  accepts the rest before validation.
 - Provider permission requests nobody can answer are declined and reported (`Declined: … (needed approval)`), not
   asked.
 - Antigravity's judge follows Codex's line, which is more permissive than Claude's auto mode: it allows read-only
@@ -422,7 +430,9 @@ drops `judges` (its encoder doesn't know it), which puts the defaults back.
 - During an update, an older runner that is still running can strip `role` and the worktree fields from the
   ledger once, so a follow-up to a read-only agent started before the update may lose its read-only role. A brief,
   transient limit.
-- A session started before the update gets the list at its next resume, with one prompt-cache miss.
+- A session started before the types keeps the text it froze (the bare list under its old header, rebuilt byte for
+  byte as that version added it), so its replayed listing still names the `model` form; a call in that form is
+  denied with the type to use. It gets the new paragraph after a compaction or `/clear`.
 
 ## Backends
 
