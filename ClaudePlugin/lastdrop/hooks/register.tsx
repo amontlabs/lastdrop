@@ -719,7 +719,6 @@ const T3_LASTDROP = 'lastdrop'
 const T3_LASTDROP_SKIP_MS = 10 * 60_000
 const T3_LASTDROP_FAILED = 't3-lastdrop:failed'
 /** The Claude models the instance offers, by alias. */
-const T3_CLAUDE_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
 /**
  * What T3's `delegate_task` answers (isError) when it refused the target before creating anything: the
  * instance unknown, disabled or unhealthy, the model not offered (OrchestratorMcpService resolveTarget, and
@@ -845,11 +844,6 @@ function refusedTarget(answer: { isError?: unknown; text?: unknown; result?: unk
   if (answer.isError !== true) return false
   const text = [answer.text, ...textsOf(answer)].filter((t): t is string => typeof t === 'string').join('\n')
   return T3_REFUSED_TARGET.test(text)
-}
-
-/** The model id lastdrop's instance offers for a Claude model: its alias, or undefined when it isn't one. */
-function claudeAlias(model: string): string | undefined {
-  return NATIVE.has(model) ? model : T3_CLAUDE_ALIASES.find(alias => model.includes(alias))
 }
 
 /** A delegated child's run, as its tag carries it. */
@@ -1171,8 +1165,11 @@ export const register: Register = on => {
     const routed = Object.keys(childTarget).length > 0 ? { ...args, target: childTarget } : args
     const task = tag(call.task, run)
     // First on lastdrop's own T3 instance (the same tagged task; the instance has no options, effort is in the
-    // tag). T3 refusing the target before creating anything falls back to the call as it always was.
-    const hosted = agent ?? claudeAlias(model ?? await $.session.model())
+    // tag). T3 refusing the target before creating anything falls back to the call as it always was. Only for an
+    // added model that inherits its parent's modes: a plain Claude child keeps its own model when lastdrop hands it
+    // back, and a child T3 gives other modes runs in those, which the instance can't learn.
+    const inherits = (mode: unknown) => mode === undefined || mode === 'inherit'
+    const hosted = inherits(call.runtimeMode) && inherits(call.interactionMode) ? agent : undefined
     const failedAt = await $.store.get(T3_LASTDROP_FAILED)
     if (hosted !== undefined && !(typeof failedAt === 'number' && Date.now() - failedAt < T3_LASTDROP_SKIP_MS)) {
       const { options: ___, driverKind: ____, ...own } = target

@@ -460,7 +460,9 @@ final class ACPServer: @unchecked Sendable {
             case "error":
                 return .failed(line["text"] as? String ?? "lastdrop could not start the agent.")
             case "result":
-                if line["stopped"] as? Bool == true || turn.cancelled { return .cancelled }
+                if turn.cancelled { return .cancelled }
+                // Stopped by something other than T3 (`--agent-stop` from elsewhere): reported as the plugin does.
+                if line["stopped"] as? Bool == true { return .ended(text: LastDropTag.header(line) + (line["text"] as? String ?? ""), usage: Self.usage(line)) }
                 if line["isError"] as? Bool == true { return .failed(line["text"] as? String ?? "The agent failed.") }
                 if !started { return .failed(line["text"] as? String ?? "lastdrop could not start the agent.") }
                 return .ended(text: LastDropTag.header(line) + (line["text"] as? String ?? ""), usage: Self.usage(line))

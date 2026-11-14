@@ -160,6 +160,19 @@ final class ACPServerTests: LastDropTestCase {
         t3.end()
     }
 
+    func testARunStoppedElsewhereReportsItsTextLikeThePlugin() throws {
+        try scenario([[["type": "started", "agentId": "task-9", "account": "Codex"],
+                       ["type": "result", "text": "Stopped.", "isError": true, "stopped": true, "account": "Codex"]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let id = t3.send("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Long", ["id": "task-9", "agent": "flash"]), first: true)])
+        let answer = try t3.answer(id, timeout: 10)
+        XCTAssertEqual((answer["result"] as? [String: Any])?["stopReason"] as? String, "end_turn", "no cancel from T3")
+        let chunks = t3.updates(session).filter { $0["sessionUpdate"] as? String == "agent_message_chunk" }
+        XCTAssertTrue(chunks.contains { String(describing: $0).contains("Stopped.") }, "\(chunks)")
+        t3.end()
+    }
+
     func testCancelEndsARunnerThatIgnoresTheStop() throws {
         try scenario([[["type": "started", "agentId": "task-5", "account": "Codex"], ["sleep": 60]]])
         let t3 = try client(cancelWait: 1)
