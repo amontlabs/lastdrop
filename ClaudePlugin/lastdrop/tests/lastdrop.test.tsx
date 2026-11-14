@@ -37,6 +37,14 @@ type Options = {
   lastdrop?: 'accept' | { error: string }
   /** What `--agent-catalog` says of lastdrop's own T3 instance: set up (true), or not (absent, as an older app). */
   t3Instance?: boolean
+  /** `--delegate-note` answers an error, as with a full disk. */
+  notesFail?: boolean
+  /** T3 tools that answer with this error (isError), as T3 failing a call. */
+  t3Errors?: Record<string, string>
+  /** false: an app without `--delegate-note` (older), so plain T3 children take the tag path outside auto mode. */
+  notes?: false
+  /** What `t3_thread_read` on the child's own thread says: its parent, no parent (null), or an error. */
+  lineage?: string | null | 'error'
 }
 
 function engine([$test, on]: Body, options: Options = {}) {
@@ -49,6 +57,10 @@ function engine([$test, on]: Body, options: Options = {}) {
   const invalidated: string[] = []
   const registered: { name: string; description: string; prompt: string }[] = []
   const store = new Map<string, unknown>()
+  // lastdrop's note ledger (`--delegate-note`), as the app keeps it: expiry is the plugin's to check here.
+  const notes: Record<string, unknown>[] = []
+  const mcpCalls: Record<string, unknown>[] = []
+  let env: Record<string, string> = { ...options.env }
   // The session's folder as a hook reads it: a worktree subagent's own loop reads its worktree.
   let cwd = '/work'
   const context = (value: Message[]) => options.handback === false ? value : value.map((m, i) =>
@@ -60,7 +72,15 @@ function engine([$test, on]: Body, options: Options = {}) {
   const missing = new Set<string>()
   const gitAnswers: Record<string, string> = { 'status': ' M notes.txt', 'symbolic-ref': 'worktree-agent-x', 'reflog': 'a\nb' }
   on('fs.exists', (_, e) => ({ value: !missing.has(e.path) }))
-  on('env.get', (_, e) => ({ value: options.env?.[e.name] }))
+  on('env.get', (_, e) => ({ value: env[e.name] }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('mcp.call', (_, e) => {
+    mcpCalls.push(e as never)
+    if (options.lineage === 'error' || options.lineage === undefined) return { value: { content: [{ type: 'text', text: 'not connected' }], isError: true } } as never
+    const threadId = (e.args as Record<string, unknown>).threadId
+    const thread = { threadId, parentThreadId: options.lineage, relationshipToParent: options.lineage === null ? null : 'subagent' }
+    return { value: { content: [{ type: 'text', text: JSON.stringify({ thread, recentRuns: [], items: [] }) }], isError: false } } as never
+  })
   on('session.cwd', () => ({ value: cwd }))
   on('session.id', () => ({ value: options.sessionId?.() ?? 'session-1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
@@ -84,6 +104,7 @@ function engine([$test, on]: Body, options: Options = {}) {
   on('tool.list', () => ({ value: options.noAgentTool ? [] : [{ name: 'Agent' }] as never }))
   on('agent.offer', () => ({ isOffered: true }))
   on('session.compact', (_, e) => ({ messages: e.messages }))
+  on('tool.describe', (_, e) => ({ description: e.description }))
   on('prompt.attachment', (_, e) => ({ text: e.text }))
   on('command.register', (_, e) => ({ value: { command: `lastdrop:${e.name}` } }))
   on('agent.register', (_, e) => { registered.push(e as never); return { value: { agent: `lastdrop:${e.name}` } } })
@@ -101,7 +122,23 @@ function engine([$test, on]: Body, options: Options = {}) {
     calls.push({ flag, request })
     if (options.runnerFails) throw new Error('no runner')
     if (flag === '--agent-route') yield { stream: 'stdout', text: lines(options.route ?? { type: 'routed' }) }
-    else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }) }) }
+    else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }), ...(options.notes === false ? {} : { delegateNotes: true }) }) }
+    else if (flag === '--delegate-note' && options.notesFail) yield { stream: 'stdout', text: lines({ type: 'error', text: 'disk full' }) }
+    else if (flag === '--delegate-note') {
+      const op = request.op
+      if (op === 'put') notes.push({ ...(request.note as object) })
+      if (op === 'drop') notes.splice(0, notes.length, ...notes.filter(n => n.id !== request.id || n.thread !== undefined))
+      if (op === 'list') {
+        const bound = notes.find(n => n.thread === request.thread)
+        yield { stream: 'stdout', text: lines({ type: 'ok', open: notes.filter(n => n.thread === undefined), ...(bound ? { bound } : {}) }) }
+      } else if (op === 'claim') {
+        const note = notes.find(n => n.id === request.id)
+        if (note && (note.thread === undefined || note.thread === request.thread)) {
+          note.thread = request.thread
+          yield { stream: 'stdout', text: lines({ type: 'ok', note }) }
+        } else yield { stream: 'stdout', text: lines({ type: 'taken' }) }
+      } else yield { stream: 'stdout', text: lines({ type: 'ok' }) }
+    }
     else if (flag === '--agent-selftest') yield { stream: 'stdout', text: lines(options.selfTest ?? { type: 'ok' }) }
     else if (flag === '--agent-run') {
       runCount++
@@ -121,6 +158,8 @@ function engine([$test, on]: Body, options: Options = {}) {
       const error = options.lastdrop?.error ?? 'Provider instance lastdrop is not registered.'
       return { isError: true, result: error, text: error } as never
     }
+    const failure = options.t3Errors?.[e.tool]
+    if (failure !== undefined) return { isError: true, result: failure, text: failure } as never
     const t3 = options.t3?.[e.tool]
     // As Claude Code gives a T3 tool's answer: one JSON string (blocks in older versions).
     if (t3) return { result: JSON.stringify(t3), text: JSON.stringify(t3) } as never
@@ -140,8 +179,9 @@ function engine([$test, on]: Body, options: Options = {}) {
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'built-in response', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  return { calls, spawned, nativeCalls, nativeInputs, statuses, submitted, invalidated, store, registered,
+  return { calls, spawned, nativeCalls, nativeInputs, statuses, submitted, invalidated, store, registered, notes, mcpCalls,
     cwd(value: string) { cwd = value },
+    env(value: Record<string, string>) { env = value },
     remove(path: string) { missing.add(path) },
     git(sub: string, out: string | undefined) { if (out === undefined) delete gitAnswers[sub]; else gitAnswers[sub] = out },
     get modelSteps() { return modelSteps }, get opened() { return opened }, get runCount() { return runCount },
@@ -1166,8 +1206,8 @@ async function mainStep($: Body[0], turnId: string) {
 }
 const child = (task: string, ...more: Message[]): Message[] => [{ role: 'user', content: [{ type: 'text', text: task }] }, ...more]
 
-test('delegate_task with no target is tagged with the run and keeps no target', async ($, on) => {
-  const e = engine([$, on])
+test('with an app without notes, outside auto mode, delegate_task with no target is tagged with the run and keeps no target', async ($, on) => {
+  const e = engine([$, on], { notes: false })
   await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'default' } as never)
   expect((await delegate($)).result).toEqual({ marker: `native ${DELEGATE}` })
   const input = e.nativeInputs.at(-1)!
@@ -1197,8 +1237,8 @@ test('delegate_task with an added model drops it from the target and tags it as 
   expect(e.calls.find(c => c.flag === '--agent-route')?.request.agent).toBe('sol')
 })
 
-test('delegate_task with a Claude model keeps it on the target and in the tag', async ($, on) => {
-  const e = engine([$, on])
+test('with an app without notes, delegate_task with a Claude model keeps it on the target and in the tag', async ($, on) => {
+  const e = engine([$, on], { notes: false })
   await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'default' } as never)
   await delegate($, { target: { model: 'claude-opus-5-5', options: [{ id: 'effort', value: 'max' }] } })
   const input = e.nativeInputs.at(-1)!
@@ -1403,38 +1443,78 @@ test('with the lastdrop instance set up, an added model on T3\'s Claude instance
   expect(delegateCalls(e).length).toBe(0)
 })
 
-for (const mode of ['auto', 'default']) {
-  test(`with the lastdrop instance set up and room, a plain Claude child is pointed there once, then goes unchanged (${mode})`, async ($, on) => {
-    const e = engine([$, on], { catalog: CATALOG, t3Instance: true })
-    await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: mode } as never)
-    // No model: the session's (claude-haiku-5-5) by its alias.
-    expect((await delegate($)).deny).toBe('lastdrop has room for haiku: call delegate_task with target: { providerInstanceId: "lastdrop", model: "haiku" }, so lastdrop picks the account and moves the work at a limit. If that child then fails for lack of room, send this call again as it is.')
-    expect(routeChecks(e)).toBe(1)
-    expect(e.calls.find(c => c.flag === '--agent-route')!.request).toMatchObject({ prompt: 'review the diff', parentModel: 'claude-haiku-5-5' })
-    // Sent again as it was (the instance's child had no room, say): it goes to T3 as written.
-    await delegate($)
-    expect((await delegate($, { task: 'other', target: { model: 'opus' } })).deny).toContain('lastdrop has room for opus')
-    expect(passed(e)).toEqual(asWritten({}))
-  })
+// A plain Claude child goes to T3 as written in every mode; its run is noted beside the call.
+const PARENT = { T3CODE_THREAD_ID: 'parent-1' }
+for (const mode of ['auto', 'default', 'bypassPermissions', undefined]) {
+  for (const t3Instance of [true, false]) {
+    test(`a plain Claude child goes unchanged and its run is noted (${mode ?? 'unknown'} mode, instance ${t3Instance ? 'set up' : 'absent'})`, async ($, on) => {
+      const e = engine([$, on], { catalog: CATALOG, t3Instance, env: PARENT })
+      await $.classic.UserPromptSubmit((mode ? { prompt: 'hi', permission_mode: mode } : { prompt: 'hi' }) as never)
+      const fields = { target: { model: 'opus', options: [{ id: 'effort', value: 'max' }] }, mode: 'async' }
+      await delegate($, fields)
+      expect(passed(e)).toEqual(asWritten(fields))
+      expect(routeChecks(e)).toBe(1)
+      expect(e.notes.length).toBe(1)
+      const note = e.notes[0]!
+      expect(note).toMatchObject({ task: 'review the diff', parentThread: 'parent-1', parentModel: 'claude-haiku-5-5',
+        run: { model: 'opus', effort: 'max', description: 'review', ...(mode ? { permissionMode: mode } : {}) } })
+      expect((note.run as Record<string, unknown>).agent).toBeUndefined()
+      expect(note.id).toMatch(/^t3-[a-z0-9]+$/)
+      expect((note.run as Record<string, unknown>).id).toBe(note.id)
+      expect(Math.abs(Date.now() - Number(note.createdAt))).toBeLessThan(5_000)
+    })
+  }
 }
 
-test('with the lastdrop instance set up and no room, a plain child goes unchanged', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, t3Instance: true, route: { type: 'no_room' } })
+test('a plain child with no model, a full model id or a mode of its own goes unchanged, noted', async ($, on) => {
+  const e = engine([$, on], { t3Instance: true, env: PARENT })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  await delegate($)
+  await delegate($, { target: { model: 'claude-opus-5-5' }, runtimeMode: 'approval-required' })
+  expect(passed(e)).toEqual(asWritten({}, { target: { model: 'claude-opus-5-5' }, runtimeMode: 'approval-required' }))
+  expect(e.notes.map(n => (n.run as Record<string, unknown>).model)).toEqual([undefined, 'claude-opus-5-5'])
+})
+
+test('the note goes when T3 answers the call with an error', async ($, on) => {
+  const e = engine([$, on], { env: PARENT, t3Errors: { [DELEGATE]: 'Delegated tasks require an active run.' } })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  const answer = await delegate($)
+  expect(answer.isError).toBe(true)
+  expect(e.notes.length).toBe(0)
+  expect(e.calls.filter(c => c.flag === '--delegate-note').map(c => c.request.op)).toEqual(['put', 'drop'])
+})
+
+test('the note goes when the call throws, and the call is not run again', async ($, on) => {
+  const e = engine([$, on], { t3Throws: true, env: PARENT })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect((await delegate($)).deny).toContain('lastdrop failed')
+  expect(e.notes.length).toBe(0)
+  expect(e.nativeCalls.filter(t => t === DELEGATE).length).toBe(1)
+})
+
+test('a note T3 accepted stays for its child, and T3\'s answer is left as it wrote it', async ($, on) => {
+  const e = engine([$, on], { t3: { [DELEGATE]: SHELL }, env: PARENT })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect(json(await delegate($))).toEqual(SHELL)
+  expect(e.notes.length).toBe(1)
+})
+
+test('with no room, a plain child goes unchanged and nothing is noted', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, t3Instance: true, route: { type: 'no_room' }, env: PARENT })
   await $.classic.UserPromptSubmit(AUTO as never)
   await delegate($, { target: { model: 'opus' } })
   expect(passed(e)).toEqual(asWritten({ target: { model: 'opus' } }))
   expect(routeChecks(e)).toBe(1)
+  expect(e.notes.length).toBe(0)
 })
 
-test('with the lastdrop instance set up, a plain child the instance can\'t carry goes unchanged, unchecked', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, t3Instance: true })
+test('with an app without notes, a plain child in auto mode goes unchanged, unchecked', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, t3Instance: true, notes: false })
   await $.classic.UserPromptSubmit(AUTO as never)
-  const calls = [{ target: { model: 'opus', options: [{ id: 'effort', value: 'max' }] } }, { target: { model: 'claude-opus-5-5' } },
-                 { target: { model: 'opus' }, runtimeMode: 'approval-required' }, { target: { model: 'opus' }, interactionMode: 'plan' },
-                 { target: { model: 'claude-3-opus-legacy' } }]
-  for (const fields of calls) await delegate($, fields)
-  expect(passed(e)).toEqual(asWritten(...calls))
+  await delegate($, { target: { model: 'opus' } })
+  expect(passed(e)).toEqual(asWritten({ target: { model: 'opus' } }))
   expect(routeChecks(e)).toBe(0)
+  expect(e.calls.some(c => c.flag === '--delegate-note')).toBe(false)
 })
 
 for (const mode of ['auto', undefined]) {
@@ -1447,7 +1527,8 @@ for (const mode of ['auto', undefined]) {
     expect((await delegate($, { target: { model: 'sol' } })).deny)
       .toBe('lastdrop can\'t start sol through delegate_task in auto mode until its T3 provider is set up (lastdrop\'s T3 Code setting). Use the Agent tool with subagent_type: "lastdrop:sol".')
     expect(delegateCalls(e).length).toBe(2)
-    expect(routeChecks(e)).toBe(0)
+    // The plain children only: each noted after its room check.
+    expect(routeChecks(e)).toBe(2)
   })
 }
 
@@ -1495,10 +1576,10 @@ for (const error of REFUSALS) {
     expect(typeof e.store.get('t3-lastdrop:failed')).toBe('number')
     // In auto mode the old form is denied, no longer pointed at the instance: no loop.
     expect((await delegate($, { target: { model: 'sol' } })).deny).toBe('lastdrop\'s T3 instance is unavailable right now, so sol can\'t run in the background. For foreground work, use the Agent tool with subagent_type: "lastdrop:sol".')
-    // A plain child goes to T3's Claude instance unchanged, with no room check.
+    // A plain child goes to T3's Claude instance unchanged, noted after its room check.
     await delegate($)
     expect(passed(e)).toEqual(asWritten(fields, {}))
-    expect(routeChecks(e)).toBe(0)
+    expect(routeChecks(e)).toBe(1)
   })
 }
 
@@ -1528,22 +1609,31 @@ test('an error T3 gives after creating something, or none it explains, is not a 
   expect(e.store.has('t3-lastdrop:failed')).toBe(false)
 })
 
-const BACKGROUND = 'Background work in T3 Code goes to lastdrop\'s T3 instance: call delegate_task with target: { providerInstanceId: "lastdrop", model: "<model>" } and no options'
+const BACKGROUND = 'Background work in T3 Code on Claude models (fable, opus, sonnet, haiku) uses delegate_task as usual; lastdrop picks the account.'
+/** The instance paragraph as an earlier build of this branch froze it. */
+const OLD_BACKGROUND = 'Background work in T3 Code goes to lastdrop\'s T3 instance: call delegate_task with target: { providerInstanceId: "lastdrop", model: "<model>" } and no options, where <model> is fable, opus, sonnet or haiku. lastdrop picks the account.'
 
 test('in T3 Code with the lastdrop instance set up, the listing leads with background work there', async ($, on) => {
   engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' }, t3Instance: true })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${BACKGROUND}, where <model> is the name of one of the lastdrop: agent types without lastdrop:, or fable, opus, sonnet or haiku. lastdrop picks the account or provider, and effort comes from the agent's own settings. ${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent with them for foreground work.${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${BACKGROUND} For an added agent, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<name>" } and no options, where <name> is a lastdrop: agent type without lastdrop:; effort comes from the agent's own settings. ${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent with them for foreground work.${COMMAND}`)
 })
 
 test('with the lastdrop instance set up and no added agents, the listing still names the instance, and stays frozen', async ($, on) => {
   const e = engine([$, on], { env: { T3CODE_THREAD_ID: 'thread-1' }, t3Instance: true })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  const text = `${NATIVE_LISTING}\n\n${BACKGROUND}, where <model> is fable, opus, sonnet or haiku. lastdrop picks the account.`
+  const text = `${NATIVE_LISTING}\n\n${BACKGROUND}`
   expect(await listing($)).toBe(text)
   // Replayed on resume: the stored paragraph, not read as a list from before the types.
   expect(await listing($)).toBe(text)
   expect(e.store.get('listing:session-1')).toBe(text.slice(NATIVE_LISTING.length + 2))
+})
+
+test('a listing frozen with the earlier instance paragraph keeps its bytes', async ($, on) => {
+  const e = engine([$, on], { env: { T3CODE_THREAD_ID: 'thread-1' }, t3Instance: true })
+  e.store.set('listing:session-1', OLD_BACKGROUND)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${OLD_BACKGROUND}`)
 })
 
 test('outside T3, or with the instance refused, the listing doesn\'t name it', async ($, on) => {
@@ -1659,4 +1749,222 @@ test('Save Claude usage names the agent types, also when an older app sends its 
   expect(await block()).toContain('the agents the user added (the lastdrop: agent types)')
   live = { ...CATALOG, revision: 4, saveClaude: true, saveClaudeText: 'Mine.' }
   expect(await block()).toBe('Mine.')
+})
+
+// A plain child's run rides in lastdrop's notes, and the child claims it by its task.
+async function childStep($: Body[0], turnId: string, model = 'claude-opus-5-5') {
+  const chunks = []
+  for await (const chunk of $.turn.step({ turnId, index: 0, model, messageCount: 1 })) chunks.push(chunk)
+  return chunks
+}
+const CHILD = { T3CODE_THREAD_ID: 'child-1' }
+/** A parent delegates (as parent-1), then the same engine plays the child thread child-1. */
+async function delegateThenChild(e: ReturnType<typeof engine>, $: Body[0], ...calls: object[]) {
+  e.env(PARENT)
+  await $.classic.UserPromptSubmit(AUTO as never)
+  for (const fields of calls.length ? calls : [{ target: { model: 'opus', options: { effort: 'max' } } }]) await delegate($, fields)
+  e.env(CHILD)
+}
+const runs = (e: ReturnType<typeof engine>) => e.calls.filter(c => c.flag === '--agent-run').map(c => c.request)
+
+test('a noted child claims its run by its task and runs on lastdrop\'s runner', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  const id = e.notes[0]!.id
+  e.messages(child('review the diff'))
+  expect(report(await childStep($, 'turn-1'))).toBe(RESULT.text)
+  expect(runs(e)[0]).toMatchObject({ prompt: 'review the diff', id, model: 'opus', effort: 'max', description: 'review', permissionMode: 'auto', subagentType: 'general-purpose' })
+  expect(runs(e)[0]!.resume).toBeUndefined()
+  expect(runs(e)[0]!.agent).toBeUndefined()
+  expect(e.modelSteps).toBe(0)
+  expect(e.notes[0]!.thread).toBe('child-1')
+  expect(e.mcpCalls[0]).toMatchObject({ server: 't3-code', tool: 't3_thread_read', args: { threadId: 'child-1', limit: 1, maxCharsPerItem: 1 } })
+})
+
+test('a noted child\'s task may follow T3\'s role line, and a steer merged after it reaches the first run', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  e.messages([{ role: 'user', content: [{ type: 'text', text: '<system-reminder>\nctx\n</system-reminder>' },
+    { type: 'text', text: 'Act as the review sub-agent for this task.\n\nreview the diff' }, { type: 'text', text: 'stop opening windows' }] }])
+  await childStep($, 'turn-1')
+  expect(runs(e)[0]).toMatchObject({ prompt: 'Act as the review sub-agent for this task.\n\nreview the diff\n\nstop opening windows' })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a follow-up to a noted child resumes the same run, also from a new process that has only lastdrop\'s notes', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  const id = e.notes[0]!.id
+  e.messages(child('Act as the review sub-agent for this task.\n\nreview the diff'))
+  await childStep($, 'turn-1')
+  // A steer merged into the task after the first run, then a follow-up.
+  e.messages([{ role: 'user', content: [{ type: 'text', text: 'Act as the review sub-agent for this task.\n\nreview the diff' }, { type: 'text', text: 'also the tests' }] }])
+  await childStep($, 'turn-2')
+  expect(runs(e).at(-1)).toMatchObject({ prompt: 'also the tests', resume: id, id })
+  e.messages([{ role: 'user', content: [{ type: 'text', text: 'Act as the review sub-agent for this task.\n\nreview the diff' }, { type: 'text', text: 'also the tests' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] }, { role: 'user', content: [{ type: 'text', text: 'what was it?' }] }])
+  await childStep($, 'turn-3')
+  expect(runs(e).at(-1)).toMatchObject({ prompt: 'what was it?', resume: id, id })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a child process that finds its binding only in lastdrop\'s notes resumes the run', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1', env: CHILD })
+  const run = { id: 't3-old', model: 'opus' }
+  e.notes.push({ id: 't3-old', run, task: 'review the diff', parentThread: 'parent-1', createdAt: Date.now() - 60 * 60_000, thread: 'child-1' })
+  e.store.set('delegated:t3-old', { ran: true, native: false, sent: 1 })
+  e.messages(child('review the diff', { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    { role: 'user', content: [{ type: 'text', text: 'what was it?' }] }))
+  await childStep($, 'turn-2')
+  expect(runs(e)[0]).toMatchObject({ prompt: 'what was it?', resume: 't3-old', id: 't3-old', model: 'opus' })
+  expect(e.store.get('delegated-thread:child-1')).toMatchObject({ id: 't3-old' })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('two notes with the same task go to the children whose models they asked for', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $, { target: { model: 'opus' } }, { target: { model: 'sonnet' } })
+  const [opus, sonnet] = e.notes.map(n => n.id)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1', 'claude-sonnet-5-5')
+  expect(runs(e)[0]).toMatchObject({ id: sonnet, model: 'sonnet' })
+  e.env({ T3CODE_THREAD_ID: 'child-2' })
+  await childStep($, 'turn-1', 'claude-opus-5-5')
+  expect(runs(e)[1]).toMatchObject({ id: opus, model: 'opus' })
+  expect(e.notes.map(n => n.thread)).toEqual(['child-2', 'child-1'])
+})
+
+test('of two notes for the same model, the oldest goes first', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $, {}, {})
+  e.notes[1]!.createdAt = Number(e.notes[0]!.createdAt) - 1
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1', 'claude-haiku-5-5')
+  expect(runs(e)[0]!.id).toBe(e.notes[1]!.id)
+})
+
+test('an expired note is never claimed', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  e.notes[0]!.createdAt = Date.now() - 11 * 60_000
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.modelSteps).toBe(1)
+  expect(e.runCount).toBe(0)
+  expect(e.notes[0]!.thread).toBeUndefined()
+})
+
+for (const [what, lineage] of [['a thread T3 says nobody delegated', null], ['a child of another thread', 'parent-9']] as const) {
+  test(`${what} with the same text claims nothing`, async ($, on) => {
+    const e = engine([$, on], { lineage })
+    await delegateThenChild(e, $)
+    e.messages(child('review the diff'))
+    await childStep($, 'turn-1')
+    await childStep($, 'turn-1b')
+    expect(e.modelSteps).toBe(2)
+    expect(e.runCount).toBe(0)
+    expect(e.notes[0]!.thread).toBeUndefined()
+    // Asked once per process.
+    expect(e.calls.filter(c => c.flag === '--delegate-note' && c.request.op === 'list').length).toBe(1)
+  })
+}
+
+test('when T3 can\'t say whose child it is, only a single matching note is claimed', async ($, on) => {
+  const e = engine([$, on], { lineage: 'error' })
+  await delegateThenChild(e, $)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.mcpCalls.length).toBe(3)
+  expect(e.runCount).toBe(1)
+  expect(e.notes[0]!.thread).toBe('child-1')
+})
+
+test('when T3 can\'t say whose child it is and two notes match, none is claimed', async ($, on) => {
+  const e = engine([$, on], { lineage: 'error' })
+  await delegateThenChild(e, $, { target: { model: 'opus' } }, { target: { model: 'sonnet' } })
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.runCount).toBe(0)
+  expect(e.modelSteps).toBe(1)
+  expect(e.notes.every(n => n.thread === undefined)).toBe(true)
+})
+
+test('a task that only ends a longer word, or a thread that already answered, claims nothing', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  e.messages(child('please, review the diff'))
+  await childStep($, 'turn-1')
+  e.env({ T3CODE_THREAD_ID: 'child-2' })
+  e.messages(child('review the diff', { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }, { role: 'user', content: [{ type: 'text', text: 'more' }] }))
+  await childStep($, 'turn-2')
+  expect(e.runCount).toBe(0)
+  expect(e.notes[0]!.thread).toBeUndefined()
+})
+
+test('a session outside T3 never asks for notes', async ($, on) => {
+  const e = engine([$, on])
+  e.messages(child('review the diff'))
+  await mainStep($, 'turn-1')
+  expect(e.calls.some(c => c.flag === '--delegate-note')).toBe(false)
+  expect(e.modelSteps).toBe(1)
+})
+
+test('a noted child the runner hands back runs on its own model from then on', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1', noStart: true, outputs: [{ type: 'native' }] })
+  await delegateThenChild(e, $)
+  e.messages(child('review the diff'))
+  expect((await childStep($, 'turn-1'))[0]).toEqual({ kind: 'text', index: 0, text: 'built-in response' })
+  e.messages(child('review the diff', { role: 'assistant', content: [] }, { role: 'user', content: [{ type: 'text', text: 'more' }] }))
+  await childStep($, 'turn-2')
+  expect(e.runCount).toBe(1)
+  expect(e.modelSteps).toBe(2)
+})
+
+test('a noted child\'s conversation is never compacted', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect((await $.session.compact({ trigger: 'manual', messages: [MESSAGE] } as never)).skip).toBe('lastdrop runs this thread’s agent elsewhere; its conversation stays whole.')
+})
+
+test('a failing note ledger leaves the thread on its own model, and the parent\'s call unchanged', async ($, on) => {
+  const e = engine([$, on], { env: PARENT, notesFail: true, lineage: 'parent-1' })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  await delegate($)
+  expect(passed(e)).toEqual(asWritten({}))
+  e.env(CHILD)
+  e.messages(child('review the diff'))
+  expect(report(await childStep($, 'turn-1'))).toBe('built-in response')
+  expect(e.modelSteps).toBe(1)
+})
+
+// delegate_task's own description names the added agents while the instance is set up.
+async function described($: Body[0]) {
+  return (await $.tool.describe({ tool: DELEGATE, description: 'Delegate a task.', provider: { plugin: 'mcp:t3-code', tier: 'user' } } as never)).description
+}
+const SUPPLEMENT = '\n\nThe agents the user added to lastdrop (sol, argon) run only with target.providerInstanceId "lastdrop" and target.model set to the agent\'s name; Claude models need no providerInstanceId.'
+
+test('delegate_task\'s description names the added agents and the instance, the same at every read', async ($, on) => {
+  engine([$, on], { catalog: CATALOG, t3Instance: true })
+  expect(await described($)).toBe(`Delegate a task.${SUPPLEMENT}`)
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect(await described($)).toBe(`Delegate a task.${SUPPLEMENT}`)
+})
+
+test('without the instance or added agents, delegate_task\'s description is T3\'s', async ($, on) => {
+  engine([$, on], { catalog: CATALOG })
+  expect(await described($)).toBe('Delegate a task.')
+})
+
+test('a change to the added agents or the instance invalidates delegate_task\'s description; an unchanged catalog doesn\'t', async ($, on) => {
+  let live: object = { ...CATALOG, t3Instance: true }
+  const e = engine([$, on], { liveCatalog: () => live })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect(e.invalidated.filter(x => x === 'tool.describe').length).toBe(0)
+  live = { ...CATALOG, t3Instance: false }
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect(e.invalidated.filter(x => x === 'tool.describe').length).toBe(1)
+  expect(await described($)).toBe('Delegate a task.')
 })

@@ -20,6 +20,7 @@ enum Entry {
         if CommandLine.arguments.contains("--agent-stop") { AgentRun.stopMain() }
         if CommandLine.arguments.contains("--agent-selftest") { SelfTest.main() }
         if CommandLine.arguments.contains("--agent-catalog") { AgentCatalog.printMain() }
+        if CommandLine.arguments.contains("--delegate-note") { DelegateNotes.main() }
         if CommandLine.arguments.contains("--agents") { AgentsCommand.main() }
         if let i = CommandLine.arguments.firstIndex(of: "--update"), i + 1 < CommandLine.arguments.count {
             UpdateCheck.main(as: CommandLine.arguments[i + 1], install: CommandLine.arguments.contains("--install"))

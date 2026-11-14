@@ -262,5 +262,44 @@ Review fixes (Fable, same day):
   isn't built. So a user-started thread runs like a child: no T3 tools, and a rollback (a bare `session/new`)
   starts a new run without the conversation. Documented in docs/agents.md and the app's T3 setting
   ("for background tasks"). Ask T3 for a child marker in `session/new` `_meta`, with the Phase 2 rollback request.
+Plain Claude children, revised again (same day): the deny-once above is gone (the user rejected it: a refused call
+and the prompt written twice in the parent's context). A plain Claude child now goes to T3 unchanged in every mode,
+and its run rides beside the call instead of in it:
+
+- **Parent.** On T3's Claude instance, with no model or a Claude one (alias or full id), and room (`--agent-route`,
+  as the tag path asked): before `next(e)` the plugin writes a note with what the tag carried (`run`: id, model,
+  effort, description, permission mode; no agent), the parent's `T3CODE_THREAD_ID`, the task as given, the parent's
+  model and `createdAt`. T3 answering `isError`, a deny, or a throw drops the note (only if unclaimed: a child that
+  claimed it keeps it). No room, or a note that can't be written: the call still goes unchanged, an ordinary T3
+  Claude thread. The tag is no longer written for plain children in any mode; it stays for added agents outside auto
+  mode without the instance, and for apps without notes (below). `untag` still reads tagged children.
+- **Ledger.** `lastdrop --delegate-note` (`DelegateNotes.swift`): one JSON request on stdin (`put`, `drop`, `list`
+  with the thread, `claim` id+thread), one line out. The file is `<support>/delegate-notes.json`, every change under
+  `delegate-notes.lock` (flock) and written atomically, so it is shared by every account profile (parent and child may
+  run under different `CLAUDE_CONFIG_DIR`s; `$.store` isn't shared). Unclaimed notes go after 10 minutes (the plugin
+  checks `createdAt` too), claimed ones after 30 days, at most 500. A claim binds once; the same thread claiming again
+  gets it back. `--agent-catalog` says `delegateNotes: true`; an older app (which would open its window for an
+  unknown flag) gets the earlier behaviour: plain children unchanged in auto mode, tagged otherwise.
+- **Child.** `delegatedChild` without a tag, in T3 (`T3CODE_THREAD_ID` set): the binding from `$.store`
+  (`delegated-thread:<thread>`), else `list` (a note bound to this thread: a follow-up in a later process, maybe on
+  another account). Only a first turn (no assistant message yet) claims: an open, unexpired note whose task ends the
+  joined first user blocks (whole, or after a line break: T3's "Act as the … sub-agent" line before it, a merged steer
+  after it, the same blocks loop as the tag). Among several, the one whose model family is the child's `e.model`
+  (no model: the parent's), then the oldest. From there it is the tag path's code: same run, `delegated:<id>` state,
+  resume, hand-back. One `list` per thread process; a result of none is kept in memory.
+- **Lineage.** The child asks T3 for its own thread with `$.mcp.call("t3-code", "t3_thread_read", { threadId, limit:
+  1, maxCharsPerItem: 1 })` (a read: only a caller reading its own child's result marks it delivered), up to 3 times
+  500 ms apart since T3's tools may still be connecting. `relationshipToParent: "subagent"`: only notes whose
+  `parentThread` is its `parentThreadId`. Anything else (a thread the user started, a fork): nothing is claimed, so
+  a user thread that shares the text keeps its own model. T3 not answering: claim only when exactly one note matches.
+- **What the model reads.** The T3 listing paragraph with the instance set up now says Claude models use delegate_task
+  as usual (lastdrop picks the account) and added agents need `providerInstanceId: "lastdrop"`. Paragraphs frozen
+  earlier keep their bytes (any frozen text starting "Background work in T3 Code" is ours). `delegate_task`'s own
+  description (`tool.describe`) gains one sentence naming the added agents and the instance while the instance is set
+  up and agents exist; built from the catalog's names only, invalidated when that sentence changes.
+- **The ACP server** still runs plain Claude models on the instance; nothing points there any more.
+- Not tried in a live T3 yet: the `$.mcp.call` server name and timing at a child's first turn, and T3's exact first
+  message for a Claude child, come from T3's source and the tag path's evidence.
+
 - `CommandJudgeTests` hang now and then in a full `swift test` on `main` too (unrelated).
   `AntigravityBackendTests.testSIGTERMEndsTheReportedChildPromptly` can fail under heavy load.

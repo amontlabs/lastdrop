@@ -281,6 +281,8 @@ struct AgentCatalog: Codable, Equatable, Sendable {
     static func pluginLine(catalog: AgentCatalog = load(), t3Instance: Bool = T3Settings.acpStatus() == .ready) -> Data {
         var json = catalog.pluginJSON()
         json["t3Instance"] = t3Instance
+        // `lastdrop --delegate-note` exists: the plugin notes plain T3 children there instead of tagging their task.
+        json["delegateNotes"] = true
         return (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
     }
 
