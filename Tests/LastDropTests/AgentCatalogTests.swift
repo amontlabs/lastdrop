@@ -114,10 +114,9 @@ final class AgentCatalogTests: LastDropTestCase {
     }
 
     func testAgentsAreExtraModelsForTheAgentTool() {
-        XCTAssertEqual(AgentCatalog.defaultSavingInstruction, "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the models the user added to the Agent tool's model parameter, picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added model fits.")
-        XCTAssertFalse(AgentCatalog.defaultSavingInstruction.contains("lastdrop"))
-        XCTAssertEqual(AgentCatalog(agents: [agent("sol")]).agent("sol")?.name, "sol")
-        XCTAssertEqual(AgentCatalog(agents: [agent("sol")]).agent("lastdrop:sol")?.name, "sol")   // runs started before the update
+        XCTAssertEqual(AgentCatalog.defaultSavingInstruction, "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the agents the user added (the lastdrop: agent types), picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added agent fits.")
+        XCTAssertEqual(AgentCatalog(agents: [agent("sol")]).agent("sol")?.name, "sol")   // runs started before the types
+        XCTAssertEqual(AgentCatalog(agents: [agent("sol")]).agent("lastdrop:sol")?.name, "sol")   // its type
     }
 
     func testReadOnlyRolesAddTheirBriefToTheInstructions() {

@@ -41,58 +41,90 @@ let saveClaude = false
 
 const SAVING_CONTEXT = 'lastdropSaveClaude'
 /** The instruction when lastdrop sends none (an older app): lastdrop sends its default, or the user's edit. */
-const SAVING_INSTRUCTION = "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the models the user added to the Agent tool's model parameter, picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added model fits."
+const SAVING_INSTRUCTION = "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the agents the user added (the lastdrop: agent types), picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added agent fits."
+/** The default of apps from when added agents were a `model`: it names a form that is now refused. */
+const OLD_SAVING_INSTRUCTION = "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the models the user added to the Agent tool's model parameter, picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added model fits."
 let savingInstruction = SAVING_INSTRUCTION
 let nativeTasks: boolean | undefined
-/** Whether the app puts agents in the Agent tool's model parameter (an older one doesn't). */
+/** Whether the app knows added agents (an older one doesn't). */
 let agentModels = false
 
-/** Claude's own Agent models: any other `model` names an agent of lastdrop's list. */
+/** Claude's own Agent models. */
 const NATIVE = new Set(['sonnet', 'opus', 'haiku', 'fable'])
-/** The types an added agent runs as; Explore and Plan make it read-only. */
+/** The built-in types a plain reroute may name; Explore and Plan make it read-only. */
 const AGENT_TYPES = new Set([undefined, 'general-purpose', 'claude', 'Explore', 'Plan'])
 const ROLES = new Set(['Explore', 'Plan'])
-/** The agent types the engine offered the model: a custom one named like an added model wins over it. */
+/** The agent types the engine offered the model: a custom one named like an added agent keeps its name. */
 const offered = new Set<string>()
 
-/** The types lastdrop registered before agents became a `model`; a call or a resume naming one is refused. */
+/**
+ * Each added agent is an agent type of this plugin, `lastdrop:<name>`, so Claude calls it with
+ * `subagent_type` and the call reaches the engine exactly as the model wrote it: auto mode refuses any call a
+ * hook changed after it was reviewed.
+ */
 const TYPE_PREFIX = 'lastdrop:'
 
 function owns(type: unknown): type is string {
   return typeof type === 'string' && type.startsWith(TYPE_PREFIX)
 }
 
+/**
+ * The registered types' system prompt. It never runs: lastdrop answers every step of a claimed agent in
+ * `turn.step`, and `agent.spawn` refuses a spawn of one that no Agent call claimed.
+ */
+const TYPE_PROMPT = 'You are a placeholder for an agent the user added to lastdrop. lastdrop answers every turn of this agent on its own provider and model; this prompt is never sent to a model.'
+
+/** An added agent's line in the listing: what it is for and where it runs. */
+function typeDescription(agent: Defined): string {
+  return `${agent.description.trim()} (${agent.summary})`
+}
+
+/** The types this process registered, by catalog name, with the description each got. */
+const registered = new Map<string, string>()
+
+/**
+ * Registers each enabled agent whose type is missing or reads differently. An unchanged one is left alone, so
+ * the listing (and the prompt cache) stays as it is. A type that left the catalog stays registered and
+ * `agent.offer` hides it: the engine has no way to drop one.
+ */
+async function registerTypes($: EngineInterface): Promise<void> {
+  if (!agentModels) return
+  for (const [name, agent] of catalog) {
+    const description = typeDescription(agent)
+    if (registered.get(name) === description) continue
+    try {
+      await $.agent.register({ name, description, prompt: TYPE_PROMPT })
+      registered.set(name, description)
+    } catch (error) {
+      // Before the session binds, or a name the schema refuses: the next sync tries again.
+      $.ui.log(`lastdrop: registering ${TYPE_PREFIX}${name} failed: ${String(error)}`, { to: 'debug' })
+    }
+  }
+}
+
+/** Whether `lastdrop:<name>` is an added agent now. */
+function isAdded(name: string): boolean {
+  return agentModels && catalog.has(name)
+}
+
+/** What the model may call instead, for a refusal. */
+function availableTypes(): string {
+  const names = agentModels ? [...catalog.keys()].map(name => `${TYPE_PREFIX}${name}`) : []
+  return names.length > 0 ? `The user's added agents are the agent types ${names.join(', ')}.` : 'The user has no added agents.'
+}
+
 /** The start of Claude's list of agent types, in the attachment that carries it. */
 const LISTING = 'Available agent types'
 
-/** The most of the list a session's store entries keep: the store has a size limit. */
-const LIST_BYTES = 8_000
-
-/** The agents of lastdrop's list as the model reads them: one line each, what it is for and where it runs. */
-function listText(): string {
-  if (!agentModels) return ''
-  const lines: string[] = []
-  let bytes = 0
-  for (const [name, agent] of catalog) {
-    const line = `- ${name}: ${agent.description.trim()} (${agent.summary})`
-    bytes += new TextEncoder().encode(line).length + 1
-    if (bytes > LIST_BYTES) break
-    lines.push(line)
-  }
-  return lines.join('\n')
-}
-
-/** What the model reads of the list: appended to the native listing, and in a note when it changes. */
-const ADDED = "The Agent tool's model parameter also accepts these models the user added:\n"
+/** What the listing gains for the main loop, once per session: the types speak for themselves. */
+const TYPES = 'The lastdrop: agent types are agents the user added; each runs on the provider and model its description names.'
 /** In T3 Code, whose delegate_task runs background children: lastdrop runs those too (see DELEGATE). */
-const ADDED_T3 = "The Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n"
-const CHANGED = "The models the user added to the Agent tool's model parameter changed. It now accepts:\n"
-const REMOVED = "The models the user added to the Agent tool's model parameter were removed."
-/** Ends the frozen listing, so the command's instructions cost nothing until they're read. */
+const TYPES_T3 = "The lastdrop: agent types are agents the user added; each runs on the provider and model its description names. delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work."
+/** Ends the frozen text, so the command's instructions cost nothing until they're read. */
 const POINTER = '\nOnly if the user asks to change these, run '
+/** The engine announces added and removed types; a description changed in place it doesn't. */
+const CHANGED = "These agents the user added now read:\n"
 
-/** Sessions whose first-prompt grace was used, for when the store refuses to keep it. */
-const graced = new Set<string>()
 const KEPT_SESSIONS = 100
 const KEPT_ROUTES = 200
 
@@ -132,7 +164,7 @@ async function running($: EngineInterface): Promise<Set<string>> {
 async function put($: EngineInterface, key: string, value: unknown): Promise<boolean> {
   const colon = key.indexOf(':') + 1
   const prefix = key.slice(0, colon)
-  const limit = prefix === 'listing:' || prefix === 'announced:' || prefix === 'grace:' ? KEPT_SESSIONS : KEPT_ROUTES
+  const limit = prefix === 'listing:' || prefix === 'announced:' ? KEPT_SESSIONS : KEPT_ROUTES
   try {
     await prune($, prefix, limit - 1, await running($))
     await $.store.set(key, value)
@@ -178,13 +210,13 @@ async function markAdded($: EngineInterface, id: string): Promise<boolean> {
 /** A session's listing starts again, from the list as it reads now. */
 async function resetListing($: EngineInterface): Promise<void> {
   const id = await $.session.id()
-  graced.delete(id)
+  // `grace:` was kept by earlier versions.
   for (const prefix of ['listing:', 'announced:', 'grace:']) await $.store.delete(`${prefix}${id}`)
 }
 
 /**
- * Reads lastdrop's list: its enabled agents, by name, from the next turn on. A change reaches the model
- * through `prompt.submit`'s note, since the listing it already read stays as it was.
+ * Reads lastdrop's list, its enabled agents by name, and registers their types: from the next turn on. The
+ * engine announces types added and removed; `prompt.submit`'s note tells a changed description.
  */
 async function syncCatalog($: EngineInterface): Promise<void> {
   let text = ''
@@ -196,46 +228,37 @@ async function syncCatalog($: EngineInterface): Promise<void> {
   }
   nativeTasks = parsed.nativeTasks === true
   agentModels = parsed.agentModels === true
-  if (parsed.revision !== undefined && parsed.revision === revision) return
-  catalog = new Map((parsed.agents ?? []).map(agent => [agent.name, agent] as const))
-  revision = parsed.revision
-  saveClaude = parsed.saveClaude === true
-  savingInstruction = parsed.saveClaudeText?.trim() || SAVING_INSTRUCTION
+  if (parsed.revision === undefined || parsed.revision !== revision) {
+    catalog = new Map((parsed.agents ?? []).map(agent => [agent.name, agent] as const))
+    revision = parsed.revision
+    saveClaude = parsed.saveClaude === true
+    const text = parsed.saveClaudeText?.trim()
+    savingInstruction = !text || text === OLD_SAVING_INSTRUCTION ? SAVING_INSTRUCTION : text
+  }
+  await registerTypes($)
 }
 
 /**
- * What the model should be told about the list now, if it differs from what it last read (the frozen
- * listing's, or the last note's). Without a frozen listing the native format probably changed: tell it all.
+ * The added agents whose description changed since the model last read them, as a note; undefined when none
+ * did. The first prompt of a session, or the first after a compaction, only takes note of what it reads.
  */
 async function listNote($: EngineInterface): Promise<string | undefined> {
   const id = await $.session.id()
-  const list = listText()
-  const frozen = await $.store.get(`listing:${id}`)
-  const announced = await $.store.get(`announced:${id}`)
-  const known = typeof announced === 'string' ? announced : typeof frozen === 'string' ? frozen.split(POINTER)[0] : undefined
-  if (known === undefined) {
-    // The first prompt of a session, or the first after a compaction, comes before the listing is built.
-    if (!graced.has(id) && (await $.store.get(`grace:${id}`)) !== true) {
-      graced.add(id)
-      await put($, `grace:${id}`, true)
-      return undefined
-    }
-    if (list === '' || !(await $.tool.list()).some(tool => tool.name === 'Agent')) return undefined
-    if (!listingBroken) {
-      listingBroken = true
-      broken = "lastdrop: Claude Code's agent list changed; added agents are announced in a note instead"
-      $.ui.log(broken, { to: 'debug' })
-      await showStatus($)
-    }
-  } else if (known === list) {
-    return undefined
-  }
-  await put($, `announced:${id}`, list)
-  return list === '' ? REMOVED : `${CHANGED}${list}`
+  const current: Record<string, string> = {}
+  if (agentModels) for (const [name, agent] of catalog) current[name] = typeDescription(agent)
+  const stored = await $.store.get(`announced:${id}`)
+  // An earlier version stored the list's text: it starts again from what the model reads now.
+  const known = stored !== null && typeof stored === 'object' && !Array.isArray(stored) ? stored as Record<string, unknown> : undefined
+  const changed = known ? Object.entries(current).filter(([name, line]) => name in known && known[name] !== line) : []
+  if (JSON.stringify(known) !== JSON.stringify(current)) await put($, `announced:${id}`, current)
+  if (changed.length === 0) return undefined
+  return `${CHANGED}${changed.map(([name, line]) => `- ${TYPE_PREFIX}${name}: ${line}`).join('\n')}`
 }
 
 type Request = Record<string, unknown>
-type Route = { request: Request; description: string; toolUseId: string; ran: boolean; cursor: number; handback?: boolean; resumePrompt?: string; error?: string }
+/** `worktree`: the engine's worktree the agent runs in, for the report's header (the runner made none). */
+type Route = { request: Request; description: string; toolUseId: string; ran: boolean; cursor: number; handback?: boolean; resumePrompt?: string; error?: string
+               worktree?: { path: string; branch?: string } }
 const claims = new Map<string, Request>()
 const routes = new Map<string, Route>()
 /** A native step can arrive before its spawn's reply has crossed the worker boundary. */
@@ -508,7 +531,7 @@ async function* live<T>(work: (report: (text: string) => void) => Promise<T>, sh
 /**
  * An added agent's spawn with its name as the subagent's model. Claude Code stamps each of the subagent's
  * messages with its step model, and hosts (T3 Code) label the subagent by it; lastdrop answers every step,
- * so the name only labels and never reaches a model. `tool.call` can't pass it: the Agent tool's schema
+ * so the name only labels and never reaches a model. The call itself names no model: the Agent tool's schema
  * allows Claude's models only, while `agent.spawn` takes any id. A resumed agent keeps it; the engine
  * refuses a hook's model on a resume.
  */
@@ -516,9 +539,14 @@ function labelled<E extends { model?: string }>(e: E, agent: unknown): E {
   return typeof agent === 'string' && agent !== '' ? { ...e, model: agent } : e
 }
 
-/** Where an added agent ran and what it could not do, for the report's first lines; a reroute gets only its worktree. */
-function header(request: Request, line: Line): string {
-  const where = line.worktreePath ? `Worktree: ${String(line.worktreePath)}${line.worktreeBranch ? ` (branch ${String(line.worktreeBranch)})` : ''}.` : ''
+/**
+ * Where an added agent ran and what it could not do, for the report's first lines; a reroute gets only its
+ * worktree: the engine's (`made`), or one an older runner made.
+ */
+function header(request: Request, line: Line, made?: Route['worktree']): string {
+  const path = line.worktreePath ?? made?.path
+  const branch = line.worktreePath ? line.worktreeBranch : made?.branch
+  const where = path ? `Worktree: ${String(path)}${branch ? ` (branch ${String(branch)})` : ''}.` : ''
   if (request.agent === undefined) return where ? `${where}\n\n` : ''
   if (!line.model) return ''
   const worktree = where ? ` ${where}` : ''
@@ -542,12 +570,29 @@ function usageOf(line: Line, model: string): TurnUsage | null {
            cache_creation_input_tokens: Number(context.cacheCreationInputTokens ?? 0) }
 }
 
+/**
+ * A call's `isolation: "worktree"` reaches the engine unchanged, so the engine makes the subagent's worktree
+ * (`.claude/worktrees/agent-<id>`) and removes it if the agent changed nothing. `agent.spawn` doesn't carry
+ * its path, but the subagent's own loop runs there: its `turn.step` reads it as the session's folder. The
+ * runner then works in that worktree and makes none of its own. If the folder is still the parent's, no
+ * worktree was made, and the runner makes its own as before.
+ */
+async function engineWorktree($: EngineInterface, route: Route): Promise<void> {
+  const cwd = await $.session.cwd()
+  if (cwd === route.request.cwd) return
+  const branch = await $.process.run(['git', '-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'])
+    .then(result => (result.exitCode === 0 ? result.stdout.trim() || undefined : undefined), () => undefined)
+  route.request = { ...route.request, cwd, isolation: undefined }
+  route.worktree = { path: cwd, branch }
+}
+
 /** One remote run per native turn; the engine schedules new turns for messages queued while it worked. */
 async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, signal: AbortSignal,
                           report: (text: string) => void = () => {}): Promise<Line> {
   const id = e.agentId!
   if (route.error) throw new Error(route.error)
   if (e.index !== 0) throw new Error('Claude Code requested another model step after lastdrop’s handback.')
+  if (!route.ran && route.request.isolation === 'worktree') await engineWorktree($, route)
   const previous = route.cursor
   const message = await inbox($, id, route)
   const nextPrompt = route.resumePrompt || message
@@ -612,7 +657,6 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
 
 /** What the self-test found broken on this Claude Code version, shown until a run passes. */
 let broken: string | undefined
-let listingBroken = false
 
 /**
  * Checks, once per Claude Code version, that subagents on other accounts still work (`lastdrop
@@ -961,26 +1005,26 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // The model reads the added agents beside Claude's own list of agent types. Replayed messages are
-  // resolved again (on resume), so the text is frozen per session: the prompt cache keeps its prefix.
+  // The engine lists the added agents as types. The main loop's listing gains one frozen paragraph: what the
+  // lastdrop: types are and where the command to change them is. Replayed messages are resolved again (on
+  // resume), so it is stored per session and the prompt cache keeps its prefix.
   on('prompt.attachment', { type: 'agent_listing_delta' }, async ($, e, next) => {
     if (e.agentId !== undefined || e.origin.kind !== 'engine' || !e.text.startsWith(LISTING)) return next(e)
     const answer = await next(e)
     if (answer.text === null) return answer
     if (revision === undefined) await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
-    // An app that doesn't know added agents advertises none, even where a frozen listing has them: on a
-    // resume after a downgrade the stored message changes, which only a rare downgrade can cause.
+    // An app that doesn't know added agents gets nothing, even where a frozen text has it: on a resume after
+    // a downgrade the stored message changes, which only a rare downgrade can cause.
     if (!agentModels) return answer
     const id = await $.session.id()
-    let list = await $.store.get(`listing:${id}`)
-    if (typeof list !== 'string') {
-      const current = listText()
-      list = current === '' ? '' : `${current}${POINTER}${await runner($)} --agents --help`
-      // A store that refuses leaves this request on the current list; the next one tries again.
-      if (await put($, `listing:${id}`, list) && (await $.store.get(`announced:${id}`)) === undefined) await put($, `announced:${id}`, current)
+    let text = await $.store.get(`listing:${id}`)
+    if (typeof text !== 'string') {
+      const types = (await $.env.get('T3CODE_THREAD_ID')) ? TYPES_T3 : TYPES
+      text = catalog.size === 0 ? '' : `${types}${POINTER}${await runner($)} --agents --help`
+      // A store that refuses leaves this request on the current text; the next one tries again.
+      await put($, `listing:${id}`, text)
     }
-    const added = (await $.env.get('T3CODE_THREAD_ID')) ? ADDED_T3 : ADDED
-    return list === '' ? answer : { ...answer, text: `${answer.text}\n\n${added}${list}` }
+    return text === '' ? answer : { ...answer, text: `${answer.text}\n\n${text}` }
   }).catch(($, e, next) => next(e))
 
   // A compaction builds the listing again. A precomputed one installs later, with no `session.compact`
@@ -1000,7 +1044,7 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // A change of the list reaches the model once, beside the prompt that follows it.
+  // A changed description reaches the model once, beside the prompt that follows it.
   on('prompt.submit', async ($, e, next) => {
     await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
     const note = await listNote($)
@@ -1014,13 +1058,15 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'agents-elsewhere', description: 'Show the subagents lastdrop runs on your other accounts and providers' })
+    const answer = await next(e)
+    // After `next`: types register once the session is bound, and the first listing has them.
     await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
     void selfTest($).catch(error => {
       broken = `lastdrop: its self-test could not run (${String(error)})`
       $.ui.log(broken, { to: 'debug' })
       $.ui.toast(broken, { timeoutMs: 15_000 })
     })
-    return next(e)
+    return answer
   })
 
   on('command.run', { command: 'agents-elsewhere' }, async $ => {
@@ -1028,69 +1074,64 @@ export const register: Register = on => {
     return { text: 'Opened the pane of agents running on your other accounts.' }
   })
 
-  // Which types the engine offers, so a custom agent type named like an added model keeps its name.
+  // A type whose agent left the catalog stays registered: it is hidden, from the listing and from dispatch,
+  // and the engine tells the model it is no longer available. The engine's offers also say which custom
+  // types exist, so one named like an added agent keeps its name.
   on('agent.offer', async ($, e, next) => {
+    if (owns(e.agent) && !isAdded(e.agent.slice(TYPE_PREFIX.length))) return { isOffered: false }
     const answer = await next(e)
     if (answer.isOffered) offered.add(e.agent)
     return answer
   }).catch(($, e, next) => next(e))
 
+  // The call goes to the engine exactly as the model wrote it, or is refused: auto mode refuses a call a hook
+  // changed. An added agent is its own type, and a worktree is the engine's (see engineWorktree).
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     if (e.subagent_type === 'fork') return next(e)
-    if (owns(e.subagent_type)) {
-      return { deny: `lastdrop's agents are no longer agent types. Call the Agent tool with model: "${e.subagent_type.slice(TYPE_PREFIX.length)}" instead.` }
-    }
     let agent: string | undefined
-    let type = e.subagent_type
-    // The natural mistake: the name of an added model as the type. Not when a custom agent type has that name.
-    if (typeof type === 'string' && !AGENT_TYPES.has(type) && !offered.has(type)) {
-      if (!catalog.has(type)) await syncCatalog($)
-      if (agentModels && catalog.has(type)) {
-        // After a reload no listing has been seen yet, so a custom type of this name can't be ruled out.
-        if (offered.size === 0) return { deny: `${type} is a model. Use model: "${type}".` }
-        if (e.model !== undefined && e.model !== type) {
-          return { deny: `${type} is a model. Use model: "${type}", or model: "${String(e.model)}" with a Claude agent type.` }
-        }
-        agent = type
-        type = 'general-purpose'
-      }
-    }
-    if (agent !== undefined || (typeof e.model === 'string' && !NATIVE.has(e.model))) {
-      agent ??= String(e.model)
-      let fresh = false
-      if (!agentModels) { await syncCatalog($); fresh = true }
-      if (!agentModels) return { deny: 'Update the lastdrop app: this one does not support added agents in the Agent tool’s model parameter.' }
-      if (!catalog.has(agent) && !fresh) await syncCatalog($)
-      if (!catalog.has(agent)) {
-        const added = catalog.size > 0 ? `, or: ${[...catalog.keys()].join(', ')}` : ''
-        return { deny: `Model ${agent} isn't available. Use ${[...NATIVE].join(', ')}${added}.` }
-      }
+    const type = e.subagent_type
+    if (owns(type)) {
+      agent = type.slice(TYPE_PREFIX.length)
+      if (!isAdded(agent)) await syncCatalog($)
+      if (!agentModels) return { deny: 'Update the lastdrop app: this one does not support added agents.' }
+      if (!isAdded(agent)) return { deny: `Agent type ${type} isn't available. ${availableTypes()}` }
       if (e.agentId !== undefined || e.isolation === 'remote' || e.name !== undefined) {
-        return { deny: `lastdrop's agents (${agent}) run only from the main session, unnamed, without remote isolation.` }
+        return { deny: `lastdrop's agents (${type}) run only from the main session, unnamed, without remote isolation.` }
       }
-      if (!AGENT_TYPES.has(type)) return { deny: `${agent} runs only as general-purpose, Explore or Plan.` }
+      if (e.model !== undefined) return { deny: `${type} runs on its own model. Call it without model.` }
+    } else {
+      // The forms from when added agents were a `model`, and the natural mistake of the bare name as the type.
+      // A custom agent type with the name keeps it.
+      const model = typeof e.model === 'string' && !NATIVE.has(e.model) ? e.model : undefined
+      const bare = typeof type === 'string' && !AGENT_TYPES.has(type) && !offered.has(type) ? type : undefined
+      if ((model !== undefined && !isAdded(model)) || (bare !== undefined && !isAdded(bare))) await syncCatalog($)
+      const added = [bare, model].find(name => name !== undefined && isAdded(name))
+      if (added !== undefined) {
+        return { deny: `${added} is an agent type: call the Agent tool with subagent_type: "${TYPE_PREFIX}${added}" and no model. It runs as a general agent, never as Explore or Plan.` }
+      }
+      if (model !== undefined) return { deny: `Model ${model} isn't available. Use ${[...NATIVE].join(', ')}. ${availableTypes()}` }
+      if (e.agentId !== undefined || e.isolation === 'remote' || e.name !== undefined) return next(e)
     }
-    if (e.agentId !== undefined || e.isolation === 'remote' || e.name !== undefined) return next(e)
     const unknown = Object.keys(e).filter(key => !AGENT_KEYS.has(key))
     if (unknown.length > 0 || !ISOLATIONS.has(e.isolation)) {
       const what = unknown.length > 0 ? `field${unknown.length === 1 ? '' : 's'} ${unknown.map(k => `\`${k}\``).join(', ')}`
         : `isolation \`${String(e.isolation)}\``
       return { deny: `lastdrop doesn't handle the Agent tool's ${what} yet, so it can't run this agent. Tell the user: lastdrop's plugin needs updating for it.` }
     }
+    // The runner reads an added agent as a general-purpose one, as before it was a type.
     const request: Request = {
-      prompt: e.prompt, description: e.description, subagentType: type, model: agent ? undefined : e.model,
+      prompt: e.prompt, description: e.description, subagentType: agent ? 'general-purpose' : type, model: agent ? undefined : e.model,
       effort: e.effort, isolation: e.isolation, cwd: await $.session.cwd(), permissionMode,
       parentModel: await $.session.model(), agent,
-      role: ROLES.has(String(type)) ? type : undefined,
+      role: !agent && ROLES.has(String(type)) ? type : undefined,
     }
     if (await admission($, request) === 'no_room') {
       return agent ? { deny: `lastdrop found nowhere to run ${agent}.` } : next(e)
     }
     claims.set(e.tool_use_id, request)
     try {
-      // The shell is a native task that validates the call; the remote worker alone needs the model's
-      // `model` and a worktree.
-      return await next({ ...e, subagent_type: type, model: agent ? undefined : e.model, isolation: e.isolation === 'worktree' ? undefined : e.isolation })
+      // Unchanged: the engine validates the call, creates its task (and its worktree), and agent.spawn claims it.
+      return await next(e)
     } finally {
       claims.delete(e.tool_use_id)
     }
@@ -1159,6 +1200,10 @@ export const register: Register = on => {
     if (!e.resume && special && claims.get(e.tool_use_id)?.agent !== undefined) {
       return { deny: `lastdrop's agents (${String(claims.get(e.tool_use_id)?.agent)}) run only from the main session's Agent tool.` }
     }
+    if (!e.resume && owns(e.subagentType) && claims.get(e.tool_use_id)?.agent === undefined) {
+      // Its prompt is a placeholder: only lastdrop's runner may answer it.
+      return { deny: `lastdrop's agents (${e.subagentType}) run only from the main session's Agent tool.` }
+    }
     if (special && !e.resume) return next(e)
     if (e.resume) {
       const id = e.resume.agentId
@@ -1178,7 +1223,7 @@ export const register: Register = on => {
     const claim = claims.get(e.tool_use_id)
     if (!claim) return next(e)
     const request: Request = {
-      ...claim, subagentType: e.subagentType, model: claim.agent ? undefined : e.model ?? claim.model,
+      ...claim, subagentType: claim.agent ? claim.subagentType : e.subagentType, model: claim.agent ? undefined : e.model ?? claim.model,
       cwd: e.cwd ?? claim.cwd, permissionMode: e.permissionMode ?? claim.permissionMode,
       parentModel: e.parentModel, background: e.background,
     }
@@ -1233,7 +1278,7 @@ export const register: Register = on => {
       active.add(e.agentId)
       result = yield* live(report => remoteTurn($, e, route, next.signal, report), shown)
       native = result.type === 'native'
-      if (!native) lead = header(route.request, result)
+      if (!native) lead = header(route.request, result, route.worktree)
     } catch (error) {
       if (next.signal.aborted) return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
       result = { type: 'result', isError: true, text: `lastdrop agent failed: ${String(error)}` }

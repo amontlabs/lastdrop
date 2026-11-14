@@ -19,8 +19,9 @@ const CATALOG = { revision: 3, agents: [
   { name: 'sol', description: 'Reviews: hard bugs.', provider: 'codex', summary: 'Codex · gpt-6.1-sol · high', prompt: 'You are sol.' },
   { name: 'argon', description: 'Advisor: trade-offs.', provider: 'antigravity', summary: 'Antigravity · gemini-4-argon', prompt: 'You are argon.' },
 ] }
-const LIST = '- sol: Reviews: hard bugs. (Codex · gpt-6.1-sol · high)\n- argon: Advisor: trade-offs. (Antigravity · gemini-4-argon)'
-const ADDED = "The Agent tool's model parameter also accepts these models the user added:\n"
+const TYPES = 'The lastdrop: agent types are agents the user added; each runs on the provider and model its description names.'
+const SOL = 'Reviews: hard bugs. (Codex · gpt-6.1-sol · high)'
+const ARGON = 'Advisor: trade-offs. (Antigravity · gemini-4-argon)'
 const POINTER = '\nOnly if the user asks to change these, run '
 const COMMAND = `${POINTER}${new URL('..', import.meta.url).pathname.replace(/\/$/, '')}/../../../MacOS/lastdrop --agents --help`
 const NATIVE_LISTING = 'Available agent types for the Agent tool:\n- general-purpose: Does things.'
@@ -42,7 +43,10 @@ function engine([$test, on]: Body, options: Options = {}) {
   const statuses: (string | undefined)[] = []
   const submitted: (readonly string[] | undefined)[] = []
   const invalidated: string[] = []
+  const registered: { name: string; description: string; prompt: string }[] = []
   const store = new Map<string, unknown>()
+  // The session's folder as a hook reads it: a worktree subagent's own loop reads its worktree.
+  let cwd = '/work'
   const context = (value: Message[]) => options.handback === false ? value : value.map((m, i) =>
     i === 0 ? { ...m, content: [...m.content, { type: 'text', text: HANDBACK }] } : m)
   let messages: Message[] = context([{ role: 'user', content: [{ type: 'text', text: 'initial task' }] }])
@@ -50,7 +54,7 @@ function engine([$test, on]: Body, options: Options = {}) {
   let runCount = 0
   on('fs.exists', () => ({ value: true }))
   on('env.get', (_, e) => ({ value: options.env?.[e.name] }))
-  on('session.cwd', () => ({ value: '/work' }))
+  on('session.cwd', () => ({ value: cwd }))
   on('session.id', () => ({ value: options.sessionId?.() ?? 'session-1' }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
   on('session.messages', () => ({ value: messages }))
@@ -75,6 +79,8 @@ function engine([$test, on]: Body, options: Options = {}) {
   on('session.compact', (_, e) => ({ messages: e.messages }))
   on('prompt.attachment', (_, e) => ({ text: e.text }))
   on('command.register', (_, e) => ({ value: { command: `lastdrop:${e.name}` } }))
+  on('agent.register', (_, e) => { registered.push(e as never); return { value: { agent: `lastdrop:${e.name}` } } })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'worktree-agent-x\n', stderr: '' } }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('classic.UserPromptSubmit', () => ({}))
   on('prompt.submit', (_, e) => { submitted.push(e.context); return { text: e.text, context: e.context } })
@@ -105,7 +111,7 @@ function engine([$test, on]: Body, options: Options = {}) {
     if (e.tool !== 'Agent') return { result: { marker: `native ${e.tool}` } }
     if (options.refusal) return { deny: options.refusal }
     const spawn = await $test.agent.spawn({ tool_use_id: e.tool_use_id, prompt: e.prompt, description: e.description,
-      subagentType: e.subagent_type ?? 'general-purpose', model: e.model, cwd: '/native', permissionMode: options.handback === false ? 'acceptEdits' : 'auto',
+      subagentType: e.subagent_type ?? 'general-purpose', model: e.model, cwd: e.isolation === 'worktree' ? undefined : '/native', permissionMode: options.handback === false ? 'acceptEdits' : 'auto',
       parentModel: 'claude-haiku-5-5', background: options.background ?? true, fork: options.fork ?? false,
       workflow: options.workflow ? { runId: 'wf_x', agentIndex: 1 } : undefined } as never)
     if (spawn.deny !== undefined) return { deny: spawn.deny }
@@ -118,7 +124,8 @@ function engine([$test, on]: Body, options: Options = {}) {
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
     return { turnId: e.turnId, index: e.index, answer: 'built-in response', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  return { calls, spawned, nativeCalls, nativeInputs, statuses, submitted, invalidated, store,
+  return { calls, spawned, nativeCalls, nativeInputs, statuses, submitted, invalidated, store, registered,
+    cwd(value: string) { cwd = value },
     get modelSteps() { return modelSteps }, get opened() { return opened }, get runCount() { return runCount },
     messages(value: Message[]) { messages = context(value) },
     async launch(fields: object = {}) {
@@ -327,7 +334,7 @@ test('a runner that ends without a report produces an explicit native failure re
 test('loss of room for an added model is an error, never execution on Claude', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, noStart: true, outputs: [{ type: 'no_room' }] })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   expect(report(await step($))).toContain('No other account has room after the native agent started')
   expect(e.modelSteps).toBe(0)
 })
@@ -363,7 +370,7 @@ for (const started of [false, true]) {
 test('a native line for an added model is a visible failure, never the built-in agent', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, outputs: [{ type: 'native' }] })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   expect(report(await step($))).toContain('handed the agent to the built-in agent')
   expect(e.modelSteps).toBe(0)
 })
@@ -440,12 +447,40 @@ test('failure to persist a route produces an error report, never a local request
   expect(e.modelSteps).toBe(0)
 })
 
-test('only the remote worker creates a routed worktree', async ($, on) => {
+test('a worktree call reaches the engine unchanged, and the runner works in the engine’s worktree', async ($, on) => {
   const e = engine([$, on])
   await e.launch({ isolation: 'worktree' })
-  expect(e.nativeInputs[0]?.isolation).toBeUndefined()
+  expect(e.nativeInputs[0]).toEqual({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', isolation: 'worktree' })
+  e.cwd('/work/.claude/worktrees/agent-x')
+  expect(report(await step($))).toBe(`Worktree: /work/.claude/worktrees/agent-x (branch worktree-agent-x).\n\n${RESULT.text}`)
+  const run = e.calls.find(c => c.flag === '--agent-run')!.request
+  expect(run.cwd).toBe('/work/.claude/worktrees/agent-x')
+  expect(run.isolation).toBeUndefined()
+  // The admission check is asked as before.
+  expect(e.calls.find(c => c.flag === '--agent-route')?.request.isolation).toBe('worktree')
+})
+
+test('a resumed worktree agent stays in the engine’s worktree', async ($, on) => {
+  const e = engine([$, on])
+  await e.launch({ isolation: 'worktree' })
+  e.cwd('/work/.claude/worktrees/agent-x')
   await step($)
-  expect(e.calls.find(c => c.flag === '--agent-run')?.request.isolation).toBe('worktree')
+  e.cwd('/work')
+  e.messages([{ role: 'user', content: [{ type: 'text', text: 'initial task' }] }, { role: 'user', content: [{ type: 'text', text: 'more' }] }])
+  await resume($, 'more')
+  await step($, 'turn-2')
+  const runs = e.calls.filter(c => c.flag === '--agent-run').map(c => c.request)
+  expect(runs.map(r => r.cwd)).toEqual(['/work/.claude/worktrees/agent-x', '/work/.claude/worktrees/agent-x'])
+  expect(runs[1]?.isolation).toBeUndefined()
+})
+
+test('with no worktree from the engine the runner makes its own, as before', async ($, on) => {
+  const e = engine([$, on])
+  await e.launch({ isolation: 'worktree' })
+  await step($)
+  const run = e.calls.find(c => c.flag === '--agent-run')!.request
+  expect(run.isolation).toBe('worktree')
+  expect(run.cwd).toBe('/work')
 })
 
 test('a built-in worktree call retains its isolation when no other account has room', async ($, on) => {
@@ -520,10 +555,10 @@ async function submit($: Body[0], text = 'hi') {
   return (await $.prompt.submit({ text, wait: false, origin: { kind: 'user' } } as never)).context
 }
 
-test('an added agent runs through the model parameter on the native adapter', async ($, on) => {
+test('an added agent runs as its own type on the native adapter', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   expect(e.spawned.length).toBe(1)
   expect(e.nativeInputs[0]?.model).toBeUndefined()
   expect(report(await step($))).toBe(`Ran on claude-haiku-5-5.\n\n${RESULT.text}`)
@@ -537,14 +572,15 @@ test('an added agent runs through the model parameter on the native adapter', as
 
 test('an unknown model is denied with what is available, after a fresh read of the list', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
-  expect((await e.launch({ model: 'nova' })).deny).toBe("Model nova isn't available. Use sonnet, opus, haiku, fable, or: sol, argon.")
+  expect((await e.launch({ model: 'nova' })).deny).toBe("Model nova isn't available. Use sonnet, opus, haiku, fable. The user's added agents are the agent types lastdrop:sol, lastdrop:argon.")
   expect(e.calls.filter(c => c.flag === '--agent-catalog').length).toBe(1)
   expect(e.spawned).toEqual([])
 })
 
 test('with no added agents an unknown model lists only Claude models', async ($, on) => {
   const e = engine([$, on])
-  expect((await e.launch({ model: 'nova' })).deny).toBe("Model nova isn't available. Use sonnet, opus, haiku, fable.")
+  expect((await e.launch({ model: 'nova' })).deny).toBe("Model nova isn't available. Use sonnet, opus, haiku, fable. The user has no added agents.")
+  expect((await e.launch({ subagent_type: 'lastdrop:nova' })).deny).toBe("Agent type lastdrop:nova isn't available. The user has no added agents.")
 })
 
 test('an agent added since the last read is found by the call', async ($, on) => {
@@ -552,7 +588,7 @@ test('an agent added since the last read is found by the call', async ($, on) =>
   const e = engine([$, on], { liveCatalog: () => live })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   live = CATALOG
-  expect((await e.launch({ model: 'sol' })).result).toEqual(NATIVE)
+  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).result).toEqual(NATIVE)
 })
 
 test('Claude models and calls without a model stay native', async ($, on) => {
@@ -567,7 +603,7 @@ test('Claude models and calls without a model stay native', async ($, on) => {
 test('an added agent spawns under its own name as the model, so hosts never label it as Claude', async ($, on) => {
   let spawns = 0
   const e = engine([$, on], { catalog: CATALOG, spawnId: () => `new-${++spawns}` })
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   await e.launch({ model: 'sonnet', tool_use_id: 'toolu_2' })
   await e.launch({ tool_use_id: 'toolu_3' })
   expect(e.spawned.map(s => s.model)).toEqual(['sol', 'sonnet', undefined])
@@ -575,55 +611,60 @@ test('an added agent spawns under its own name as the model, so hosts never labe
   expect(e.calls.find(c => c.flag === '--agent-route')?.request.agent).toBe('sol')
 })
 
-test('Explore and Plan pass their role; other types pass none', async ($, on) => {
+test('Explore and Plan pass their role on a reroute; an added agent passes none', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  for (const type of ['Explore', 'Plan', 'general-purpose', 'claude', undefined]) {
-    await e.launch({ model: 'sol', subagent_type: type })
-  }
+  for (const type of ['Explore', 'Plan', 'general-purpose', 'claude', undefined]) await e.launch({ subagent_type: type })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   const routes = e.calls.filter(c => c.flag === '--agent-route').map(c => c.request)
-  expect(routes.map(r => r.role)).toEqual(['Explore', 'Plan', undefined, undefined, undefined])
-  expect(routes.map(r => r.subagentType)).toEqual(['Explore', 'Plan', 'general-purpose', 'claude', undefined])
-  await e.launch({ model: 'sol', subagent_type: 'Explore', tool_use_id: 'toolu_y' })
-  expect(e.nativeInputs.at(-1)?.subagent_type).toBe('Explore')
-  expect(report(await step($))).toContain('Ran on')
-  expect(e.calls.find(c => c.flag === '--agent-run')?.request.role).toBeDefined()
+  expect(routes.map(r => r.role)).toEqual(['Explore', 'Plan', undefined, undefined, undefined, undefined])
+  expect(routes.map(r => r.subagentType)).toEqual(['Explore', 'Plan', 'general-purpose', 'claude', undefined, 'general-purpose'])
 })
 
-test('an added agent refuses custom types, nesting, names and remote isolation', async ($, on) => {
+test('an added agent refuses a model, nesting, names and remote isolation', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
-  expect((await e.launch({ model: 'sol', subagent_type: 'code-reviewer' })).deny).toBe('sol runs only as general-purpose, Explore or Plan.')
+  expect((await e.launch({ subagent_type: 'lastdrop:sol', model: 'opus' })).deny).toBe('lastdrop:sol runs on its own model. Call it without model.')
   for (const fields of [{ agentId: 'parent-agent' }, { name: 'teammate' }, { isolation: 'remote' }]) {
-    expect((await e.launch({ model: 'sol', ...fields })).deny).toContain('run only from the main session')
+    expect((await e.launch({ subagent_type: 'lastdrop:sol', ...fields })).deny).toContain('run only from the main session')
   }
   expect(e.spawned).toEqual([])
   expect(e.nativeCalls).toEqual([])
 })
 
-test('a lastdrop: type is denied and names the model that replaces it', async ($, on) => {
+test('the old forms are denied with the type that replaces them, and never rewritten', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
-  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).deny).toContain('model: "sol"')
-  expect((await e.launch({ subagent_type: 'lastdrop:sol', agentId: 'parent-agent' })).deny).toContain('model: "sol"')
+  await $.agent.offer({ agent: 'Explore', description: 'x', source: 'built-in' } as never)
+  const guidance = 'sol is an agent type: call the Agent tool with subagent_type: "lastdrop:sol" and no model. It runs as a general agent, never as Explore or Plan.'
+  for (const fields of [{ model: 'sol' }, { model: 'sol', subagent_type: 'Explore' }, { model: 'sol', subagent_type: 'general-purpose' },
+                        { subagent_type: 'sol' }, { subagent_type: 'sol', model: 'opus' }]) {
+    expect((await e.launch(fields)).deny).toBe(guidance)
+  }
+  expect((await e.launch({ model: 'argon', agentId: 'parent-agent' })).deny).toContain('subagent_type: "lastdrop:argon"')
   expect(e.nativeCalls).toEqual([])
+  expect(e.calls.some(c => c.flag === '--agent-route')).toBe(false)
 })
 
 test('an added agent with no room is denied, never run by the built-in agent', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, route: { type: 'no_room' } })
-  expect((await e.launch({ model: 'sol' })).deny).toContain('nowhere to run sol')
+  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).deny).toContain('nowhere to run sol')
   expect(e.spawned).toEqual([])
 })
 
-test('an added agent keeps the worktree out of the native shell', async ($, on) => {
+test('an added agent with a worktree reaches the engine unchanged and runs in its worktree', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
-  await e.launch({ model: 'sol', isolation: 'worktree' })
-  expect(e.nativeInputs[0]?.isolation).toBeUndefined()
-  await step($)
-  expect(e.calls.find(c => c.flag === '--agent-run')?.request.isolation).toBe('worktree')
+  await e.launch({ subagent_type: 'lastdrop:sol', isolation: 'worktree' })
+  expect(e.nativeInputs[0]).toEqual({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task',
+                                      subagent_type: 'lastdrop:sol', isolation: 'worktree' })
+  e.cwd('/work/.claude/worktrees/agent-x')
+  expect(report(await step($))).toBe(`Ran on claude-haiku-5-5. Worktree: /work/.claude/worktrees/agent-x (branch worktree-agent-x).\n\n${RESULT.text}`)
+  const run = e.calls.find(c => c.flag === '--agent-run')!.request
+  expect(run.cwd).toBe('/work/.claude/worktrees/agent-x')
+  expect(run.isolation).toBeUndefined()
 })
 
 test('a special spawn of an added agent is denied', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, fork: true })
-  expect((await e.launch({ model: 'sol' })).deny).toContain('run only from the main session')
+  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).deny).toContain('run only from the main session')
 })
 
 test('a route saved for the old lastdrop: types still resumes', async ($, on) => {
@@ -642,13 +683,13 @@ test('the report header names the model, the worktree and what was declined', as
   const outputs = [result]
   const e = engine([$, on], { catalog: CATALOG, outputs })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   expect(report(await step($))).toBe(`Ran on gpt-6.1-sol.\n\n${RESULT.text}`)
   outputs[0] = { ...result, worktreePath: '/w/x', worktreeBranch: 'agent-x' }
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_2' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_2' })
   expect(report(await step($, 'turn-2'))).toContain(`Ran on gpt-6.1-sol. Worktree: /w/x (branch agent-x).\n\n`)
   outputs[0] = full
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_3' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_3' })
   expect(report(await step($, 'turn-3'))).toBe(`Ran on gpt-6.1-sol. Worktree: /w/x (branch agent-x).\nDeclined: git push (needed approval); rm -rf build (needed approval)\n\n${RESULT.text}`)
 })
 
@@ -659,24 +700,87 @@ test('Claude reroutes and failed agent runs get no header', async ($, on) => {
   expect(report(await step($))).toBe(RESULT.text)
   outputs[0] = { type: 'result', isError: true, text: 'it broke', model: 'gpt-6.1-sol' }
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_2' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_2' })
   expect(report(await step($, 'turn-2'))).toBe('lastdrop agent failed: Error: it broke')
 })
 
-test('the main loop listing gets the added agents', async ($, on) => {
+test('the main loop listing gets what the lastdrop: types are, and the pointer to the command', async ($, on) => {
   engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${ADDED}${LIST}${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
 })
 
-test('the pointer to the command stays out of notes, and a listing frozen without it keeps its bytes', async ($, on) => {
+test('each enabled agent is registered as a lastdrop: type, with its description and where it runs', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  await $.session.start({ cwd: '/work' } as never)
+  expect(e.registered.map(r => [r.name, r.description])).toEqual([['sol', SOL], ['argon', ARGON]])
+  expect(e.registered.every(r => r.prompt.includes('never sent to a model') && !('tools' in r))).toBe(true)
+})
+
+test('an unchanged catalog registers nothing again, so the listing stays as it is', async ($, on) => {
+  let live: object = CATALOG
+  const e = engine([$, on], { liveCatalog: () => live })
+  await $.session.start({ cwd: '/work' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await submit($)
+  live = { ...CATALOG, revision: 4 }
+  await submit($)
+  expect(e.registered.length).toBe(2)
+  live = { revision: 5, agents: [{ ...CATALOG.agents[0], description: 'Changed.' }, CATALOG.agents[1]] }
+  await submit($)
+  expect(e.registered.slice(2).map(r => [r.name, r.description])).toEqual([['sol', 'Changed. (Codex · gpt-6.1-sol · high)']])
+})
+
+test('a type whose agent left the catalog is hidden; one added is offered and registered', async ($, on) => {
+  let live: object = CATALOG
+  const e = engine([$, on], { liveCatalog: () => live })
+  await $.session.start({ cwd: '/work' } as never)
+  const offer = async (agent: string) => (await $.agent.offer({ agent, description: 'x', source: 'plugin' } as never)).isOffered
+  expect(await offer('lastdrop:sol')).toBe(true)
+  live = { revision: 9, agents: [CATALOG.agents[1], { ...CATALOG.agents[0], name: 'nova' }] }
+  await submit($)
+  expect(await offer('lastdrop:sol')).toBe(false)
+  expect(await offer('lastdrop:nova')).toBe(true)
+  expect(await offer('lastdrop:argon')).toBe(true)
+  expect(await offer('general-purpose')).toBe(true)
+  expect(e.registered.at(-1)?.name).toBe('nova')
+  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).deny).toBe("Agent type lastdrop:sol isn't available. The user's added agents are the agent types lastdrop:argon, lastdrop:nova.")
+})
+
+test('an app without agentModels registers nothing and hides every lastdrop: type', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, agentModels: false })
+  await $.session.start({ cwd: '/work' } as never)
+  expect(e.registered).toEqual([])
+  expect((await $.agent.offer({ agent: 'lastdrop:sol', description: 'x', source: 'plugin' } as never)).isOffered).toBe(false)
+})
+
+test('a routed call reaches the engine byte-identical, and its spawn is claimed and labelled', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  const call = { subagent_type: 'lastdrop:sol', effort: 'high', run_in_background: true }
+  await e.launch(call)
+  expect(e.nativeInputs[0]).toEqual({ tool: 'Agent', tool_use_id: 'toolu_x', description: 'read a note', prompt: 'initial task', ...call })
+  expect(e.spawned.map(s => (s as { model?: string }).model)).toEqual(['sol'])
+  expect(e.calls.find(c => c.flag === '--agent-route')?.request.effort).toBe('high')
+  await step($)
+  expect(e.calls.find(c => c.flag === '--agent-run')?.request).toMatchObject({ agent: 'sol', subagentType: 'general-purpose', effort: 'high' })
+})
+
+test('a spawn of a lastdrop: type that no Agent call claimed is refused, so its placeholder never runs', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  const answer = await $.agent.spawn({ tool_use_id: 'toolu_other', prompt: 'x', description: 'x', subagentType: 'lastdrop:sol',
+    parentModel: 'haiku', permissionMode: 'auto', background: true, fork: false } as never)
+  expect(answer.deny).toContain('run only from the main session')
+  expect(e.spawned).toEqual([])
+})
+
+test('the pointer to the command stays out of notes, and a listing frozen by an earlier version keeps its bytes', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   await listing($)
-  e.store.delete('announced:session-1')
   expect(await submit($)).toBeUndefined()
-  e.store.set('listing:session-1', LIST)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${ADDED}${LIST}`)
+  const old = '- sol: Reviews: hard bugs. (Codex · gpt-6.1-sol · high)'
+  e.store.set('listing:session-1', old)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${old}`)
 })
 
 test('an empty list appends nothing', async ($, on) => {
@@ -701,21 +805,22 @@ test('the first listing is frozen for the session and replays after a change kee
   const e = engine([$, on], { liveCatalog: () => live, sessionId: () => id })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   const first = await listing($)
-  expect(e.store.get('listing:session-1')).toBe(`${LIST}${COMMAND}`)
-  live = { revision: 9, agents: [{ ...CATALOG.agents[0], description: 'Changed.' }] }
+  expect(e.store.get('listing:session-1')).toBe(`${TYPES}${COMMAND}`)
+  live = { revision: 9, agents: [] }
   await $.classic.UserPromptSubmit({ prompt: 'again' } as never)
   expect(await listing($)).toBe(first)
   // Another session starts from the list as it reads now.
   id = 'session-2'
-  expect(await listing($)).toContain('- sol: Changed. (Codex')
-  expect(e.store.get('listing:session-2')).toContain('Changed.')
+  expect(await listing($)).toBe(NATIVE_LISTING)
+  expect(e.store.get('listing:session-2')).toBe('')
 })
 
 test('a compaction of the main loop clears the frozen listing; a subagent compaction does not', async ($, on) => {
-  let live: object = CATALOG
+  let live: object = { revision: 1, agents: [] }
   const e = engine([$, on], { liveCatalog: () => live })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   await listing($)
+  await submit($)
   await $.session.compact({ trigger: 'manual', agentId: 'a-sub', messages: [MESSAGE] } as never)
   expect(e.store.has('listing:session-1')).toBe(true)
   await $.session.compact({ trigger: 'manual', messages: [MESSAGE] } as never)
@@ -723,7 +828,7 @@ test('a compaction of the main loop clears the frozen listing; a subagent compac
   expect(e.store.has('announced:session-1')).toBe(false)
   live = { revision: 9, agents: [CATALOG.agents[1]] }
   await $.classic.UserPromptSubmit({ prompt: 'again' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${ADDED}- argon: Advisor: trade-offs. (Antigravity · gemini-4-argon)${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
 })
 
 test('a new session id after /clear starts without a frozen listing', async ($, on) => {
@@ -735,60 +840,50 @@ test('a new session id after /clear starts without a frozen listing', async ($, 
   expect(e.store.has('listing:after')).toBe(false)
   expect(await submit($)).toBeUndefined()
   await listing($)
-  expect(e.store.get('listing:after')).toBe(`${LIST}${COMMAND}`)
+  expect(e.store.get('listing:after')).toBe(`${TYPES}${COMMAND}`)
 })
 
 test('the stored listings of old sessions are pruned to the latest hundred', async ($, on) => {
   let id = 's0'
   const e = engine([$, on], { catalog: CATALOG, sessionId: () => id })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  for (let i = 0; i < 105; i++) { id = `s${i}`; await listing($) }
+  for (let i = 0; i < 105; i++) { id = `s${i}`; await listing($); await submit($) }
   expect([...e.store.keys()].filter(k => k.startsWith('listing:')).length).toBe(100)
   expect([...e.store.keys()].filter(k => k.startsWith('announced:')).length).toBe(100)
   expect(e.store.has('listing:s0')).toBe(false)
   expect(e.store.has('listing:s104')).toBe(true)
 })
 
-test('a changed list is announced once beside the next prompt, and a removed list too', async ($, on) => {
+test('a changed description is announced once beside the next prompt; agents added or removed are the engine’s to tell', async ($, on) => {
   let live: object = CATALOG
   engine([$, on], { liveCatalog: () => live })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   expect(await submit($)).toBeUndefined()
-  await listing($)
   expect(await submit($)).toBeUndefined()
-  live = { revision: 9, agents: [CATALOG.agents[1]] }
-  const note = "The models the user added to the Agent tool's model parameter changed. It now accepts:\n- argon: Advisor: trade-offs. (Antigravity · gemini-4-argon)"
-  expect(await submit($)).toEqual([note])
+  live = { revision: 9, agents: [{ ...CATALOG.agents[0], description: 'Changed.' }, { ...CATALOG.agents[1], name: 'nova' }] }
+  expect(await submit($)).toEqual(['These agents the user added now read:\n- lastdrop:sol: Changed. (Codex · gpt-6.1-sol · high)'])
   expect(await submit($)).toBeUndefined()
   live = { revision: 10, agents: [] }
-  expect(await submit($)).toEqual(["The models the user added to the Agent tool's model parameter were removed."])
   expect(await submit($)).toBeUndefined()
 })
 
-test('a resumed session with a changed list keeps its frozen listing and announces the difference', async ($, on) => {
-  const e = engine([$, on], { catalog: { revision: 9, agents: [CATALOG.agents[1]] } })
-  e.store.set('listing:session-1', LIST)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${ADDED}${LIST}`)
-  expect(await submit($)).toEqual([expect.stringContaining('now accepts:\n- argon')])
+test('a resumed session keeps its frozen listing, and one from an earlier version starts its notes afresh', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  e.store.set('listing:session-1', `${TYPES}${COMMAND}`)
+  e.store.set('announced:session-1', '- sol: Old. (Codex)')
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
+  expect(await submit($)).toBeUndefined()
+  expect(e.store.get('announced:session-1')).toEqual({ sol: SOL, argon: ARGON })
 })
 
 test('a note joins context a prompt already carries', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
-  e.store.set('listing:session-1', '')
+  e.store.set('announced:session-1', { sol: 'Old.', argon: ARGON })
   const context = (await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'user' }, context: ['mine'] } as never)).context
-  expect(context?.[0]).toBe('mine')
-  expect(context?.[1]).toContain(LIST)
+  expect(context).toEqual(['mine', `These agents the user added now read:\n- lastdrop:sol: ${SOL}`])
 })
 
-test('without a frozen listing after the first prompt the full list goes in a note, with one status', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG })
-  expect(await submit($)).toBeUndefined()
-  expect(await submit($)).toEqual([`The models the user added to the Agent tool's model parameter changed. It now accepts:\n${LIST}`])
-  expect(await submit($)).toBeUndefined()
-  expect(e.statuses.filter(t => t?.includes('agent list changed')).length).toBe(1)
-})
-
-test('an empty list with no frozen listing raises no note and no status', async ($, on) => {
+test('an empty list raises no note and no status', async ($, on) => {
   const e = engine([$, on])
   await submit($)
   expect(await submit($)).toBeUndefined()
@@ -811,46 +906,27 @@ test('an app without agentModels adds nothing to listings or notes and refuses a
   expect(await listing($)).toBe(NATIVE_LISTING)
   await submit($)
   expect(await submit($)).toBeUndefined()
-  expect((await e.launch({ model: 'sol' })).deny).toContain('Update the lastdrop app')
+  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).deny).toContain('Update the lastdrop app')
   expect(e.spawned).toEqual([])
   expect((await e.launch({ model: 'sonnet' })).result).toEqual(NATIVE)
   expect((await e.launch()).result).toEqual(NATIVE)
 })
 
-test('the first-prompt grace lives in the store and ends with the listing reset', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG })
-  await submit($)
-  expect(e.store.get('grace:session-1')).toBe(true)
-  // A reloaded plugin has no memory of it, and the next prompt is the one that tells.
-  expect((await submit($))?.[0]).toContain(LIST)
-  await $.session.compact({ trigger: 'manual', messages: [MESSAGE] } as never)
-  expect(e.store.has('grace:session-1')).toBe(false)
-  expect(await submit($)).toBeUndefined()
-})
-
 test('a store that refuses writes never breaks the listing or the prompt', async ($, on) => {
   engine([$, on], { catalog: CATALOG, storeFailure: true })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${ADDED}${LIST}${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
   expect(await submit($)).toBeUndefined()
 })
 
-test('a nearly full store is pruned before the listing is written, and long lists are cut', async ($, on) => {
+test('a nearly full store is pruned before the listing is written', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, storeLimit: 3000 })
   for (let i = 0; i < 100; i++) e.store.set(`listing:old${i}`, 'x'.repeat(20))
   for (let i = 0; i < 20; i++) e.store.set(`native-agent:old${i}`, { pad: 'y'.repeat(5) })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   await listing($)
-  expect(e.store.get('listing:session-1')).toBe(`${LIST}${COMMAND}`)
+  expect(e.store.get('listing:session-1')).toBe(`${TYPES}${COMMAND}`)
   expect(e.store.has('listing:old0')).toBe(false)
-})
-
-test('a long list is cut to a byte budget', async ($, on) => {
-    const many = { revision: 5, agents: Array.from({ length: 200 }, (_, i) => ({ ...CATALOG.agents[0], name: `a${i}`, description: 'd'.repeat(100) })) }
-  const big = engine([$, on], { catalog: many })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await listing($)
-  expect(new TextEncoder().encode(String(big.store.get('listing:session-1')).split(POINTER)[0]).length).toBeLessThan(8001)
 })
 
 test('old routes are pruned oldest first, never those of running agents', async ($, on) => {
@@ -858,7 +934,7 @@ test('old routes are pruned oldest first, never those of running agents', async 
   e.store.set(`native-agent:${ID}`, { request: {}, description: 'x', toolUseId: 't', ran: false, cursor: 0 })
   for (let i = 0; i < 250; i++) e.store.set(`native-agent:old${i}`, { request: {} })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_new' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_new' })
   expect([...e.store.keys()].filter(k => k.startsWith('native-agent:')).length).toBeLessThanOrEqual(200)
   expect(e.store.has(`native-agent:${ID}`)).toBe(true)
   expect(e.store.has('native-agent:old0')).toBe(false)
@@ -883,13 +959,6 @@ test('a compaction notice row resets the main listing, with or without session.c
   expect(e.store.has('listing:session-1')).toBe(true)
 })
 
-test('a session without the Agent tool gets no fallback note and no status', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG, noAgentTool: true })
-  await submit($)
-  expect(await submit($)).toBeUndefined()
-  expect(e.statuses).toEqual([])
-})
-
 test('resuming an added agent whose route is gone is refused, not run as Claude', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   e.store.set('added-agents', [ID])
@@ -910,10 +979,10 @@ test('a spawned agent not yet run keeps its route and marker through pruning, wh
   let next = ID
   const e = engine([$, on], { catalog: CATALOG, spawnId: () => next })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   for (let i = 0; i < 250; i++) e.store.set(`native-agent:old${i}`, { request: {} })
   next = 'b2222222222222222'
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_2' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_2' })
   expect(e.store.has(`native-agent:${ID}`)).toBe(true)
   expect(e.store.get('added-agents')).toContain(ID)
   expect(e.store.has('native-agent:old0')).toBe(false)
@@ -922,44 +991,15 @@ test('a spawned agent not yet run keeps its route and marker through pruning, wh
 test('an added agent whose marker cannot be saved fails visibly instead of running', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, storeLimit: 60 })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   expect(report(await step($))).toContain('could not save the native agent’s route')
   expect(e.runCount).toBe(0)
 })
 
-test('with a store that refuses writes, grace is used once and the next prompt announces the list', async ($, on) => {
-  engine([$, on], { catalog: CATALOG, storeFailure: true })
-  expect(await submit($)).toBeUndefined()
-  expect((await submit($))?.[0]).toContain(LIST)
-})
-
 test('a frozen listing does not advertise agents to an app that lacks agentModels', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, agentModels: false })
-  e.store.set('listing:session-1', LIST)
+  e.store.set('listing:session-1', `${TYPES}${COMMAND}`)
   expect(await listing($)).toBe(NATIVE_LISTING)
-})
-
-test('an added model named as the agent type runs as that model on a general-purpose shell', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await $.agent.offer({ agent: 'Explore', description: 'x', source: 'built-in' } as never)
-  await e.launch({ subagent_type: 'sol' })
-  expect(e.nativeInputs[0]?.subagent_type).toBe('general-purpose')
-  expect(e.nativeInputs[0]?.model).toBeUndefined()
-  await e.launch({ subagent_type: 'sol', model: 'sol', tool_use_id: 'toolu_2' })
-  const routes = e.calls.filter(c => c.flag === '--agent-route').map(c => c.request)
-  expect(routes.map(r => r.agent)).toEqual(['sol', 'sol'])
-  expect(routes.map(r => r.subagentType)).toEqual(['general-purpose', 'general-purpose'])
-  expect(routes.map(r => r.model)).toEqual([undefined, undefined])
-})
-
-test('an added model as the type with a different model is denied, naming the choice', async ($, on) => {
-  const e = engine([$, on], { catalog: CATALOG })
-  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await $.agent.offer({ agent: 'Explore', description: 'x', source: 'built-in' } as never)
-  expect((await e.launch({ subagent_type: 'sol', model: 'opus' })).deny).toBe('sol is a model. Use model: "sol", or model: "opus" with a Claude agent type.')
-  expect((await e.launch({ subagent_type: 'sol', model: 'argon' })).deny).toContain('sol is a model')
-  expect(e.nativeCalls).toEqual([])
 })
 
 test('a custom agent type named like an added model stays native', async ($, on) => {
@@ -971,22 +1011,22 @@ test('a custom agent type named like an added model stays native', async ($, on)
   expect(e.nativeInputs[0]?.subagent_type).toBe('sol')
 })
 
-test('after a reload, with no listing seen, the bare type form is denied and model calls are not', async ($, on) => {
+test('after a reload, with no listing seen, the bare name as the type is denied with its type', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect((await e.launch({ subagent_type: 'sol' })).deny).toBe('sol is a model. Use model: "sol".')
-  expect((await e.launch({ model: 'sol' })).result).toEqual(NATIVE)
+  expect((await e.launch({ subagent_type: 'sol' })).deny).toContain('subagent_type: "lastdrop:sol"')
+  expect((await e.launch({ subagent_type: 'lastdrop:sol' })).result).toEqual(NATIVE)
 })
 
 test('added-agent ids outlive the routes cap', async ($, on) => {
   let next = ID
   const e = engine([$, on], { catalog: CATALOG, spawnId: () => next })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   await step($)
   for (let i = 0; i < 250; i++) e.store.set(`native-agent:old${i}`, { request: {} })
   next = 'b2222222222222222'
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_2' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_2' })
   expect([...e.store.keys()].filter(k => k.startsWith('native-agent:')).length).toBeLessThanOrEqual(200)
   expect(e.store.has(`native-agent:${ID}`)).toBe(false)
   // The in-memory route would still answer here; after a reload only the list tells.
@@ -997,10 +1037,10 @@ test('the header names the models skipped as unavailable', async ($, on) => {
   const outputs: object[] = [{ ...RESULT, model: 'gemini-4-argon-high', unavailable: ['gpt-6.1-sol'] }]
   const e = engine([$, on], { catalog: CATALOG, outputs })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   expect(report(await step($))).toBe(`Ran on gemini-4-argon-high (gpt-6.1-sol unavailable).\n\n${RESULT.text}`)
   outputs[0] = { ...RESULT, model: 'c', unavailable: ['a', 'b'], worktreePath: '/w/x', worktreeBranch: 'agent-x', declined: ['git push (needed approval)'] }
-  await e.launch({ model: 'sol', tool_use_id: 'toolu_2' })
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_2' })
   expect(report(await step($, 'turn-2'))).toBe(`Ran on c (a, b unavailable). Worktree: /w/x (branch agent-x).\nDeclined: git push (needed approval)\n\n${RESULT.text}`)
 })
 
@@ -1011,7 +1051,7 @@ test('a fallback attempt updates the pane row and creates no second one', async 
     { ...RESULT, account: 'Antigravity', model: 'gemini-4-argon-high', provider: 'antigravity', unavailable: ['gpt-6.1-sol'] },
   ] })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   await step($)
   const ui = await $.ui.mount({ plugin: 'lastdrop', component: 'Pane', requestId: 'lastdrop-agents', props: {}, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /on Antigravity · gemini-4-argon-high/ }))?.text).toContain('gemini-4-argon-high')
@@ -1042,7 +1082,7 @@ test('a store that fills up mid-run never loses the report', async ($, on) => {
 test('a switch made before the agent started still reaches its row', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, before: [{ type: 'moved', account: 'Codex', reason: 'usage limit' }] })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  await e.launch({ model: 'sol' })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
   await step($)
   const ui = await $.ui.mount({ plugin: 'lastdrop', component: 'Pane', requestId: 'lastdrop-agents', props: {}, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /Moved off Codex: usage limit/ }))?.text).toContain('usage limit')
@@ -1230,10 +1270,10 @@ test('a main session without the tag keeps its own model', async ($, on) => {
   expect(e.runCount).toBe(0)
 })
 
-test('in T3 Code the listing says delegate_task accepts the added models too', async ($, on) => {
+test('in T3 Code the listing says delegate_task accepts the added agents’ names too', async ($, on) => {
   engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' } })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\nThe Agent tool's model parameter and delegate_task's target.model also accept these models the user added. They run through the Agent tool like Claude's own models, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.\n${LIST}${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES} delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work.${COMMAND}`)
 })
 
 test('a delegated child’s report names the account and model it ran on', async ($, on) => {
@@ -1331,4 +1371,15 @@ test('orchestrator_capabilities for another machine lists no added models', asyn
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   const answer = await $.tool.call({ tool: 'mcp__t3-code__orchestrator_capabilities', tool_use_id: 'c', environmentId: 'vps' } as never)
   expect(json(answer)).toEqual(caps)
+})
+
+test('Save Claude usage names the agent types, also when an older app sends its old default', async ($, on) => {
+  const old = "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the models the user added to the Agent tool's model parameter, picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added model fits."
+  let live: object = { ...CATALOG, saveClaude: true, saveClaudeText: old }
+  engine([$, on], { liveCatalog: () => live })
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }) as never)
+  const block = async () => ((await $.prompt.context({ blocks: [] } as never)) as { blocks: { name: string; text: string }[] }).blocks.find(b => b.name === 'lastdropSaveClaude')?.text
+  expect(await block()).toContain('the agents the user added (the lastdrop: agent types)')
+  live = { ...CATALOG, revision: 4, saveClaude: true, saveClaudeText: 'Mine.' }
+  expect(await block()).toBe('Mine.')
 })
