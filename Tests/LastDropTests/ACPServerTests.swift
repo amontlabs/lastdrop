@@ -1,0 +1,456 @@
+import XCTest
+@testable import LastDrop
+
+/// `lastdrop --acp` driven as T3 drives it: a fake T3 client on the server's stdin and stdout, and a fake runner
+/// (`--agent-run`) and stopper (`--agent-stop`) that record what they got. Everything lives in the test's folder.
+final class ACPServerTests: LastDropTestCase {
+    private var folder: URL!
+
+    override func setUp() {
+        super.setUp()
+        folder = LastDropPaths.support
+        LastDropPaths.ensure(folder)
+        let catalog = AgentCatalog(agents: [
+            AgentDefinition(name: "flash", description: "Quick work", provider: .antigravity, model: "gemini-3.8-flash", effort: "low"),
+            AgentDefinition(name: "sol", description: "Reviews", provider: .codex, model: "gpt-6.1-sol", enabled: false),
+        ])
+        try! catalog.save(to: LastDropPaths.agentCatalog)
+    }
+
+    // MARK: Probe
+
+    func testTheProbeGetsTheModelsAndRecordsNothing() throws {
+        let t3 = try client()
+        let initialized = try t3.call("initialize", ["protocolVersion": 2, "clientCapabilities": [:]])
+        XCTAssertEqual(initialized["protocolVersion"] as? Int, 1)
+        XCTAssertNil(initialized["info"], "an info key makes T3 read the answer as ACP v2")
+        let capabilities = try XCTUnwrap(initialized["agentCapabilities"] as? [String: Any])
+        XCTAssertEqual(capabilities["loadSession"] as? Bool, false)
+        XCTAssertNotNil((capabilities["sessionCapabilities"] as? [String: Any])?["resume"] as? [String: Any])
+        XCTAssertEqual((capabilities["promptCapabilities"] as? [String: Any])?["image"] as? Bool, false)
+
+        let new = try t3.call("session/new", ["cwd": folder.path, "mcpServers": []])
+        XCTAssertTrue((new["sessionId"] as? String ?? "").hasPrefix("lastdrop-"))
+        let model = try XCTUnwrap((new["configOptions"] as? [[String: Any]])?.first)
+        XCTAssertEqual(model["category"] as? String, "model")
+        XCTAssertEqual(model["type"] as? String, "select")
+        XCTAssertEqual(model["currentValue"] as? String, "sonnet")
+        let options = try XCTUnwrap(model["options"] as? [[String: Any]])
+        XCTAssertEqual(options.map { $0["value"] as? String ?? "" }, ["flash", "fable", "opus", "sonnet", "haiku"])
+        XCTAssertEqual(options[0]["description"] as? String, "Antigravity · gemini-3.8-flash · low")
+        t3.end()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ACPSessions.file.path), "session/new records nothing")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("requests.jsonl").path), "and starts nothing")
+        XCTAssertTrue(t3.noise.isEmpty, "\(t3.noise)")
+    }
+
+    // MARK: Turns
+
+    func testATaggedPromptRunsWhatDelegatedTurnWouldAndAFollowUpResumesIt() throws {
+        try scenario([
+            [["type": "started", "agentId": "task-1", "account": "Antigravity", "model": "gemini-3.8-flash"],
+             ["type": "step", "text": "Read: a.txt"],
+             ["type": "item", "kind": "tool", "id": "t1", "summary": "Read: a.txt", "input": "{\"file_path\":\"/w/a.txt\"}"],
+             ["type": "item", "kind": "result", "id": "t1", "text": "hello", "isError": false],
+             ["type": "moved", "account": "Antigravity", "reason": "its quota ran out; continuing on Codex"],
+             ["type": "item", "kind": "text", "text": "All done."],
+             ["type": "result", "text": "All done.", "isError": false, "account": "Antigravity", "model": "gemini-3.8-flash",
+              "unavailable": ["argon"], "worktreePath": "/w/tree", "worktreeBranch": "lastdrop/x",
+              "context": ["inputTokens": 10, "cacheReadInputTokens": 1000, "cacheCreationInputTokens": 5, "outputTokens": 20]]],
+            [["type": "started", "agentId": "task-1", "account": "Antigravity", "model": "gemini-3.8-flash"],
+             ["type": "result", "text": "Second.", "isError": false, "account": "Antigravity", "model": "gemini-3.8-flash"]],
+        ])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let task = "Act as the reviewer sub-agent for this task.\n\nCheck a.txt"
+        let tagged = LastDropTag.tag(task, ["id": "task-1", "agent": "flash", "effort": "high", "description": "Check a file"])
+        let answer = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt(tagged, first: true)])
+        XCTAssertEqual(answer["stopReason"] as? String, "end_turn")
+
+        let requests = try runnerRequests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(NSDictionary(dictionary: requests[0]), NSDictionary(dictionary: [
+            "prompt": task, "description": "Check a file", "subagentType": "general-purpose", "effort": "high",
+            "cwd": folder.path, "agent": "flash", "id": "task-1",
+        ]))
+
+        let updates = t3.updates(session)
+        let kinds = updates.map { $0["sessionUpdate"] as? String ?? "" }
+        XCTAssertEqual(kinds, ["tool_call", "tool_call_update", "tool_call_update", "notice", "usage_update", "agent_message_chunk"])
+        XCTAssertEqual(updates[0]["kind"] as? String, "read")
+        XCTAssertEqual(updates[0]["title"] as? String, "Read: a.txt")
+        XCTAssertEqual(updates[0]["status"] as? String, "in_progress")
+        XCTAssertEqual((updates[1]["rawInput"] as? [String: Any])?["file_path"] as? String, "/w/a.txt")
+        XCTAssertEqual(updates[2]["status"] as? String, "completed")
+        XCTAssertEqual(updates[3]["title"] as? String, "Moved off Antigravity")
+        XCTAssertEqual(updates[4]["used"] as? Int, 1035)
+        XCTAssertEqual(updates[4]["size"] as? Int, 200_000)
+        XCTAssertEqual((updates[5]["content"] as? [String: Any])?["text"] as? String,
+                       "Ran on Antigravity (gemini-3.8-flash, argon unavailable). Worktree: /w/tree (branch lastdrop/x).\n\nAll done.")
+
+        let entry = try XCTUnwrap(ACPSessions.lookup(session))
+        XCTAssertEqual(entry.run, "task-1")
+        XCTAssertTrue(entry.ran)
+        XCTAssertNil(entry.task)
+
+        t3.clearUpdates()
+        let followUp = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("And b.txt?", first: false)])
+        XCTAssertEqual(followUp["stopReason"] as? String, "end_turn")
+        let second = try runnerRequests()[1]
+        XCTAssertEqual(second["prompt"] as? String, "And b.txt?")
+        XCTAssertEqual(second["resume"] as? String, "task-1")
+        XCTAssertEqual(second["agent"] as? String, "flash")
+        XCTAssertEqual(second["effort"] as? String, "high")
+        XCTAssertEqual(t3.updates(session).last?["content"].flatMap { ($0 as? [String: Any])?["text"] as? String },
+                       "Ran on Antigravity (gemini-3.8-flash).\n\nSecond.")
+        t3.end()
+        XCTAssertTrue(t3.noise.isEmpty, "\(t3.noise)")
+    }
+
+    func testAPlainClaudeChildPassesItsModelAsTheParentModel() throws {
+        try scenario([[["type": "started", "agentId": "task-2", "account": "work"],
+                       ["type": "result", "text": "Ok.", "isError": false, "account": "work", "model": "claude-opus-5-5"]]])
+        let t3 = try client()
+        let session = try open(t3, model: "opus")
+        let tagged = LastDropTag.tag("Do it", ["id": "task-2", "description": "Plain"])
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt(tagged, first: true)])
+        let request = try runnerRequests()[0]
+        XCTAssertEqual(request["parentModel"] as? String, "opus")
+        XCTAssertNil(request["model"])
+        XCTAssertNil(request["agent"])
+        XCTAssertEqual(request["prompt"] as? String, "Do it")
+        t3.end()
+    }
+
+    func testNoRoomAndFailuresAnswerAReadableError() throws {
+        try scenario([[["type": "no_room"]],
+                      [["type": "started", "agentId": "task-3", "account": "Codex"],
+                       ["type": "result", "text": "Codex said no.", "isError": true]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let tagged = LastDropTag.tag("Do it", ["id": "task-3", "agent": "flash"])
+        let error = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt(tagged, first: true)])
+        XCTAssertEqual(error, "lastdrop found nowhere to run flash.")
+        // Nothing ran, so the next prompt sends the task again.
+        let again = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Please", first: false)])
+        XCTAssertEqual(again, "Codex said no.")
+        let requests = try runnerRequests()
+        XCTAssertEqual(requests[1]["prompt"] as? String, "Do it\n\nPlease")
+        XCTAssertNil(requests[1]["resume"])
+        t3.end()
+    }
+
+    // MARK: Cancel and close
+
+    func testCancelStopsTheRunAndAnswersCancelled() throws {
+        try scenario([[["type": "started", "agentId": "task-4", "account": "Codex"], ["type": "step", "text": "Bash: sleep"],
+                       ["waitStop": true]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let id = t3.send("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Long", ["id": "task-4", "agent": "flash"]), first: true)])
+        _ = try t3.waitFor { ($0["params"] as? [String: Any]).flatMap { ($0["update"] as? [String: Any])?["sessionUpdate"] as? String } == "tool_call" }
+        let sent = Date()
+        t3.notify("session/cancel", ["sessionId": session])
+        let answer = try t3.answer(id, timeout: 10)
+        XCTAssertLessThan(Date().timeIntervalSince(sent), 10)
+        XCTAssertEqual((answer["result"] as? [String: Any])?["stopReason"] as? String, "cancelled")
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("stops.txt"), encoding: .utf8), "task-4\n")
+        XCTAssertEqual(t3.updates(session).last?["status"] as? String, "failed", "the open tool call ends with the turn")
+        t3.end()
+    }
+
+    func testCancelEndsARunnerThatIgnoresTheStop() throws {
+        try scenario([[["type": "started", "agentId": "task-5", "account": "Codex"], ["sleep": 60]]])
+        let t3 = try client(cancelWait: 1)
+        let session = try open(t3, model: "flash")
+        let id = t3.send("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Long", ["id": "task-5", "agent": "flash"]), first: true)])
+        let pid = try runnerPID()
+        t3.notify("session/cancel", ["sessionId": session])
+        let answer = try t3.answer(id, timeout: 10)
+        XCTAssertEqual((answer["result"] as? [String: Any])?["stopReason"] as? String, "cancelled")
+        XCTAssertTrue(gone(pid, within: 5), "the runner was ended")
+        t3.end()
+    }
+
+    func testCloseEndsTheRunnerAndThePrompt() throws {
+        try scenario([[["type": "started", "agentId": "task-6", "account": "Codex"], ["sleep": 60]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let id = t3.send("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Long", ["id": "task-6", "agent": "flash"]), first: true)])
+        let pid = try runnerPID()
+        XCTAssertTrue(try t3.call("session/close", ["sessionId": session]).isEmpty)
+        let answer = try t3.answer(id, timeout: 5)
+        XCTAssertEqual((answer["result"] as? [String: Any])?["stopReason"] as? String, "cancelled")
+        XCTAssertTrue(gone(pid, within: 5))
+        XCTAssertNotNil(try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("more", first: false)]))
+        t3.end()
+    }
+
+    // MARK: Restart and catalog
+
+    func testASessionResumesAfterTheProcessRestarts() throws {
+        try scenario([[["type": "started", "agentId": "task-7", "account": "Antigravity"],
+                       ["type": "result", "text": "One.", "isError": false, "account": "Antigravity"]],
+                      [["type": "started", "agentId": "task-7", "account": "Antigravity"],
+                       ["type": "result", "text": "Two.", "isError": false, "account": "Antigravity"]]])
+        let first = try client()
+        let session = try open(first, model: "flash")
+        _ = try first.call("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Go", ["id": "task-7", "agent": "flash"]), first: true)])
+        first.end()
+
+        let second = try client()
+        _ = try second.call("initialize", ["protocolVersion": 2])
+        let resumed = try second.call("session/resume", ["sessionId": session, "cwd": folder.path, "mcpServers": []])
+        XCTAssertEqual((resumed["configOptions"] as? [[String: Any]])?.first?["currentValue"] as? String, "flash")
+        let answer = try second.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("Again", first: true)])
+        XCTAssertEqual(answer["stopReason"] as? String, "end_turn")
+        let request = try runnerRequests()[1]
+        XCTAssertEqual(request["prompt"] as? String, "Again")
+        XCTAssertEqual(request["resume"] as? String, "task-7")
+
+        let unknown = try second.callError("session/resume", ["sessionId": "lastdrop-nope", "cwd": folder.path, "mcpServers": []])
+        XCTAssertTrue(unknown?.contains("lastdrop has no session lastdrop-nope") ?? false, unknown ?? "")
+        second.end()
+    }
+
+    func testACatalogChangeUpdatesTheModelsOfALiveSession() throws {
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        try AgentCatalog.update { $0.agents.append(AgentDefinition(name: "glm", description: "Cheap", provider: .zai, model: "glm-5.3")) }
+        let update = try t3.waitFor(timeout: 5) {
+            (($0["params"] as? [String: Any])?["update"] as? [String: Any])?["sessionUpdate"] as? String == "config_option_update"
+        }
+        let options = (((update["params"] as? [String: Any])?["update"] as? [String: Any])?["configOptions"] as? [[String: Any]])?.first
+        XCTAssertEqual(options?["currentValue"] as? String, "flash")
+        XCTAssertEqual((options?["options"] as? [[String: Any]])?.map { $0["value"] as? String ?? "" }, ["flash", "glm", "fable", "opus", "sonnet", "haiku"])
+        XCTAssertEqual(((update["params"] as? [String: Any])?["sessionId"] as? String), session)
+        t3.end()
+    }
+
+    // MARK: Text
+
+    func testT3sWrapperAndRuntimeBlockAreNotPartOfTheTask() {
+        let wrapped = "<t3_code_instructions>\n## T3 Code interaction mode: Default\n\nBe good.\n</t3_code_instructions>\n\n<user_request>\nFix it\n\nplease\n</user_request>"
+        let runtime = "<runtime_info>In case you're asked: you are running in T3 Code.</runtime_info>\n\n<pull_request_linking>\nLink PRs.\n</pull_request_linking>"
+        XCTAssertEqual(T3Wrapper.strip(blocks: [wrapped, runtime]), "Fix it\n\nplease")
+        XCTAssertEqual(T3Wrapper.strip(blocks: ["Bare text", runtime]), "Bare text")
+        XCTAssertEqual(T3Wrapper.strip(blocks: [wrapped + "\n\n" + runtime]), "Fix it\n\nplease")
+        XCTAssertEqual(T3Wrapper.strip(blocks: ["/compact"]), "/compact")
+    }
+
+    func testTheTagReadsAsThePluginReadsIt() {
+        let tagged = LastDropTag.tag("Task\n\nwith lines", ["id": "abc", "agent": "flash", "effort": "high", "description": "d"]) + "\n  "
+        let found = LastDropTag.untag(tagged)
+        XCTAssertEqual(found?.task, "Task\n\nwith lines")
+        XCTAssertEqual(found?.run, LastDropTag.Run(id: "abc", agent: "flash", effort: "high", description: "d"))
+        XCTAssertNil(LastDropTag.untag("No tag here"))
+        XCTAssertNil(LastDropTag.untag("x\n\n<!-- lastdrop {\"agent\":\"flash\"} -->"), "a tag without an id")
+        XCTAssertEqual(LastDropTag.header(["account": "work", "declined": ["rm -rf /"]]), "Ran on work.\nDeclined: rm -rf /\n\n")
+        XCTAssertEqual(LastDropTag.header(["worktreePath": "/w"]), "Worktree: /w.\n\n")
+        XCTAssertEqual(LastDropTag.header([:]), "")
+    }
+
+    func testToolKinds() {
+        XCTAssertEqual(TurnView.kind("Read: a.txt"), "read")
+        XCTAssertEqual(TurnView.kind("view_file: /a"), "read")
+        XCTAssertEqual(TurnView.kind("Edit: a.swift"), "edit")
+        XCTAssertEqual(TurnView.kind("Bash: ls"), "execute")
+        XCTAssertEqual(TurnView.kind("run_command: ls"), "execute")
+        XCTAssertEqual(TurnView.kind("Grep: foo"), "search")
+        XCTAssertEqual(TurnView.kind("WebSearch: swift"), "fetch")
+        XCTAssertEqual(TurnView.kind("Plan: steps"), "think")
+        XCTAssertEqual(TurnView.kind("Moved off work: it is at its usage limit"), "other")
+    }
+
+    // MARK: Helpers
+
+    private func open(_ t3: FakeT3, model: String) throws -> String {
+        _ = try t3.call("initialize", ["protocolVersion": 2])
+        let new = try t3.call("session/new", ["cwd": folder.path, "mcpServers": []])
+        let session = try XCTUnwrap(new["sessionId"] as? String)
+        let set = try t3.call("session/set_config_option", ["sessionId": session, "configId": "model", "value": model])
+        XCTAssertEqual((set["configOptions"] as? [[String: Any]])?.first?["currentValue"] as? String, model)
+        return session
+    }
+
+    /// A prompt as T3 sends it to an ACP provider: the wrapper on the first, the runtime block on each.
+    private func t3Prompt(_ text: String, first: Bool) -> [[String: Any]] {
+        let body = first ? "<t3_code_instructions>\nInstructions.\n</t3_code_instructions>\n\n<user_request>\n\(text)\n</user_request>" : text
+        return [["type": "text", "text": body],
+                ["type": "text", "text": "<runtime_info>In case you're asked: you are running in T3 Code through the acpRegistry harness, as flash.</runtime_info>\n\n<pull_request_linking>\nx\n</pull_request_linking>"]]
+    }
+
+    private func client(cancelWait: TimeInterval = 7) throws -> FakeT3 {
+        let runner = try script("runner", Self.runnerScript)
+        let stopper = try script("stopper", Self.stopperScript)
+        var options = ACPServer.Options(runner: [runner], stopper: [stopper], catalog: LastDropPaths.agentCatalog, sessions: ACPSessions.file)
+        options.catalogPoll = 0.2
+        options.cancelWait = cancelWait
+        options.killGrace = 0.5
+        return FakeT3(options: options)
+    }
+
+    private func scenario(_ turns: [[[String: Any]]]) throws {
+        try JSONSerialization.data(withJSONObject: turns).write(to: folder.appendingPathComponent("scenario.json"))
+    }
+
+    private func runnerRequests() throws -> [[String: Any]] {
+        let text = try String(contentsOf: folder.appendingPathComponent("requests.jsonl"), encoding: .utf8)
+        return text.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+    }
+
+    private func runnerPID() throws -> Int32 {
+        let url = folder.appendingPathComponent("runner.pid")
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: url, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) { return pid }
+            usleep(50_000)
+        }
+        throw XCTSkip("the fake runner never started")
+    }
+
+    private func gone(_ pid: Int32, within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, WNOHANG)
+            if kill(pid, 0) != 0 { return true }
+            usleep(50_000)
+        }
+        return false
+    }
+
+    private func script(_ name: String, _ body: String) throws -> String {
+        let url = folder.appendingPathComponent(name)
+        try body.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        return url.path
+    }
+
+    /// Records the request, then plays this turn's lines: `sleep` waits, `waitStop` waits for the stopper.
+    private static let runnerScript = #"""
+    #!/usr/bin/env python3
+    import json, os, sys, time
+    here = os.path.dirname(os.path.abspath(__file__))
+    request = json.loads(sys.stdin.read())
+    with open(os.path.join(here, 'requests.jsonl'), 'a') as f: f.write(json.dumps(request) + '\n')
+    turn = sum(1 for _ in open(os.path.join(here, 'requests.jsonl'))) - 1
+    open(os.path.join(here, 'runner.pid'), 'w').write(str(os.getpid()))
+    turns = json.load(open(os.path.join(here, 'scenario.json'))) if os.path.exists(os.path.join(here, 'scenario.json')) else []
+    for line in (turns[turn] if turn < len(turns) else []):
+        if 'sleep' in line: time.sleep(line['sleep']); continue
+        if line.get('waitStop'):
+            while not os.path.exists(os.path.join(here, 'stopped-' + request['id'])): time.sleep(0.05)
+            line = {'type': 'result', 'text': 'Stopped.', 'isError': True, 'stopped': True}
+        sys.stdout.write(json.dumps(line) + '\n'); sys.stdout.flush()
+    """#
+
+    private static let stopperScript = #"""
+    #!/usr/bin/env python3
+    import os, sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, 'stops.txt'), 'a') as f: f.write(sys.argv[1] + '\n')
+    open(os.path.join(here, 'stopped-' + sys.argv[1]), 'w').close()
+    """#
+}
+
+/// T3's side of the connection: requests in, every line out kept and checked to be JSON-RPC.
+private final class FakeT3: @unchecked Sendable {
+    let server: ACPServer
+    private let toServer = Pipe(), fromServer = Pipe()
+    private let lock = NSLock()
+    private let arrived = DispatchSemaphore(value: 0)
+    private var messages: [[String: Any]] = []
+    private var cleared = 0
+    private(set) var noise: [String] = []
+    private var nextID = 1 << 30
+    private let served = DispatchSemaphore(value: 0)
+
+    init(options: ACPServer.Options) {
+        server = ACPServer(input: toServer.fileHandleForReading.fileDescriptor, output: fromServer.fileHandleForWriting.fileDescriptor, options: options)
+        Thread.detachNewThread { [self] in
+            server.serve()
+            server.shutdown()
+            served.signal()
+        }
+        Thread.detachNewThread { [self] in
+            var buffer = Data()
+            let handle = fromServer.fileHandleForReading
+            while case let data = handle.availableData, !data.isEmpty {
+                buffer.append(data)
+                while let newline = buffer.firstIndex(of: 0x0A) {
+                    let line = buffer[buffer.startIndex..<newline]
+                    buffer = Data(buffer[buffer.index(after: newline)...])
+                    lock.withLock {
+                        if let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any], object["jsonrpc"] as? String == "2.0" {
+                            messages.append(object)
+                        } else {
+                            noise.append(String(decoding: line, as: UTF8.self))
+                        }
+                    }
+                    arrived.signal()
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func send(_ method: String, _ params: [String: Any]) -> Int {
+        let id = lock.withLock { nextID += 1; return nextID }
+        write(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
+        return id
+    }
+
+    func notify(_ method: String, _ params: [String: Any]) {
+        write(["jsonrpc": "2.0", "method": method, "params": params])
+    }
+
+    private func write(_ object: [String: Any]) {
+        let data = try! JSONSerialization.data(withJSONObject: object) + Data("\n".utf8)
+        toServer.fileHandleForWriting.write(data)
+    }
+
+    func call(_ method: String, _ params: [String: Any], timeout: TimeInterval = 10) throws -> [String: Any] {
+        let reply = try answer(send(method, params), timeout: timeout)
+        if let error = reply["error"] as? [String: Any] { throw NSError(domain: "acp", code: 1, userInfo: [NSLocalizedDescriptionKey: error["message"] as? String ?? ""]) }
+        return reply["result"] as? [String: Any] ?? [:]
+    }
+
+    func callError(_ method: String, _ params: [String: Any], timeout: TimeInterval = 10) throws -> String? {
+        let reply = try answer(send(method, params), timeout: timeout)
+        return (reply["error"] as? [String: Any])?["message"] as? String
+    }
+
+    func answer(_ id: Int, timeout: TimeInterval = 10) throws -> [String: Any] {
+        try waitFor(timeout: timeout) { ($0["id"] as? Int) == id && $0["method"] == nil }
+    }
+
+    func waitFor(timeout: TimeInterval = 10, _ match: ([String: Any]) -> Bool) throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let found = lock.withLock({ messages.first(where: match) }) { return found }
+            if Date() >= deadline { throw NSError(domain: "acp", code: 2, userInfo: [NSLocalizedDescriptionKey: "timed out"]) }
+            _ = arrived.wait(timeout: .now() + 0.1)
+        }
+    }
+
+    /// The session's updates since the last `clearUpdates`.
+    func updates(_ session: String) -> [[String: Any]] {
+        lock.withLock {
+            messages[cleared...].compactMap { message -> [String: Any]? in
+                guard message["method"] as? String == "session/update", let params = message["params"] as? [String: Any],
+                      params["sessionId"] as? String == session else { return nil }
+                return params["update"] as? [String: Any]
+            }
+        }
+    }
+
+    func clearUpdates() { lock.withLock { cleared = messages.count } }
+
+    /// Closes stdin, as T3 does when it ends the process, and waits for the server to finish.
+    func end() {
+        try? toServer.fileHandleForWriting.close()
+        _ = served.wait(timeout: .now() + 10)
+    }
+}

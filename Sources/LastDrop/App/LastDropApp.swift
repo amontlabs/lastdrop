@@ -8,6 +8,8 @@ enum Entry {
         if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--claude-thread" {
             ThreadLauncher.main(Array(CommandLine.arguments.dropFirst(2)))
         }
+        // T3 Code's "lastdrop" ACP provider: stdout carries JSON-RPC only, and AppKit never starts.
+        if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--acp" { ACPServer.main() }
         Rename.migrate()
         if CommandLine.arguments.contains("--agent-key") { EndpointProfile.keyMain() }
         if CommandLine.arguments.contains("--print") { printUsage(); return }
