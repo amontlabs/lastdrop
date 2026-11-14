@@ -41,6 +41,79 @@ enum T3Settings {
     /// T3's provider instance for Claude Code (`defaultInstanceIdForDriver`: the driver's own name).
     private static let instance = "claudeAgent"
 
+    /// Our own provider instance, which runs `lastdrop --acp` through the wrapper (T3's `acpRegistry` driver).
+    private static let acpInstance = "lastdrop"
+    private static let acpDriver = "acpRegistry"
+
+    /// What T3's `lastdrop` provider instance looks like, for the settings screen.
+    enum ACPStatus: Equatable, Sendable {
+        case notInstalled, unreadable
+        /// No instance yet.
+        case absent
+        /// Ours, but T3 is told not to use it.
+        case disabled
+        /// Ours, enabled, and the wrapper it runs is there.
+        case ready
+        /// Ours and enabled, but the wrapper is missing or not executable.
+        case wrapperMissing
+        /// The user has an instance with that id that isn't ours (another driver, or a registry agent): left alone.
+        case foreign
+    }
+
+    static func acpStatus(acpWrapper: String = ThreadLauncher.acpWrapperPath.path) -> ACPStatus {
+        guard isInstalled else { return .notInstalled }
+        guard let root = read() else { return .unreadable }
+        guard let entry = (root["providerInstances"] as? [String: Any])?[acpInstance] else { return .absent }
+        guard let dict = entry as? [String: Any], isOurs(dict) else { return .foreign }
+        if dict["enabled"] as? Bool == false { return .disabled }
+        let fm = FileManager.default
+        let path = (dict["config"] as? [String: Any])?["commandPath"] as? String ?? acpWrapper
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue && fm.isExecutableFile(atPath: path) ? .ready : .wrapperMissing
+    }
+
+    /// An instance is ours when it is the ACP driver running a local command: anything else (another driver, an
+    /// agent from the ACP registry) is the user's own and is never rewritten.
+    private static func isOurs(_ entry: [String: Any]) -> Bool {
+        guard entry["driver"] as? String == acpDriver else { return false }
+        let config = entry["config"] as? [String: Any]
+        return (config?["source"] as? String) == "local"
+    }
+
+    /// Makes the instance what we want, changing nothing (and returning false) when it already is: T3 rebuilds an
+    /// instance whose config changes, closing its running threads. Fields we don't manage stay as they are.
+    private static func ensureACP(in root: inout [String: Any], wrapper: String) -> Bool {
+        var instances = root["providerInstances"] as? [String: Any] ?? [:]
+        var entry: [String: Any]
+        if let existing = instances[acpInstance] {
+            guard let dict = existing as? [String: Any], isOurs(dict) else { return false }
+            entry = dict
+        } else {
+            entry = ["driver": acpDriver, "displayName": "lastdrop"]
+        }
+        var config = entry["config"] as? [String: Any] ?? [:]
+        config["source"] = "local"
+        config["commandPath"] = wrapper
+        config["commandArgs"] = [String]()
+        entry["config"] = config
+        entry["enabled"] = true
+        if entry["displayName"] == nil { entry["displayName"] = "lastdrop" }
+        if let old = instances[acpInstance] as? [String: Any], NSDictionary(dictionary: old).isEqual(to: entry) { return false }
+        instances[acpInstance] = entry
+        root["providerInstances"] = instances
+        return true
+    }
+
+    /// Turns our instance off, keeping it (and whatever T3 or the user added to it).
+    private static func disableACP(in root: inout [String: Any]) -> Bool {
+        var instances = root["providerInstances"] as? [String: Any] ?? [:]
+        guard var entry = instances[acpInstance] as? [String: Any], isOurs(entry), entry["enabled"] as? Bool != false else { return false }
+        entry["enabled"] = false
+        instances[acpInstance] = entry
+        root["providerInstances"] = instances
+        return true
+    }
+
     // MARK: Reading
 
     static func state(wrapper: String = ThreadLauncher.wrapperPath.path) -> State {
@@ -77,18 +150,26 @@ enum T3Settings {
 
     /// Sets the wrapper as T3's Claude binary. A path the user set themselves is kept in a backup and replaced only
     /// with `replacingElsewhere`; the wrapper script is written first, so T3 never points at a file that isn't there.
-    static func enable(replacingElsewhere: Bool = false, wrapper: String = ThreadLauncher.wrapperPath.path) throws {
+    static func enable(replacingElsewhere: Bool = false, wrapper: String = ThreadLauncher.wrapperPath.path,
+                       acpWrapper: String = ThreadLauncher.acpWrapperPath.path) throws {
         guard isInstalled else { throw Failure.notInstalled }
         var wrapperWritten = false
         try edit { root in
             let current = binaryPath(in: root).flatMap { $0.isEmpty ? nil : $0 }
-            if current == wrapper { return false }
-            if let current, !replacingElsewhere { throw Failure.elsewhere(current) }
-            if !wrapperWritten { ThreadLauncher.writeWrapper(); wrapperWritten = true }
-            // The backup comes first: a crash between the two writes must lose nothing.
-            guard saveBackup(previous: current) else { throw Failure.cannotWrite }
-            setBinaryPath(wrapper, in: &root)
-            return true
+            if let current, current != wrapper, !replacingElsewhere { throw Failure.elsewhere(current) }
+            var changed = false
+            // Tried on a copy first, so a file that needs no change never costs a wrapper write.
+            var probe = root
+            let acpChanges = ensureACP(in: &probe, wrapper: acpWrapper)
+            if current != wrapper || acpChanges, !wrapperWritten { ThreadLauncher.writeWrapper(); wrapperWritten = true }
+            if current != wrapper {
+                // The backup comes first: a crash between the two writes must lose nothing.
+                guard saveBackup(previous: current) else { throw Failure.cannotWrite }
+                setBinaryPath(wrapper, in: &root)
+                changed = true
+            }
+            if ensureACP(in: &root, wrapper: acpWrapper) { changed = true }
+            return changed
         }
     }
 
@@ -98,10 +179,13 @@ enum T3Settings {
         guard isInstalled else { return }
         var changed = false
         try edit { root in
-            guard binaryPath(in: root) == wrapper else { return false }
-            setBinaryPath(loadBackup(), in: &root)
-            changed = true
-            return true
+            var edited = disableACP(in: &root)
+            if binaryPath(in: root) == wrapper {
+                setBinaryPath(loadBackup(), in: &root)
+                changed = true
+                edited = true
+            }
+            return edited
         }
         if changed { try? FileManager.default.removeItem(at: backupFile) }
     }
