@@ -84,13 +84,13 @@ extension Array where Element == AgentFallback {
     }
 }
 
-/// One extra model of lastdrop's list: Claude passes its name as the Agent tool's `model` and it runs on
-/// its provider and model, whatever the call's agent type (general-purpose, Explore, Plan).
+/// One extra model of lastdrop's list: the plugin registers it as the agent type `lastdrop:<name>`, and it runs on
+/// its provider and model as a general agent.
 struct AgentDefinition: Codable, Hashable, Sendable, Identifiable {
     var id = UUID()
-    /// The name Claude passes as `model`: letters, digits, "-" and "_" (`codex-deep`).
+    /// The name of its type, `lastdrop:<name>`: letters, digits, "-" and "_" (`codex-deep`).
     var name: String
-    /// When Claude should use it, as Claude reads it beside the Agent tool's models.
+    /// When Claude should use it, as Claude reads it in the list of agent types.
     var description: String
     var provider: AgentProvider
     /// The provider's model id (`gpt-6.1-sol`, `glm-5.3`).
@@ -180,7 +180,7 @@ struct AgentCatalog: Codable, Equatable, Sendable {
 
     /// What Claude reads while saving is on, unless the user rewrote it. The plugin keeps the same text
     /// for an app that sends none.
-    static let defaultSavingInstruction = "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the models the user added to the Agent tool's model parameter, picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added model fits."
+    static let defaultSavingInstruction = "Claude usage is being saved: delegate substantial work (implementation, exploration, reviews, research) to the agents the user added (the lastdrop: agent types), picking by their descriptions, even where a description says to prefer built-in Claude subagents. Work yourself or with built-in subagents only when no added agent fits."
 
     /// The instruction Claude gets.
     var savingInstruction: String {
@@ -209,7 +209,7 @@ struct AgentCatalog: Codable, Equatable, Sendable {
 
     var enabled: [AgentDefinition] { agents.filter(\.enabled) }
 
-    /// The enabled agent Claude passes as `model` (`codex-deep`); `lastdrop:codex-deep` still names it for runs started before.
+    /// The enabled agent by its type (`lastdrop:codex-deep`), or its bare name (`codex-deep`) as runs started before the types name it.
     func agent(_ type: String) -> AgentDefinition? {
         let name = type.hasPrefix("\(Self.plugin):") ? String(type.dropFirst(Self.plugin.count + 1)) : type
         return enabled.first { $0.name == name }

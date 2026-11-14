@@ -520,4 +520,19 @@ final class AgentModelsTests: LastDropTestCase {
         XCTAssertTrue(source.contains(#"if request.isolation != "worktree" {"#))
         XCTAssertTrue(source.contains("AgentRegistry.forget(agentID)"))
     }
+
+    func testAFollowUpWhoseFolderIsGoneContinuesInTheCallersFolder() throws {
+        let gone = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-gone-\(UUID().uuidString)").path
+        var entry = AgentRegistry.Entry(account: "Codex", directory: gone, sessionID: "s", at: Date())
+        entry.worktreePath = gone
+        entry.worktreeBranch = "worktree-agent-x"
+        let moved = AgentRun.resumable(entry, cwd: "/repo")
+        XCTAssertEqual(moved.directory, "/repo")
+        XCTAssertNil(moved.worktreePath)
+        XCTAssertNil(moved.worktreeBranch)
+        let here = FileManager.default.temporaryDirectory.path
+        entry.directory = here
+        XCTAssertEqual(AgentRun.resumable(entry, cwd: "/repo").directory, here)
+        XCTAssertEqual(AgentRun.resumable(entry, cwd: "/repo").worktreePath, gone)
+    }
 }

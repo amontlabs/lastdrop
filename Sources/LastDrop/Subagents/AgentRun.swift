@@ -156,6 +156,19 @@ enum AgentRun {
         FileHandle.standardOutput.write(data)
     }
 
+    /// A follow-up's entry with a folder that still exists. Claude Code removes the worktree it made for a
+    /// subagent that changed nothing once the agent ends, so the follow-up continues in the folder the call
+    /// came from (`cwd`), with no worktree to report. Claude Code resumes a session there too.
+    static func resumable(_ entry: AgentRegistry.Entry, cwd: String) -> AgentRegistry.Entry {
+        var isDirectory: ObjCBool = false
+        guard !FileManager.default.fileExists(atPath: entry.directory, isDirectory: &isDirectory) || !isDirectory.boolValue else { return entry }
+        var moved = entry
+        moved.directory = cwd
+        moved.worktreePath = nil
+        moved.worktreeBranch = nil
+        return moved
+    }
+
     /// Checks routing before the engine creates its native task. It starts no provider or model request.
     static func route(_ request: Request) async -> [String: Any] {
         if ProcessInfo.processInfo.environment[nestedMarker] != nil { return ["type": "no_room"] }
@@ -181,7 +194,8 @@ enum AgentRun {
         let permissionMode = mappedPermissionMode(request.permissionMode)
 
         // A follow-up goes back to the account, session, folder and agent type the agent ran with.
-        if let agentID = request.resume, let entry = AgentRegistry.lookup(agentID), let definition = entry.definition {
+        if let agentID = request.resume, let entry = AgentRegistry.lookup(agentID).map({ resumable($0, cwd: request.cwd) }),
+           let definition = entry.definition {
             return await runDefined(definition, request, agentID: agentID, resume: entry, mcpConfig: mcpConfig)
         }
         if let type = request.agent {
@@ -196,7 +210,8 @@ enum AgentRun {
             return await runDefined(definition, request, agentID: request.id ?? UUID().uuidString.lowercased(), resume: nil, mcpConfig: mcpConfig)
         }
         if let agentID = request.resume {
-            guard let entry = AgentRegistry.lookup(agentID), let account = accounts.first(where: { $0.id == entry.account }) else {
+            guard let entry = AgentRegistry.lookup(agentID).map({ resumable($0, cwd: request.cwd) }),
+                  let account = accounts.first(where: { $0.id == entry.account }) else {
                 emit(["type": "error", "text": "No agent \(agentID) was started by lastdrop."])
                 return
             }
