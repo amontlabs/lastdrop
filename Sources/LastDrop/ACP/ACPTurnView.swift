@@ -39,8 +39,10 @@ enum LastDropTag {
         return "\(task)\n\n\(open)\(json)\(close)"
     }
 
-    /// `delegatedHeader`: where the child's report came from, before its text.
-    static func header(_ line: [String: Any]) -> String {
+    /// `delegatedHeader`: where the child's report came from, before its text. `effort` (ACP runs only) says what
+    /// effort the run took when that isn't the one T3's menu chose: "Ran on claude-2 (claude-haiku-5-5) · effort high
+    /// (max isn't offered)."
+    static func header(_ line: [String: Any], effort: String? = nil) -> String {
         func text(_ key: String) -> String? {
             guard let value = line[key], !(value is NSNull) else { return nil }
             let string = value as? String ?? "\(value)"
@@ -52,11 +54,14 @@ enum LastDropTag {
         let worktree = path.map { " Worktree: \($0)\(branch.map { " (branch \($0))" } ?? "")." } ?? ""
         let declined = list("declined").isEmpty ? "" : "\nDeclined: \(list("declined").joined(separator: "; "))"
         let skipped = list("unavailable").isEmpty ? "" : ", \(list("unavailable").joined(separator: ", ")) unavailable"
+        let note = effort.map { " · \($0)" } ?? ""
         guard let account = text("account") else {
-            return worktree.isEmpty ? "" : "\(worktree.trimmingCharacters(in: .whitespaces))\n\n"
+            let effortLine = effort.map { "Ran at \($0)." } ?? ""
+            let first = [effortLine, worktree.trimmingCharacters(in: .whitespaces)].filter { !$0.isEmpty }.joined(separator: " ")
+            return first.isEmpty ? "" : "\(first)\n\n"
         }
         let model = text("model").map { " (\($0)\(skipped))" } ?? ""
-        return "Ran on \(account)\(model).\(worktree)\(declined)\n\n"
+        return "Ran on \(account)\(model)\(note).\(worktree)\(declined)\n\n"
     }
 }
 

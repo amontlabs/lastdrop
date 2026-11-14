@@ -14,7 +14,10 @@ enum ACPSessions {
         /// What the runner runs, as the tag or the picked model gave it: an agent of lastdrop's list, or a Claude model.
         var agent: String?
         var runModel: String?
+        /// The effort the runner gets: an untagged run's choice as its model takes it (`ACPServer.resolveEffort`).
         var effort: String?
+        /// The effort T3's menu chose for an untagged run (nil: auto), kept for the menu and the answer's header.
+        var requestedEffort: String?
         var description: String?
         var permissionMode: String?
         var parentModel: String?

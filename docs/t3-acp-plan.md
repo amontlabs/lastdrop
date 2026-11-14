@@ -355,3 +355,30 @@ Model names and effort (same day):
 - **Listing.** New sessions read that `target.options [{id:"effort"}]` works for Claude models and agents without a
   fixed effort; paragraphs frozen with "no options" keep their bytes. The `delegate_task` supplement says the same.
 - Not tried live: T3 sending the effort before or after the model, and skipping a value the live option lacks.
+
+One effort menu (same day, overrides "Effort" above):
+
+- **Why.** T3 gives every model of an ACP instance one option list, and the live options any session reports
+  (`config_option_update`, a `set_config_option` answer) replace it for every model in every thread, last report
+  wins (`driver.ts:256-285`, `AcpRegistryRuntimeCoordinator.ts:215-227`); an effort the session doesn't list is
+  skipped with a warning (`adapter.ts:7237-7249`). A menu narrowed per model therefore narrowed every thread's.
+- **The menu.** Every answer and update carries the same `effort` select (`thought_level`): auto (default), low,
+  medium, high, xhigh, max, named Auto/Low/Medium/High/Extra high/Max. A model change sends no
+  `config_option_update` any more; the catalog watcher still does, for the model list. Any menu level is taken on
+  any model; an unknown value is refused; after the run started, a choice is taken only if it gives the run the same
+  effort.
+- **At run time** (`resolveEffort`): a Claude model takes the choice as is; a fixed-effort agent runs its own (the
+  request carries none); another agent gets the closest level it offers (`efforts(for:)`: cache and chain rule),
+  the next lower, else the next higher; a model taking none runs without. The entry keeps the choice
+  (`requestedEffort`) beside the run's `effort`. When they differ, the ACP answer's header says so: "Ran on claude-2
+  (m) · effort low (medium isn't offered).", "… · effort low (flash sets its own effort).", "… · no effort
+  (plainflash doesn't take one).". Auto and tagged runs say nothing; the plugin's headers are unchanged.
+- **Per-model details for a patched T3.** `session/new` and `session/resume` also answer ACP's `models` state
+  (`{currentModelId, availableModels: [{modelId, name, description, _meta}]}`), `_meta` =
+  `{supportsReasoningEffort, reasoningEfforts: [{value, label, default?}], reasoningEffort, subProvider}`, the shape
+  T3's Grok driver parses: auto (default) plus the model's real levels; a fixed agent lists only its own level with
+  `supportsReasoningEffort: false`; a model taking none, `false` and `[]`. Official T3 reads `models` only when no
+  `model` config option exists (probe.ts `normalizeAcpRegistryLiveConfiguration`, adapter.ts model validation and
+  switch; `supportsModelSwitchInSession` was already true), so nothing changes there.
+- Plugin texts unchanged: they say the effort works for Claude models and agents without a fixed effort, which
+  still holds.
