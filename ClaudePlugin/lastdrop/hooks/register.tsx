@@ -1151,6 +1151,10 @@ async function noted($: EngineInterface, blocks: string[], answered: boolean, mo
   if (blocks.length === 0) return undefined
   const thread = await $.env.get('T3CODE_THREAD_ID')
   if (!thread) return undefined
+  // lastdrop's runner answers the child in a Claude Code session of its own, which inherits the child's environment
+  // (this thread id) and gets the same task: that session is the run itself, never the child (seen live 2026-11-14:
+  // a follow-up's runner session read the child's state and found nothing new to send).
+  if (await $.env.get('LASTDROP_SUBAGENT')) return undefined
   const found = (note: Note) => {
     const tagged = spans(blocks, note.task)
     return tagged > 0 ? { note, tagged } : undefined

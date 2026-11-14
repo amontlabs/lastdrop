@@ -2154,3 +2154,39 @@ test('the description\'s names don\'t follow the catalog\'s order', async ($, on
   expect(e.invalidated.filter(x => x === 'tool.describe').length).toBe(0)
   expect(await described($)).toBe(`Delegate a task.${SUPPLEMENT}`)
 })
+
+// Live 2026-11-14: the runner's own Claude Code session for a noted run inherits the child's T3CODE_THREAD_ID and
+// gets the same task, so it matched the child's binding; on a follow-up it read the child's state (sent: 2) and
+// answered "The child got a new turn without a text message." It must run on its own model, as the runner asked.
+const ALPHA_THREAD = 'thread:delegated-task:command%3Amcp%3A9c2c2620-a6fb-4bb4-96bc-bd11074c3d38%3Adelegate-task%3A86c8a9b2-34c3-4521-8f02-5be6f239acdb'
+const ALPHA = { id: 't3-mwgjpudc51xhatee', run: { id: 't3-mwgjpudc51xhatee', model: 'claude-haiku-5-5', description: 'alpha job', permissionMode: 'auto' },
+  task: 'Reply with exactly "alpha".', parentThread: 'mcp:47827ab4-0ebb-409b-b850-c800b8b735f4', parentModel: 'claude-sonnet-5-5',
+  createdAt: Date.now() - 20_000, claimedAt: Date.now() - 19_000, child: ALPHA_THREAD, thread: ALPHA_THREAD }
+
+for (const turn of ['first turn', 'follow-up'] as const) {
+  test(`the runner's own session for a noted run (${turn}) runs on its model, never as the child`, async ($, on) => {
+    const e = engine([$, on], { env: { T3CODE_THREAD_ID: ALPHA_THREAD, LASTDROP_SUBAGENT: '1' }, lineage: 'mcp:47827ab4-0ebb-409b-b850-c800b8b735f4' })
+    e.notes.push({ ...ALPHA })
+    // What the child's own turns stored, in a store this session may share.
+    e.store.set(`delegated:${ALPHA.id}`, { ran: true, native: false, sent: turn === 'first turn' ? 1 : 2 })
+    e.messages(turn === 'first turn' ? child('Reply with exactly "alpha".')
+      : child('Reply with exactly "alpha".', { role: 'assistant', content: [{ type: 'text', text: 'alpha' }] },
+          { role: 'user', content: [{ type: 'text', text: 'What word did you reply with before? Answer with that word only.' }] }))
+    const chunks = await childStep($, 'turn-1', 'claude-haiku-5-5')
+    expect(report(chunks)).toBe('built-in response')
+    expect(e.runCount).toBe(0)
+    expect(e.modelSteps).toBe(1)
+    expect(e.calls.some(c => c.flag === '--delegate-note')).toBe(false)
+  })
+}
+
+test('the child thread itself still resumes the run with the follow-up (live shapes)', async ($, on) => {
+  const e = engine([$, on], { env: { T3CODE_THREAD_ID: ALPHA_THREAD } })
+  e.notes.push({ ...ALPHA })
+  e.store.set(`delegated:${ALPHA.id}`, { ran: true, native: false, sent: 1 })
+  e.messages(child('Reply with exactly "alpha".', { role: 'assistant', content: [{ type: 'text', text: 'Ran on claude-2 (claude-haiku-5-5).\n\nalpha' }] },
+    { role: 'user', content: [{ type: 'text', text: 'What word did you reply with before? Answer with that word only.' }] }))
+  await childStep($, 'turn-2', 'claude-haiku-5-5')
+  expect(runs(e)[0]).toMatchObject({ prompt: 'What word did you reply with before? Answer with that word only.', resume: ALPHA.id, id: ALPHA.id })
+  expect(e.modelSteps).toBe(0)
+})

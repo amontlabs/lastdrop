@@ -318,5 +318,12 @@ Review fixes (Fable, same day, on the notes):
 - `t3_thread_read` blocks that aren't JSON are skipped. The description's agent names are sorted, and a description
   given while the catalog couldn't be read is invalidated once it can.
 
+Live check (2026-11-14, dev build): a plain haiku child was noted, claimed, bound and answered "alpha" on claude-2.
+Its `t3_thread_send` follow-up failed with "The child got a new turn without a text message.": lastdrop's runner
+answers in a Claude Code session of its own, which inherits the child's environment (`T3CODE_THREAD_ID`) and gets
+the same task, so the plugin there matched the child's binding and read the child's state (`sent` already counting
+the follow-up). The tag path never had this (the runner's session gets the task without the tag). Fix: `noted`
+ignores sessions with `LASTDROP_SUBAGENT` (the runner sets it on every session it starts).
+
 - `CommandJudgeTests` hang now and then in a full `swift test` on `main` too (unrelated).
   `AntigravityBackendTests.testSIGTERMEndsTheReportedChildPromptly` can fail under heavy load.
