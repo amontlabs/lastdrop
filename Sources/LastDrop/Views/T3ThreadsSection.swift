@@ -7,6 +7,7 @@ struct T3ThreadsSection: View {
     /// Setup shows it without the section title: the step already says what it is.
     var titled = true
     @State private var state = T3Settings.state()
+    @State private var acp = T3Settings.acpStatus()
     @State private var error: String?
     @State private var askingToReplace: String?
     @State private var showingManual = false
@@ -22,6 +23,7 @@ struct T3ThreadsSection: View {
                 RowSwitch(label: label, isOn: Binding(get: { state == .on }, set: { $0 ? turnOn() : turnOff() }))
                     .disabled(state == .notInstalled || state == .unreadable)
             }
+            if let line = acpLine { Caption(line).padding(.top, 4) }
             DisclosureGroup("Set it by hand", isExpanded: $showingManual) {
                 VStack(alignment: .leading, spacing: 6) {
                     Caption("1. Open T3 Code, then Settings → Providers → Claude.")
@@ -42,14 +44,26 @@ struct T3ThreadsSection: View {
             .font(.caption)
             .padding(.top, 8)
         }
-        .onAppear { state = T3Settings.state() }
+        .onAppear { refresh() }
         // Back from T3 Code, where the setting may have changed.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in state = T3Settings.state() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
         .alert("Replace T3 Code's Claude binary path?", isPresented: Binding(get: { askingToReplace != nil }, set: { if !$0 { askingToReplace = nil } })) {
             Button("Replace") { askingToReplace = nil; apply(replacing: true) }
             Button("Cancel", role: .cancel) { askingToReplace = nil }
         } message: {
             Text("It is set to \(askingToReplace ?? ""). Turning this off puts it back.")
+        }
+    }
+
+    /// One quiet line about T3 Code's `lastdrop` provider, shown once the switch is on or the instance exists.
+    private var acpLine: String? {
+        switch acp {
+        case .notInstalled, .unreadable: nil
+        case .absent: state == .on ? "The lastdrop provider isn't in T3 Code yet. Turn this off and on again." : nil
+        case .disabled: state == .on ? "The lastdrop provider is off in T3 Code." : nil
+        case .ready: "The lastdrop provider is ready in T3 Code."
+        case .wrapperMissing: "The lastdrop provider's launcher is missing. Turn this off and on again."
+        case .foreign: "T3 Code has its own provider named lastdrop, so lastdrop left it alone."
         }
     }
 
@@ -70,6 +84,8 @@ struct T3ThreadsSection: View {
         }
     }
 
+    private func refresh() { state = T3Settings.state(); acp = T3Settings.acpStatus() }
+
     private func turnOn() {
         error = nil
         if case .elsewhere(let other) = state { askingToReplace = other } else { apply(replacing: false) }
@@ -77,12 +93,12 @@ struct T3ThreadsSection: View {
 
     private func apply(replacing: Bool) {
         do { try T3Settings.enable(replacingElsewhere: replacing) } catch { self.error = "Couldn't change T3 Code's settings. Set it by hand." }
-        state = T3Settings.state()
+        refresh()
     }
 
     private func turnOff() {
         error = nil
         do { try T3Settings.disable() } catch { self.error = "Couldn't change T3 Code's settings. Set it by hand." }
-        state = T3Settings.state()
+        refresh()
     }
 }

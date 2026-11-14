@@ -290,6 +290,11 @@ enum ThreadLauncher {
             .appendingPathComponent("claude-thread")
     }
 
+    /// Where the wrapper T3 Code's `lastdrop` provider instance runs sits, beside the other one.
+    static var acpWrapperPath: URL {
+        wrapperPath.deletingLastPathComponent().appendingPathComponent("lastdrop-acp")
+    }
+
     /// Tests keep the wrapper in a folder of their own.
     nonisolated(unsafe) static var wrapperDirectory: URL?
 
@@ -297,11 +302,27 @@ enum ThreadLauncher {
     /// to this app's launcher, which execs the real claude on the account it chose.
     static func writeWrapper(executable: String? = Bundle.main.executablePath) {
         guard let executable else { return }
-        let script = wrapperScript(executable: executable)
-        LastDropPaths.ensure(wrapperPath.deletingLastPathComponent())
-        guard (try? Data(contentsOf: wrapperPath)) != Data(script.utf8) else { return }
-        guard (try? Data(script.utf8).write(to: wrapperPath, options: .atomic)) != nil else { return }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapperPath.path)
+        install(wrapperScript(executable: executable), at: wrapperPath)
+        install(acpWrapperScript(executable: executable), at: acpWrapperPath)
+    }
+
+    private static func install(_ script: String, at path: URL) {
+        LastDropPaths.ensure(path.deletingLastPathComponent())
+        guard (try? Data(contentsOf: path)) != Data(script.utf8) else { return }
+        guard (try? Data(script.utf8).write(to: path, options: .atomic)) != nil else { return }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+    }
+
+    /// T3 Code starts this as the command of its `lastdrop` provider: the ACP server of this app.
+    static func acpWrapperScript(executable: String) -> String {
+        let quoted = executable.replacingOccurrences(of: "'", with: "'\\''")
+        return """
+        #!/bin/sh
+        if [ -x '\(quoted)' ]; then exec '\(quoted)' --acp "$@"; fi
+        echo "lastdrop-acp: lastdrop is gone" >&2
+        exit 127
+
+        """
     }
 
     /// The wrapper's content. If the lastdrop binary is gone (uninstalled, moved) a thread must still run: the
