@@ -679,8 +679,11 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
   if (route.ran && !prompt) throw new Error('The native agent resumed without a new text message.')
   await put($, `native-agent:${id}`, route)
   let run: Run | undefined
+  // Awaited before the turn ends: a stop still on its way when the next turn (a steer) starts that run's id
+  // again would find the new runner and stop it instead.
+  let stopping: Promise<void> | undefined
   const stop = () => {
-    void stopRemote($, id).catch(error => $.ui.log(`lastdrop: stop ${id} failed: ${String(error)}`, { to: 'debug' }))
+    stopping = stopRemote($, id).catch(error => $.ui.log(`lastdrop: stop ${id} failed: ${String(error)}`, { to: 'debug' }))
   }
   signal.addEventListener('abort', stop, { once: true })
   try {
@@ -726,6 +729,7 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
     return result
   } finally {
     signal.removeEventListener('abort', stop)
+    await stopping
     run?.stop()
     if (signal.aborted) {
       await record($, id, { type: 'result', stopped: true, text: 'Stopped', isError: true })
@@ -1265,8 +1269,11 @@ async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: Abort
     return undefined
   }
   let stream: Run | undefined
+  // Awaited before the turn ends: a stop still on its way when the next turn (a steer) starts that run's id
+  // again would find the new runner and stop it instead.
+  let stopping: Promise<void> | undefined
   const stop = () => {
-    void stopRemote($, run.id).catch(error => $.ui.log(`lastdrop: stop ${run.id} failed: ${String(error)}`, { to: 'debug' }))
+    stopping = stopRemote($, run.id).catch(error => $.ui.log(`lastdrop: stop ${run.id} failed: ${String(error)}`, { to: 'debug' }))
   }
   signal.addEventListener('abort', stop, { once: true })
   try {
@@ -1294,6 +1301,7 @@ async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: Abort
     return { ...result, text: delegatedHeader(result) + String(result.text ?? '') }
   } finally {
     signal.removeEventListener('abort', stop)
+    await stopping
     stream?.stop()
   }
 }

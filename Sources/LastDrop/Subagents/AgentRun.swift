@@ -756,14 +756,16 @@ enum AgentRun {
         guard let i = args.firstIndex(of: "--agent-stop"), i + 1 < args.count else { exit(2) }
         let id = args[i + 1]
         // The runner may be between two attempts of a chain, with no Claude Code or provider process to end.
-        guard AgentRegistry.runnerAlive(id) else {
+        guard let runner = AgentRegistry.runner(id) else {
             emit(["type": "error", "text": "Agent \(id) isn't running."])
             exit(1)
         }
-        AgentRegistry.markStopped(id)
+        // The mark names the runner it stops: one killed before it reads the mark (the plugin ends the old turn's
+        // runner as a steer starts the next) leaves nothing behind for the runner that resumes the same id.
+        AgentRegistry.markStopped(id, runner: runner)
         if let pid = AgentRegistry.process(id) { SubagentRunner.terminate(pid) }
         // Waiting to retry after a passing error: no process to end, so the wait is cut short.
-        else if let runner = AgentRegistry.runner(id) { kill(runner, SIGUSR1) }
+        else { kill(runner, SIGUSR1) }
         emit(["type": "stopped"])
         exit(0)
     }
@@ -859,7 +861,7 @@ enum AgentRegistry {
         var agents: [String: Entry] = [:]
         var fullUntil: [String: Date] = [:]     // account → when to try it again after "limit reached"
         var processes: [String: Processes]? = [:]
-        var stopped: [String]? = []             // agents TaskStop ended, until their runner reported it
+        var stopped: [String]? = []             // "<agent>#<runner pid>" TaskStop ended, until that runner reported it
         var troubledUntil: [String: Date]? = [:] // account → when to try it again after its retries were spent
 
         init() {}
@@ -963,17 +965,33 @@ enum AgentRegistry {
         }
     }
 
-    static func markStopped(_ id: String) { withStore { $0.stopped = ($0.stopped ?? []).filter { $0 != id } + [id] } }
+    /// Marks `id` stopped for the runner `runner` (this process by default), as `"<id>#<pid>"`. Only that runner reads
+    /// the mark: a later runner resuming the same id never sees it. Marks whose runner is dead (and older marks
+    /// without a pid) are dropped.
+    static func markStopped(_ id: String, runner: Int32 = getpid()) {
+        withStore { store in
+            store.stopped = (store.stopped ?? []).filter { liveMark($0) && $0 != stopMark(id, runner) } + [stopMark(id, runner)]
+        }
+    }
 
-    static func wasStopped(_ id: String) -> Bool { withStore { $0.stopped?.contains(id) ?? false } }
+    static func wasStopped(_ id: String) -> Bool { withStore { $0.stopped?.contains(stopMark(id, getpid())) ?? false } }
 
-    /// Whether TaskStop ended `id`, forgetting it.
+    /// Whether TaskStop ended `id` in this runner, forgetting it.
     static func takeStopped(_ id: String) -> Bool {
         withStore { store in
-            guard store.stopped?.contains(id) == true else { return false }
-            store.stopped?.removeAll { $0 == id }
+            let mark = stopMark(id, getpid())
+            guard store.stopped?.contains(mark) == true else { return false }
+            store.stopped?.removeAll { $0 == mark }
             return true
         }
+    }
+
+    static func stopMark(_ id: String, _ runner: Int32) -> String { "\(id)#\(runner)" }
+
+    /// Whether a stop mark's runner is still alive.
+    private static func liveMark(_ mark: String) -> Bool {
+        guard let hash = mark.lastIndex(of: "#"), let pid = Int32(mark[mark.index(after: hash)...]), pid > 0 else { return false }
+        return kill(pid, 0) == 0
     }
 
     /// Drops an agent that never ran, so a follow-up doesn't find an entry for the built-in agent's work.

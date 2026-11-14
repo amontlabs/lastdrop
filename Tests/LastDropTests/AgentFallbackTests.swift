@@ -337,6 +337,64 @@ final class AgentFallbackTests: LastDropTestCase {
         XCTAssertFalse(AgentRegistry.runnerAlive(id))
     }
 
+    /// A steer kills the old turn's runner before it reads its stop mark; the runner resuming the same id must not see it.
+    func testAStopMarkIsOnlyForTheRunnerItTargeted() throws {
+        let id = "fb-" + UUID().uuidString
+        let other = getppid()   // alive, and not this process
+        AgentRegistry.markStopped(id, runner: other)
+        XCTAssertFalse(AgentRegistry.wasStopped(id))
+        XCTAssertFalse(AgentRegistry.takeStopped(id))
+        AgentRegistry.markStopped(id, runner: getpid())
+        XCTAssertTrue(AgentRegistry.wasStopped(id))
+        XCTAssertTrue(AgentRegistry.takeStopped(id))
+        XCTAssertFalse(AgentRegistry.takeStopped(id))
+        // The other runner's mark is still there for it.
+        XCTAssertTrue(stopMarks().contains(AgentRegistry.stopMark(id, other)))
+        AgentRegistry.markStopped(id, runner: other)   // marking again keeps one copy
+        XCTAssertEqual(stopMarks().filter { $0 == AgentRegistry.stopMark(id, other) }.count, 1)
+    }
+
+    /// The steer race: `--agent-stop` marked the old turn's runner, which was killed before it read the mark; the
+    /// steer's runner resumes the same id and finishes normally, so it reports the agent's answer, not "Stopped.".
+    func testARunAfterAKilledRunnersStopReportsItsAnswer() async throws {
+        let id = "fb-" + UUID().uuidString
+        AgentRegistry.markStopped(id, runner: try deadPid())
+        FakeCodex.script = { [self] _, events in events.started("Codex", "m"); return answered("Codex") }
+        await AgentRun.runDefined(definition(fallbacks: []), try request(), agentID: id, resume: nil, mcpConfig: nil)
+        XCTAssertEqual(lines.last?["type"] as? String, "result")
+        XCTAssertNil(lines.last?["stopped"])
+        XCTAssertNotEqual(lines.last?["text"] as? String, "Stopped.")
+        // A stop aimed at this runner still stops it.
+        lines = []
+        FakeCodex.script = { [self] _, events in events.started("Codex", "m"); AgentRegistry.markStopped(id); return answered("Codex") }
+        await AgentRun.runDefined(definition(fallbacks: []), try request(), agentID: id, resume: nil, mcpConfig: nil)
+        XCTAssertEqual(lines.last?["text"] as? String, "Stopped.")
+        XCTAssertEqual(lines.last?["stopped"] as? Bool, true)
+    }
+
+    func testStopMarksOfDeadRunnersArePruned() throws {
+        let id = "fb-" + UUID().uuidString
+        let dead = try deadPid()
+        AgentRegistry.markStopped(id, runner: dead)
+        XCTAssertTrue(stopMarks().contains(AgentRegistry.stopMark(id, dead)))
+        // Any new mark drops the dead runner's.
+        AgentRegistry.markStopped(id, runner: getpid())
+        XCTAssertFalse(stopMarks().contains(AgentRegistry.stopMark(id, dead)))
+        XCTAssertTrue(AgentRegistry.takeStopped(id))
+    }
+
+    private func deadPid() throws -> Int32 {
+        let gone = Process()
+        gone.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try gone.run()
+        gone.waitUntilExit()
+        return gone.processIdentifier
+    }
+
+    private func stopMarks() -> [String] {
+        AgentRegistry.readStore(at: AgentRegistry.fileOverride!).store.stopped ?? []
+    }
+
     private func repo() throws -> URL {
         let repo = FileManager.default.temporaryDirectory.appendingPathComponent("lastdrop-fbwt-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
