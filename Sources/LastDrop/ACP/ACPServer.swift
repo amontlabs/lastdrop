@@ -348,11 +348,16 @@ final class ACPServer: @unchecked Sendable {
 
     private func prompt(_ id: Any, _ params: [String: Any]) {
         guard let session = session(params) else { return fail(id, -32002, unknownSession(params)) }
-        let text = Self.userText(params["prompt"] as? [[String: Any]] ?? [])
+        let blocks = params["prompt"] as? [[String: Any]] ?? []
+        let text = Self.userText(blocks)
+        let mode = Self.interactionMode(blocks)
         let started: Result<(Turn, [String: Any]), PromptError> = lock.withLock {
             if session.turn != nil { return .failure(.init(code: -32000, message: "A turn is already running in this session.")) }
-            let request: [String: Any]
-            do { request = try prepare(session, text) } catch let error as PromptError { return .failure(error) } catch {
+            // T3 sends its interaction mode with the wrapper whenever it changes: Plan runs the turn read-only, as a
+            // T3 Claude child switched to Plan does; Default goes back to the child's own mode.
+            if let mode { session.plan = mode == "plan" }
+            var request: [String: Any]
+            do { request = try prepare(session, text); if session.plan { request["permissionMode"] = "plan" } } catch let error as PromptError { return .failure(error) } catch {
                 return .failure(.init(code: -32000, message: error.localizedDescription))
             }
             let turn = Turn(requestID: id, session: session.id, run: session.entry!.run)
@@ -379,11 +384,10 @@ final class ACPServer: @unchecked Sendable {
             let picked = session.model ?? Self.defaultModel
             let catalog = AgentCatalog.load(from: options.catalog)
             var agent = run?.agent, model = run?.model
-            if agent == nil && model == nil && found == nil {
-                // No tag: the task runs on the model picked for the session.
-                if catalog.agent(picked) != nil { agent = picked } else if Self.claudeModels.contains(where: { $0.id == picked }) { model = picked } else {
-                    throw PromptError(code: -32000, message: "lastdrop has no model \(picked) (Settings → Agents).")
-                }
+            if found == nil {
+                // Only children lastdrop's plugin tagged run here: it checked room, mode and effort first. A thread
+                // or a child started on this provider directly would skip all of that.
+                throw PromptError(code: -32000, message: "lastdrop's T3 provider only runs background tasks that lastdrop starts. Ask for the model through delegate_task's target.model, without providerInstanceId.")
             }
             if agent == nil && found != nil, run?.model == nil, catalog.agent(picked) != nil { agent = picked }
             let runID = run?.id ?? "acp-\(UUID().uuidString.lowercased())"
@@ -461,8 +465,6 @@ final class ACPServer: @unchecked Sendable {
                 return .failed(line["text"] as? String ?? "lastdrop could not start the agent.")
             case "result":
                 if turn.cancelled { return .cancelled }
-                // Stopped by something other than T3 (`--agent-stop` from elsewhere): reported as the plugin does.
-                if line["stopped"] as? Bool == true { return .ended(text: LastDropTag.header(line) + (line["text"] as? String ?? ""), usage: Self.usage(line)) }
                 if line["isError"] as? Bool == true { return .failed(line["text"] as? String ?? "The agent failed.") }
                 if !started { return .failed(line["text"] as? String ?? "lastdrop could not start the agent.") }
                 return .ended(text: LastDropTag.header(line) + (line["text"] as? String ?? ""), usage: Self.usage(line))
@@ -515,6 +517,18 @@ final class ACPServer: @unchecked Sendable {
     static func userText(_ blocks: [[String: Any]]) -> String {
         T3Wrapper.strip(blocks: blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil })
     }
+
+    /// The interaction mode T3's wrapper names ("plan" or "default"), when the prompt carries the wrapper.
+    static func interactionMode(_ blocks: [[String: Any]]) -> String? {
+        for block in blocks where block["type"] as? String == "text" {
+            guard let text = block["text"] as? String, text.hasPrefix(T3Wrapper.instructionsOpen),
+                  let end = text.range(of: T3Wrapper.requestOpen) else { continue }
+            let instructions = text[..<end.lowerBound]
+            if instructions.contains("## T3 Code interaction mode: Plan") { return "plan" }
+            if instructions.contains("## T3 Code interaction mode: Default") { return "default" }
+        }
+        return nil
+    }
 }
 
 /// One open ACP session.
@@ -524,6 +538,8 @@ final class Session {
     var model: String?
     var entry: ACPSessions.Entry?
     var turn: Turn?
+    /// T3 set the thread to Plan: turns run read-only until it says Default.
+    var plan = false
 
     init(id: String, cwd: String) {
         self.id = id

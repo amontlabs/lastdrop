@@ -1313,6 +1313,20 @@ test('an added model with its own runtime or interaction mode keeps today\'s cal
   expect((inherited!.target as Record<string, unknown>).providerInstanceId).toBe('lastdrop')
 })
 
+test('a call naming the lastdrop instance itself goes through the same checks and gets the tag', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3: { [DELEGATE]: SHELL } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await delegate($, { target: { providerInstanceId: 'lastdrop', model: 'sol' } })
+  await delegate($, { target: { providerInstanceId: 'lastdrop', model: 'opus' } })
+  const [added, claude, ...more] = delegateCalls(e)
+  expect(more.length).toBe(0)
+  expect(added!.target).toEqual({ providerInstanceId: 'lastdrop', model: 'sol' })
+  expect(tagOf(String(added!.task)).agent).toBe('sol')
+  // A Claude model asked of the instance runs as a plain child on T3's Claude instance, as today.
+  expect(claude!.target).toEqual({ model: 'opus' })
+  expect(tagOf(String(claude!.task)).model).toBe('opus')
+})
+
 const REFUSALS = ['Provider instance lastdrop is not registered.', 'Provider lastdrop cannot run a child task: Provider instance is disabled.',
   'Model sol is not advertised by provider lastdrop.', 'Provider instance "lastdrop" is disabled for project p1.', 'provider_unavailable']
 

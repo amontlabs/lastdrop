@@ -160,16 +160,42 @@ final class ACPServerTests: LastDropTestCase {
         t3.end()
     }
 
-    func testARunStoppedElsewhereReportsItsTextLikeThePlugin() throws {
+    func testARunStoppedElsewhereFailsTheTurnLikeThePlugin() throws {
         try scenario([[["type": "started", "agentId": "task-9", "account": "Codex"],
                        ["type": "result", "text": "Stopped.", "isError": true, "stopped": true, "account": "Codex"]]])
         let t3 = try client()
         let session = try open(t3, model: "flash")
-        let id = t3.send("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Long", ["id": "task-9", "agent": "flash"]), first: true)])
-        let answer = try t3.answer(id, timeout: 10)
-        XCTAssertEqual((answer["result"] as? [String: Any])?["stopReason"] as? String, "end_turn", "no cancel from T3")
-        let chunks = t3.updates(session).filter { $0["sessionUpdate"] as? String == "agent_message_chunk" }
-        XCTAssertTrue(chunks.contains { String(describing: $0).contains("Stopped.") }, "\(chunks)")
+        let message = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt(LastDropTag.tag("Long", ["id": "task-9", "agent": "flash"]), first: true)])
+        XCTAssertEqual(message, "Stopped.", "delegatedTurn throws the runner's error text")
+        t3.end()
+    }
+
+    func testAnUntaggedPromptIsRefusedAndRunsNothing() throws {
+        try scenario([[["type": "result", "text": "Ok.", "isError": false]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let message = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
+        XCTAssertTrue(message?.contains("only runs background tasks that lastdrop starts") ?? false, message ?? "no error")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("requests.jsonl").path), "no runner started")
+        t3.end()
+    }
+
+    func testPlanModeFromT3sWrapperRunsTheTurnReadOnlyUntilDefault() throws {
+        let line: [String: Any] = ["type": "result", "text": "Ok.", "isError": false, "account": "Codex"]
+        let started: [String: Any] = ["type": "started", "agentId": "task-p", "account": "Codex"]
+        try scenario([[started, line], [started, line], [started, line]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let tagged = LastDropTag.tag("Look", ["id": "task-p", "agent": "flash", "permissionMode": "bypassPermissions"])
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt(tagged, first: true)])
+        func wrapped(_ mode: String, _ text: String) -> [[String: Any]] {
+            [["type": "text", "text": "<t3_code_instructions>\n## T3 Code interaction mode: \(mode)\n\nx\n</t3_code_instructions>\n\n<user_request>\n\(text)\n</user_request>"]]
+        }
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": wrapped("Plan", "Plan it")])
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": wrapped("Default", "Do it")])
+        let modes = try runnerRequests().map { $0["permissionMode"] as? String }
+        XCTAssertEqual(modes, ["bypassPermissions", "plan", "bypassPermissions"])
+        XCTAssertEqual(try runnerRequests()[1]["prompt"] as? String, "Plan it")
         t3.end()
     }
 

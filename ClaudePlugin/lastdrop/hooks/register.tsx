@@ -718,7 +718,6 @@ const T3_LASTDROP = 'lastdrop'
 /** How long a refused attempt on that instance keeps the next children on T3's Claude instance. */
 const T3_LASTDROP_SKIP_MS = 10 * 60_000
 const T3_LASTDROP_FAILED = 't3-lastdrop:failed'
-/** The Claude models the instance offers, by alias. */
 /**
  * What T3's `delegate_task` answers (isError) when it refused the target before creating anything: the
  * instance unknown, disabled or unhealthy, the model not offered (OrchestratorMcpService resolveTarget, and
@@ -1138,7 +1137,12 @@ export const register: Register = on => {
   // provider, and the child's turns run there (delegatedTurn). No room: T3 starts the child unchanged.
   on('tool.call', { tool: DELEGATE }, async ($, e, next) => {
     const call = e as unknown as Record<string, unknown>
-    const target = (call.target ?? {}) as Record<string, unknown>
+    const asked = (call.target ?? {}) as Record<string, unknown>
+    // A call naming lastdrop's own instance goes through the same checks as one on T3's Claude instance: the
+    // instance only runs children this hook tagged.
+    const { providerInstanceId: named, driverKind: kind, ...unnamed } = asked
+    const target = named === T3_LASTDROP && (kind === undefined || kind === 'acpRegistry') ? unnamed : asked
+    if (target !== asked) e = { ...e, target: Object.keys(target).length > 0 ? target : undefined } as typeof e
     if (typeof call.task !== 'string' || target.environmentId !== undefined) return next(e)
     if ((target.providerInstanceId ?? T3_CLAUDE) !== T3_CLAUDE || (target.driverKind ?? T3_CLAUDE) !== T3_CLAUDE) return next(e)
     const model = typeof target.model === 'string' ? target.model : undefined
