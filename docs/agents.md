@@ -189,13 +189,61 @@ Stop, which ends native background agents. Its orchestration prompt therefore se
 `delegate_task` tool, which starts a child thread. lastdrop runs those children the way it runs an Agent call,
 with no extra providers or accounts set up in T3.
 
-- **Parent (`tool.call` on `mcp__t3-code__delegate_task`).** For a child on T3's built-in Claude instance (no
-  `providerInstanceId`, or `claudeAgent`) on this machine, with no model, a Claude model or an added model,
-  the plugin asks `--agent-route` as for Agent. No room: a plain call goes to T3 unchanged (the child runs on
-  the session's account), an added model is denied. Otherwise the task gets a last line
-  `<!-- lastdrop {"id":…,"agent"|"model":…,"effort":…,"description":…} -->`, and an added model is removed
-  from `target` (T3 doesn't know it; the child keeps the session's model, which never runs for it). Other
-  instances, other models and other machines are left to T3. The transcript keeps the model's own arguments.
+- **lastdrop's T3 instance.** lastdrop's T3 switch also adds a T3 provider instance `lastdrop` (driver
+  `acpRegistry`), which runs `lastdrop --acp` and offers every enabled added agent by name plus `fable`, `opus`,
+  `sonnet` and `haiku`; T3 lists it in `orchestrator_capabilities`. The model starts background work there with
+  `delegate_task` and `target: { providerInstanceId: "lastdrop", model: "flash" }`, and the call goes to T3 exactly as
+  written: since 2026-11-14 auto mode refuses a call a hook changed. lastdrop's server checks room
+  (`--agent-route`, ended after 30 s or on a cancel), gives the run a new id and runs each turn with `--agent-run`.
+  T3 names the child's real model and instance, so nothing is rewritten. The plugin knows the instance is set up
+  from `--agent-catalog` (`t3Instance`: ours, enabled, its wrapper there).
+  - What such a child loses against the tag path: `target.options` (effort: the instance offers none, so an added
+    agent runs at its own effort and a Claude model at the runner's default) and the call's `title` (the run has
+    no description). T3 tells it no permission mode: T3's Plan mode runs a turn read-only, otherwise it runs in auto
+    mode, whatever its parent's (looser than an `acceptEdits` parent, tighter than a full-access one).
+  - A model change on the child is taken until its run starts, then refused ("This run stays on opus; start a new
+    task for flash.").
+  - **Threads the user starts on it.** T3 lists lastdrop as a provider, so the user can start a top-level thread on
+    it. T3 gives an ACP agent no sign of whether a thread is a delegated child: `session/new` has only `cwd` and
+    the MCP servers, the per-prompt instructions are the same, and the child flag (`lineage.relationshipToParent`)
+    stays inside T3's MCP session registry. So such a thread runs too, as a child would, but without T3's tools
+    (the runner gets no MCP servers yet) and losing its conversation when T3 rolls it back (T3 opens a bare new
+    session; lastdrop starts a new run). This is Phase 2's blocker; the app's T3 setting says the provider is for
+    background tasks.
+- **Parent (`tool.call` on `mcp__t3-code__delegate_task`).** The call is passed unchanged or refused, never changed:
+  - On the `lastdrop` instance: unchanged. If T3 refuses it before creating anything (instance unhealthy, model not
+    offered: the same errors as before), lastdrop treats the instance as not set up for 10 minutes, and adds a note
+    to T3's error: in auto mode, use the Agent type for foreground work (background isn't available); otherwise
+    call again without `providerInstanceId`, which takes the tag path.
+  - An added agent on T3's Claude instance, instance usable: denied with the instance form ("sol runs on lastdrop's
+    T3 instance: call delegate_task with target: { providerInstanceId: "lastdrop", model: "sol" }, or for foreground
+    work the Agent tool with subagent_type: "lastdrop:sol".").
+  - A plain Claude child (no model, or a Claude model, on T3's Claude instance), in every mode: unchanged.
+    `--agent-route` is asked as for Agent; with room, lastdrop first notes the run (`lastdrop --delegate-note`, a
+    locked `delegate-notes.json` in its support folder, shared by every account profile) with the parent's thread
+    id and the task. The child's plugin claims the note at its first turn (see Child) and answers its turns as on
+    the tag path. T3 failing the call drops the note; no room, or lastdrop failing, leaves an ordinary T3 Claude
+    thread. The parent records the child thread T3 answers with, so only that thread claims the note (a replayed
+    task's note is dropped). The child reads the notes file without starting a process.
+  - Other instances, other models and other machines are left to T3.
+- **Without the instance (the tag path).** When the instance isn't set up (or the app is older, or T3 refused it in
+  the last 10 minutes), a session in auto mode, or one whose mode isn't known yet (after a plugin reload, until the
+  next prompt or tool result: the mod API has no live mode), gets an added agent denied, pointing to its Agent
+  type. Plain children are noted as above (an app without `--delegate-note` sends them unchanged in auto mode and
+  tagged outside it). Outside auto mode,
+  where a changed call still runs, the old path stays: the plugin asks `--agent-route` as for Agent (no room: a
+  plain call goes to T3 unchanged, an added model is denied); otherwise the task gets a last line
+  `<!-- lastdrop {"id":…,"agent"|"model":…,"effort":…,"description":…,"permissionMode":…} -->`, and an added model
+  is removed from `target` (T3 doesn't know it; the child keeps the session's model, which never runs for it). The
+  transcript keeps the model's own arguments. The rest of this section is that path, which also serves children
+  started before an update; lastdrop's server runs a tagged first prompt as the tag says.
+- **Child of a note.** In T3 without a tag, the child looks for a note bound to its thread (its store, then
+  lastdrop's notes: a follow-up). At its first turn it claims an open note (under 10 minutes old) whose task ends its
+  first user blocks (after T3's "Act as the … sub-agent" line, before a merged steer), and whose parent is the one
+  `t3_thread_read` names for this thread (a thread T3 says nobody delegated claims nothing; when T3 can't say, only
+  a lone matching note). Several: the child's model family first, then the oldest. A binding holds only while the
+  session's first message still ends with the task: a fresh session T3 starts in the thread runs on its own model.
+  Then as below.
 - **Child (`turn.step` on the main loop).** When the session's first user message ends with that tag, the
   plugin answers each turn with `lastdrop --agent-run` (the task, then each new message with `resume`), so the
   child's own model never runs. Accounts, added models, fallbacks at a limit and stop are the runner's, as for
@@ -215,14 +263,23 @@ with no extra providers or accounts set up in T3.
   `orchestrator_capabilities` gains `"addedModels":[{"model","runsOn"}]` (not for another machine). Plain
   Claude children are left as T3 wrote them. T3's own UI is unchanged. A rewrite that fails keeps T3's answer;
   a T3 tool is never called twice.
-- **Listing.** In T3 (`T3CODE_THREAD_ID` set) the paragraph the plugin adds to the listing reads "The lastdrop:
-  agent types are agents the user added; each runs on the provider and model its description names.
-  delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through the Agent
+- **Listing.** In T3 (`T3CODE_THREAD_ID` set) with lastdrop's instance usable, the paragraph the plugin adds to
+  the listing leads with it: "Background work in T3 Code on Claude models (fable, opus, sonnet, haiku) uses
+  delegate_task as usual; lastdrop picks the account. For an added agent, call delegate_task with target: {
+  providerInstanceId: "lastdrop", model: "<name>" } and no options, where <name> is a lastdrop: agent type without
+  lastdrop:; effort comes from the agent's own settings." then the types sentence and "They run through the Agent
   tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to
-  them: use Agent, and delegate_task only for background work." `delegate_task` itself is unchanged: it takes the
-  bare name in `target.model`, as before. T3's own prompt says to use `delegate_task`
-  for another provider's model; it is appended after the sections a plugin can rewrite (`prompt.compose`
-  lists `lean_body, pronouns, …` without it), so lastdrop answers it here instead.
+  them: use Agent with them for foreground work." With no added agents it is the first sentence alone. A paragraph
+  frozen with an earlier wording keeps it. `delegate_task`'s own description gains, while the instance is set up
+  and agents exist, "The agents the user added to lastdrop (…) run only with target.providerInstanceId "lastdrop"
+  and target.model set to the agent's name; Claude models need no providerInstanceId." Without the instance it reads as
+  before: "… delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through
+  the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't
+  apply to them: use Agent, and delegate_task only for background work." The text is frozen per session like the rest of the
+  paragraph; the hook follows what the app says now, so a session frozen before the instance was set up is told
+  the form by the deny. T3's own prompt says to use `delegate_task` for another provider's model; it is appended
+  after the sections a plugin can rewrite (`prompt.compose` lists `lean_body, pronouns, …` without it), so lastdrop
+  answers it here instead.
 
 Evidence (T3 Code beta, Claude Code 2.1.319, 2026-11-07, real T3 threads on Sonnet 5.5 and Opus 5.5):
 "ask gemini …" used Agent with `gemini`, 5/5. "… flash in the background" and "start flash in the

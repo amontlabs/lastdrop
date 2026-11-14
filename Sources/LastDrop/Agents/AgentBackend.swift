@@ -61,6 +61,17 @@ protocol AgentBackend {
 }
 
 extension AgentProvider {
+    /// The efforts a caller may give an agent on this provider without asking the provider (T3's effort menu is
+    /// built from the catalog alone). Codex, OpenRouter and Antigravity tell each model's own list only when asked;
+    /// a level the model doesn't take fails that attempt with the provider's message.
+    var callerEfforts: [String] {
+        switch self {
+        case .zai: ZAIBackend.efforts
+        case .antigravity: AntigravityBackend.efforts
+        case .claude, .codex, .openrouter: ClaudeBackend.efforts
+        }
+    }
+
     var backend: any AgentBackend.Type {
         switch self {
         case .claude: ClaudeBackend.self
@@ -89,10 +100,14 @@ enum UnavailableBackend: AgentBackend {
 enum ClaudeBackend: AgentBackend {
     static let efforts = ["low", "medium", "high", "xhigh", "max"]
 
+    /// Claude Code's model aliases, strongest first, and the model each stands for today: the one place their
+    /// versions are written. Every alias takes every effort of `efforts`.
+    static let aliases: [(alias: String, model: String)] = [
+        ("fable", "claude-fable-5-2"), ("opus", "claude-opus-5-5"), ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5"),
+    ]
+
     static func models() async throws -> [AgentModel] {
-        [("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")].map {
-            AgentModel(id: $0.0, name: $0.1, efforts: efforts, defaultEffort: nil)
-        }
+        aliases.map { AgentModel(id: $0.alias, name: $0.alias.capitalized, efforts: efforts, defaultEffort: nil) }
     }
 
     static func run(_ job: AgentJob, _ events: AgentEvents) async -> SubagentRunner.Result {

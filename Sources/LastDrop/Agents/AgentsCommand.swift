@@ -104,7 +104,7 @@ enum AgentsCommand {
     /// What a command prints; a failure's reason is the error's.
     static func run(_ args: [String],
                     stdin: () -> Data = { FileHandle.standardInput.readDataToEndOfFile() },
-                    models: (AgentProvider) async throws -> [AgentModel] = { try await $0.backend.models() },
+                    models: (AgentProvider) async throws -> [AgentModel] = { try await $0.models() },
                     url: URL = LastDropPaths.agentCatalog) async throws -> String {
         switch (args.first, args.count) {
         case (nil, _), ("--help", _), ("-h", _), ("help", _):

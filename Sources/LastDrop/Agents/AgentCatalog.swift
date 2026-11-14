@@ -277,9 +277,22 @@ struct AgentCatalog: Codable, Equatable, Sendable {
         }]
     }
 
-    /// `lastdrop --agent-catalog`: the enabled agents for the plugin, as one JSON line.
+    /// `--agent-catalog`'s line, without its newline.
+    static func pluginLine(catalog: AgentCatalog = load(), t3Instance: Bool = T3Settings.acpStatus() == .ready) -> Data {
+        var json = catalog.pluginJSON()
+        json["t3Instance"] = t3Instance
+        // `lastdrop --delegate-note` exists: the plugin notes plain T3 children there instead of tagging their task.
+        json["delegateNotes"] = true
+        // Read by the plugin without the lock (the file is replaced whole), so an ordinary thread spawns nothing.
+        json["delegateNotesFile"] = DelegateNotes.file.path
+        return (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+    }
+
+    /// `lastdrop --agent-catalog`: the enabled agents for the plugin, as one JSON line. `t3Instance` says T3 Code
+    /// runs lastdrop's own provider instance (`lastdrop`, enabled, its wrapper in place): the plugin then sends
+    /// background children there, in the call as the model writes it.
     static func printMain() -> Never {
-        let data = (try? JSONSerialization.data(withJSONObject: load().pluginJSON(), options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+        let data = pluginLine()
         FileHandle.standardOutput.write(data + Data("\n".utf8))
         exit(0)
     }

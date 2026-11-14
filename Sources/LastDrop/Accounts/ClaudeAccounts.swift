@@ -2,28 +2,32 @@ import Foundation
 
 /// Where lastdrop keeps its own files.
 enum LastDropPaths {
-    static let support: URL = {
+    /// The real support folder, `~/Library/Application Support/lastdrop`.
+    static let defaultSupport: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("lastdrop", isDirectory: true)
     }()
+    /// Tests point the whole support folder at one of their own, so nothing they run touches the real one.
+    nonisolated(unsafe) static var supportOverride: URL?
+    static var support: URL { supportOverride ?? defaultSupport }
     /// Every provider's accounts (`AccountsConfig`).
-    static let accountsConfig = support.appendingPathComponent("accounts.json")
+    static var accountsConfig: URL { support.appendingPathComponent("accounts.json") }
     /// The Claude account list from before `accounts.json`; read once to migrate, never written.
-    static let accounts = support.appendingPathComponent("claude-accounts.json")
-    static let agents = support.appendingPathComponent("subagents.json")
-    static let agentsLock = support.appendingPathComponent("subagents.lock")
-    static let agentsDir = support.appendingPathComponent("agents", isDirectory: true)
+    static var accounts: URL { support.appendingPathComponent("claude-accounts.json") }
+    static var agents: URL { support.appendingPathComponent("subagents.json") }
+    static var agentsLock: URL { support.appendingPathComponent("subagents.lock") }
+    static var agentsDir: URL { support.appendingPathComponent("agents", isDirectory: true) }
     /// lastdrop's list of extra models for the Agent tool (Settings → Agents).
-    static let agentCatalog = support.appendingPathComponent("agent-catalog.json")
+    static var agentCatalog: URL { support.appendingPathComponent("agent-catalog.json") }
     /// Each account's latest usage, written by the app as it refreshes, read by the subagent runner.
-    static let usage = support.appendingPathComponent("usage.json")
+    static var usage: URL { support.appendingPathComponent("usage.json") }
     /// Held around every read-modify-write of `usage.json`, by the app and by runners alike.
-    static let usageLock = support.appendingPathComponent("usage.lock")
+    static var usageLock: URL { support.appendingPathComponent("usage.lock") }
     /// Touched by the app on every tick: runners read usage themselves only when it's old (the app isn't running).
-    static let appHeartbeat = support.appendingPathComponent("app.heartbeat")
+    static var appHeartbeat: URL { support.appendingPathComponent("app.heartbeat") }
     /// The Claude Code version the subagent self-test last passed on.
-    static let selfTest = support.appendingPathComponent("selftest.json")
-    static let selfTestLock = support.appendingPathComponent("selftest.lock")
+    static var selfTest: URL { support.appendingPathComponent("selftest.json") }
+    static var selfTestLock: URL { support.appendingPathComponent("selftest.lock") }
     /// An empty folder that helper CLIs (sign-in, model lists) start in. Starting them in the home folder made macOS ask
     /// for access to Music, Documents and volumes on lastdrop's behalf whenever they looked around where they started.
     static var helperDirectory: String {

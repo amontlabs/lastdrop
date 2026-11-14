@@ -128,4 +128,125 @@ final class T3SettingsTests: LastDropTestCase {
         XCTAssertEqual((try? FileManager.default.destinationOfSymbolicLink(atPath: file.path)), real.path)
         XCTAssertEqual(try claudePath(), wrapper)
     }
+
+    // MARK: The lastdrop provider instance
+
+    private var acpWrapper: String { ThreadLauncher.acpWrapperPath.path }
+
+    private func lastdropEntry() throws -> [String: Any]? {
+        (try json()["providerInstances"] as? [String: Any])?["lastdrop"] as? [String: Any]
+    }
+
+    func testOnAddsBothKeys() throws {
+        try write(#"{"defaultRuntimeMode": "auto"}"#)
+        try T3Settings.enable(wrapper: wrapper)
+        XCTAssertEqual(try claudePath(), wrapper)
+        let entry = try XCTUnwrap(lastdropEntry())
+        XCTAssertEqual(entry["driver"] as? String, "acpRegistry")
+        XCTAssertEqual(entry["enabled"] as? Bool, true)
+        XCTAssertEqual(entry["displayName"] as? String, "lastdrop")
+        let config = try XCTUnwrap(entry["config"] as? [String: Any])
+        XCTAssertEqual(config["source"] as? String, "local")
+        XCTAssertEqual(config["commandPath"] as? String, acpWrapper)
+        XCTAssertEqual(config["commandArgs"] as? [String], [])
+        XCTAssertTrue(acpWrapper.hasSuffix("/bin/lastdrop-acp"))
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: acpWrapper))
+        XCTAssertEqual(T3Settings.acpStatus(), .ready)
+    }
+
+    func testTurningOnAgainDoesNotWrite() throws {
+        try T3Settings.enable(wrapper: wrapper)
+        let before = try Data(contentsOf: file)
+        let stamp = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+        Thread.sleep(forTimeInterval: 0.05)
+        try T3Settings.enable(wrapper: wrapper)
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date, stamp)
+    }
+
+    func testExtraFieldsOnOurEntryAreKept() throws {
+        try write("""
+        {"providerInstances": {"lastdrop": {"driver": "acpRegistry", "accentColor": "#fff", "displayName": "Mine",
+          "config": {"source": "local", "commandPath": "/old/path", "commandArgs": [], "authMethodId": "x"}}}}
+        """)
+        try T3Settings.enable(wrapper: wrapper)
+        let entry = try XCTUnwrap(lastdropEntry())
+        XCTAssertEqual(entry["accentColor"] as? String, "#fff")
+        XCTAssertEqual(entry["displayName"] as? String, "Mine")
+        let config = try XCTUnwrap(entry["config"] as? [String: Any])
+        XCTAssertEqual(config["authMethodId"] as? String, "x")
+        XCTAssertEqual(config["commandPath"] as? String, acpWrapper)
+        XCTAssertEqual(entry["enabled"] as? Bool, true)
+    }
+
+    func testOffDisablesTheEntryAndRestoresTheBinaryPath() throws {
+        try write(#"{"providerInstances": {"claudeAgent": {"driver": "claudeAgent", "config": {"binaryPath": "/mine/claude"}}}}"#)
+        try T3Settings.enable(replacingElsewhere: true, wrapper: wrapper)
+        try T3Settings.disable(wrapper: wrapper)
+        XCTAssertEqual(try claudePath(), "/mine/claude")
+        let entry = try XCTUnwrap(lastdropEntry())
+        XCTAssertEqual(entry["enabled"] as? Bool, false)
+        XCTAssertEqual((entry["config"] as? [String: Any])?["commandPath"] as? String, acpWrapper)
+        XCTAssertEqual(T3Settings.acpStatus(), .disabled)
+        // On again flips it back without losing the entry.
+        try T3Settings.enable(replacingElsewhere: true, wrapper: wrapper)
+        XCTAssertEqual(try lastdropEntry()?["enabled"] as? Bool, true)
+    }
+
+    func testAForeignLastdropInstanceIsLeftAlone() throws {
+        let text = #"{"providerInstances": {"lastdrop": {"driver": "codex", "config": {"binaryPath": "/x"}}}}"#
+        try write(text)
+        try T3Settings.enable(wrapper: wrapper)
+        XCTAssertEqual(try claudePath(), wrapper)   // the switch still works
+        let entry = try XCTUnwrap(lastdropEntry())
+        XCTAssertEqual(entry["driver"] as? String, "codex")
+        XCTAssertEqual((entry["config"] as? [String: Any])?["binaryPath"] as? String, "/x")
+        XCTAssertNil(entry["enabled"])
+        XCTAssertEqual(T3Settings.acpStatus(), .foreign)
+        try T3Settings.disable(wrapper: wrapper)
+        XCTAssertNil(try lastdropEntry()?["enabled"])
+    }
+
+    func testARegistryInstanceNamedLastdropIsForeign() throws {
+        try write(#"{"providerInstances": {"lastdrop": {"driver": "acpRegistry", "config": {"source": "registry", "agentId": "devin"}}}}"#)
+        try T3Settings.enable(wrapper: wrapper)
+        XCTAssertEqual(T3Settings.acpStatus(), .foreign)
+        XCTAssertEqual((try lastdropEntry()?["config"] as? [String: Any])?["agentId"] as? String, "devin")
+        XCTAssertNil((try lastdropEntry()?["config"] as? [String: Any])?["commandPath"])
+    }
+
+    func testABrokenFileGetsNoInstanceEither() throws {
+        try write("{ not json")
+        XCTAssertThrowsError(try T3Settings.enable(wrapper: wrapper))
+        XCTAssertThrowsError(try T3Settings.disable(wrapper: wrapper))
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "{ not json")
+        XCTAssertEqual(T3Settings.acpStatus(), .unreadable)
+    }
+
+    func testTheCatalogLineTellsThePluginWhetherTheInstanceIsReady() throws {
+        func t3Instance() throws -> Bool? {
+            let line = AgentCatalog.pluginLine(catalog: AgentCatalog(agents: []))
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: line) as? [String: Any])["t3Instance"] as? Bool
+        }
+        XCTAssertEqual(try t3Instance(), false, "no instance yet")
+        try T3Settings.enable(wrapper: wrapper)
+        XCTAssertEqual(try t3Instance(), true)
+        try T3Settings.disable(wrapper: wrapper)
+        XCTAssertEqual(try t3Instance(), false, "turned off")
+    }
+
+    func testStatusReportsAMissingWrapperAndAbsence() throws {
+        XCTAssertEqual(T3Settings.acpStatus(), .absent)
+        try T3Settings.enable(wrapper: wrapper)
+        try FileManager.default.removeItem(atPath: acpWrapper)
+        XCTAssertEqual(T3Settings.acpStatus(), .wrapperMissing)
+    }
+
+    func testTheWrapperScriptRunsAcpAndIsRefreshed() throws {
+        ThreadLauncher.writeWrapper(executable: "/apps/it's/App")
+        let text = try String(contentsOfFile: acpWrapper, encoding: .utf8)
+        XCTAssertTrue(text.contains(#"exec '/apps/it'\''s/App' --acp "$@""#))
+        ThreadLauncher.writeWrapper(executable: "/apps/other")
+        XCTAssertTrue(try String(contentsOfFile: acpWrapper, encoding: .utf8).contains("/apps/other"))
+    }
 }

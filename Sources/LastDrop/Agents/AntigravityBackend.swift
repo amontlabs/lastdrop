@@ -283,6 +283,7 @@ enum AntigravityBackend: AgentBackend {
             }
             state.sessionID = sessionID
             let offered = parseModels(acp: session)
+            AgentModelCache.save(.antigravity, offered)
             // A judge the account can't run refuses what it would judge, with that reason: never another model.
             state.judgeProblem = CommandJudge.problem(judgeModel, offered: offered)
             if let problem = state.judgeProblem { events.note("Command judge: " + problem) }

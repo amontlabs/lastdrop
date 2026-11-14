@@ -8,6 +8,8 @@ enum Entry {
         if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--claude-thread" {
             ThreadLauncher.main(Array(CommandLine.arguments.dropFirst(2)))
         }
+        // T3 Code's "lastdrop" ACP provider: stdout carries JSON-RPC only, and AppKit never starts.
+        if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--acp" { ACPServer.main() }
         Rename.migrate()
         if CommandLine.arguments.contains("--agent-key") { EndpointProfile.keyMain() }
         if CommandLine.arguments.contains("--print") { printUsage(); return }
@@ -18,6 +20,7 @@ enum Entry {
         if CommandLine.arguments.contains("--agent-stop") { AgentRun.stopMain() }
         if CommandLine.arguments.contains("--agent-selftest") { SelfTest.main() }
         if CommandLine.arguments.contains("--agent-catalog") { AgentCatalog.printMain() }
+        if CommandLine.arguments.contains("--delegate-note") { DelegateNotes.main() }
         if CommandLine.arguments.contains("--agents") { AgentsCommand.main() }
         if let i = CommandLine.arguments.firstIndex(of: "--update"), i + 1 < CommandLine.arguments.count {
             UpdateCheck.main(as: CommandLine.arguments[i + 1], install: CommandLine.arguments.contains("--install"))
