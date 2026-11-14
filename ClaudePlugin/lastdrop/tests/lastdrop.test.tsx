@@ -1282,6 +1282,13 @@ test('delegate_task goes first to the lastdrop instance with the tag, the model 
   expect(e.store.has('delegated-child:task-1')).toBe(false)
 })
 
+test('the tag carries the parent permission mode for the lastdrop instance', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, lastdrop: 'accept', t3: { [DELEGATE]: SHELL } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'bypassPermissions' } as never)
+  await delegate($, { target: { model: 'sol' }, mode: 'async' })
+  expect(tagOf(String(delegateCalls(e)[0]!.task))).toMatchObject({ agent: 'sol', permissionMode: 'bypassPermissions' })
+})
+
 test('a plain or Claude-model child goes to the lastdrop instance by alias; the tag keeps the model as given', async ($, on) => {
   const e = engine([$, on], { lastdrop: 'accept' })
   await delegate($)

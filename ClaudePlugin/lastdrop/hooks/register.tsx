@@ -853,7 +853,7 @@ function claudeAlias(model: string): string | undefined {
 }
 
 /** A delegated child's run, as its tag carries it. */
-type Delegated = { id: string; agent?: string; model?: string; effort?: string; description?: string }
+type Delegated = { id: string; agent?: string; model?: string; effort?: string; description?: string; permissionMode?: string }
 /**
  * What the child's turns did so far: `sent` counts the user's texts (see `userBlocks`) the runner has. A state
  * stored before `sent` has `cursor`, the index of the first message its next turn hadn't sent.
@@ -1162,7 +1162,8 @@ export const register: Register = on => {
       return agent ? { deny: `lastdrop found nowhere to run ${agent}.` } : next(e)
     }
     const id = `t3-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
-    const run: Delegated = { id, agent, model: agent ? undefined : model, effort, description }
+    // The parent's permission mode: lastdrop's T3 instance learns no mode from T3, and a child runs in its parent's.
+    const run: Delegated = { id, agent, model: agent ? undefined : model, effort, description, permissionMode }
     // T3 doesn't know an added model; the child keeps the session's, which never runs for it.
     const { model: _, ...rest } = target
     const childTarget = agent ? rest : target
