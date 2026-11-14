@@ -195,7 +195,7 @@ final class ACPServerTests: LastDropTestCase {
         ]), "the request the plugin's admission sends, without the run's id")
         XCTAssertEqual(ACPSessions.lookup(session)?.run, id)
 
-        // A follow-up resumes the run and checks no room again.
+        // A follow-up resumes the run without another room check.
         _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("And b.txt?", first: false)])
         let second = try runnerRequests()[1]
         XCTAssertEqual(second["resume"] as? String, id)
@@ -242,6 +242,109 @@ final class ACPServerTests: LastDropTestCase {
         let message = try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
         XCTAssertEqual(message, "lastdrop has no model sol. Pick one of lastdrop's agents, or fable, opus, sonnet or haiku.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("routes.jsonl").path))
+        t3.end()
+    }
+
+    func testACancelDuringTheRoomCheckAnswersCancelledAndStartsNothing() throws {
+        try JSONSerialization.data(withJSONObject: ["type": "routed", "sleep": 20]).write(to: folder.appendingPathComponent("route.json"))
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        let id = t3.send("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: folder.appendingPathComponent("routes.jsonl").path) && Date() < deadline { usleep(20_000) }
+        let sent = Date()
+        t3.notify("session/cancel", ["sessionId": session])
+        let answer = try t3.answer(id, timeout: 10)
+        XCTAssertLessThan(Date().timeIntervalSince(sent), 3, "the check is ended, not waited for")
+        XCTAssertEqual((answer["result"] as? [String: Any])?["stopReason"] as? String, "cancelled")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("requests.jsonl").path), "no runner started")
+        t3.end()
+    }
+
+    func testARoomCheckThatHangsFailsThePrompt() throws {
+        try JSONSerialization.data(withJSONObject: ["type": "routed", "sleep": 20]).write(to: folder.appendingPathComponent("route.json"))
+        let t3 = try client(routeTimeout: 0.5)
+        let session = try open(t3, model: "flash")
+        XCTAssertEqual(try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)]),
+                       "lastdrop’s routing check didn’t answer in 0 s.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("requests.jsonl").path))
+        t3.end()
+    }
+
+    func testAnUntaggedRunThatNeverStartedIsCheckedAgainAfterARestart() throws {
+        try scenario([[["type": "no_room"]],
+                      [["type": "started", "agentId": "x", "account": "Antigravity"], ["type": "result", "text": "Ok.", "isError": false, "account": "Antigravity"]]])
+        let first = try client()
+        let session = try open(first, model: "flash")
+        // The room check passed, then the runner found none: nothing ran.
+        XCTAssertNotNil(try first.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)]))
+        first.end()
+        let saved = try XCTUnwrap(ACPSessions.lookup(session))
+        XCTAssertFalse(saved.ran)
+        XCTAssertEqual(saved.checksRoom, true)
+
+        let second = try client()
+        _ = try second.call("initialize", ["protocolVersion": 2])
+        _ = try second.call("session/resume", ["sessionId": session, "cwd": folder.path, "mcpServers": []])
+        _ = try second.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("Please", first: true)])
+        let request = try runnerRequests()[1]
+        XCTAssertEqual(request["prompt"] as? String, "Do it\n\nPlease")
+        XCTAssertNil(request["resume"])
+        XCTAssertEqual(request["id"] as? String, saved.run)
+        XCTAssertEqual(try jsonLines("routes.jsonl").count, 2, "checked again: it never ran")
+        second.end()
+    }
+
+    func testAModelChangeBeforeTheRunStartsIsTakenAndAfterIsRefused() throws {
+        try scenario([[["type": "no_room"]],
+                      [["type": "started", "agentId": "x", "account": "work"], ["type": "result", "text": "Ok.", "isError": false, "account": "work"]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        XCTAssertNotNil(try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)]))
+        let changed = try t3.call("session/set_config_option", ["sessionId": session, "configId": "model", "value": "opus"])
+        XCTAssertEqual((changed["configOptions"] as? [[String: Any]])?.first?["currentValue"] as? String, "opus")
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("Now", first: false)])
+        let request = try runnerRequests()[1]
+        XCTAssertEqual(request["model"] as? String, "opus")
+        XCTAssertNil(request["agent"])
+
+        // The run started: it stays on opus. The same model again (T3 sets it when it opens a thread) is fine.
+        XCTAssertNoThrow(try t3.call("session/set_config_option", ["sessionId": session, "configId": "model", "value": "opus"]))
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "model", "value": "flash"]),
+                       "This run stays on opus; start a new task for flash.")
+        XCTAssertEqual(try t3.callError("session/set_model", ["sessionId": session, "modelId": "haiku"]),
+                       "This run stays on opus; start a new task for haiku.")
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "model", "value": "nope"]),
+                       "This run stays on opus; start a new task for nope.")
+        XCTAssertEqual(ACPSessions.lookup(session)?.model, "opus")
+        t3.end()
+    }
+
+    func testAModelLastdropDoesntHaveIsRefusedBeforeTheRunStarts() throws {
+        try scenario([[["type": "no_room"]]])
+        let t3 = try client()
+        let session = try open(t3, model: "flash")
+        XCTAssertNotNil(try t3.callError("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)]))
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "model", "value": "sol"]),
+                       "lastdrop has no model sol. Pick one of lastdrop's agents, or fable, opus, sonnet or haiku.")
+        XCTAssertEqual(ACPSessions.lookup(session)?.agent, "flash")
+        t3.end()
+    }
+
+    func testAFreshSessionAfterARollbackStartsANewRun() throws {
+        // T3 rolls an ACP thread back by opening a bare session/new: lastdrop can't tell it's the same thread.
+        let line: [String: Any] = ["type": "result", "text": "Ok.", "isError": false, "account": "Antigravity"]
+        try scenario([[["type": "started", "agentId": "x", "account": "Antigravity"], line], [["type": "started", "agentId": "y", "account": "Antigravity"], line]])
+        let t3 = try client()
+        let before = try open(t3, model: "flash")
+        _ = try t3.call("session/prompt", ["sessionId": before, "prompt": t3Prompt("Do it", first: true)])
+        let after = try open(t3, model: "flash")
+        XCTAssertNotEqual(before, after)
+        _ = try t3.call("session/prompt", ["sessionId": after, "prompt": t3Prompt("Go on", first: true)])
+        let requests = try runnerRequests()
+        XCTAssertNotEqual(requests[0]["id"] as? String, requests[1]["id"] as? String)
+        XCTAssertNil(requests[1]["resume"], "the earlier run's conversation isn't carried over")
+        XCTAssertEqual(requests[1]["prompt"] as? String, "Go on")
         t3.end()
     }
 
@@ -397,7 +500,7 @@ final class ACPServerTests: LastDropTestCase {
                 ["type": "text", "text": "<runtime_info>In case you're asked: you are running in T3 Code through the acpRegistry harness, as flash.</runtime_info>\n\n<pull_request_linking>\nx\n</pull_request_linking>"]]
     }
 
-    private func client(cancelWait: TimeInterval = 7) throws -> FakeT3 {
+    private func client(cancelWait: TimeInterval = 7, routeTimeout: TimeInterval = 10) throws -> FakeT3 {
         let runner = try script("runner", Self.runnerScript)
         let stopper = try script("stopper", Self.stopperScript)
         let router = try script("router", Self.routerScript)
@@ -405,6 +508,7 @@ final class ACPServerTests: LastDropTestCase {
         options.catalogPoll = 0.2
         options.cancelWait = cancelWait
         options.killGrace = 0.5
+        options.routeTimeout = routeTimeout
         return FakeT3(options: options)
     }
 
@@ -468,12 +572,14 @@ final class ACPServerTests: LastDropTestCase {
     /// Records the routing check and answers `route.json`, or `routed`.
     private static let routerScript = #"""
     #!/usr/bin/env python3
-    import json, os, sys
+    import json, os, sys, time
     here = os.path.dirname(os.path.abspath(__file__))
     request = json.loads(sys.stdin.read())
     with open(os.path.join(here, 'routes.jsonl'), 'a') as f: f.write(json.dumps(request) + '\n')
     path = os.path.join(here, 'route.json')
-    sys.stdout.write(json.dumps(json.load(open(path)) if os.path.exists(path) else {'type': 'routed'}) + '\n')
+    answer = json.load(open(path)) if os.path.exists(path) else {'type': 'routed'}
+    if 'sleep' in answer: time.sleep(answer.pop('sleep'))
+    sys.stdout.write(json.dumps(answer) + '\n')
     """#
 
     private static let stopperScript = #"""

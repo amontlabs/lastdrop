@@ -61,7 +61,7 @@ struct T3ThreadsSection: View {
         case .notInstalled, .unreadable: nil
         case .absent: state == .on ? "The lastdrop provider isn't in T3 Code yet. Turn this off and on again." : nil
         case .disabled: state == .on ? "The lastdrop provider is off in T3 Code." : nil
-        case .ready: "The lastdrop provider is ready in T3 Code."
+        case .ready: "The lastdrop provider is ready in T3 Code, for background tasks. A thread started on it has no T3 tools and loses its conversation on a rollback."
         case .wrapperMissing: "The lastdrop provider's launcher is missing. Turn this off and on again."
         case .foreign: "T3 Code has its own provider named lastdrop, so lastdrop left it alone."
         }

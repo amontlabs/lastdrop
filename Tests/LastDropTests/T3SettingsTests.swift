@@ -223,6 +223,18 @@ final class T3SettingsTests: LastDropTestCase {
         XCTAssertEqual(T3Settings.acpStatus(), .unreadable)
     }
 
+    func testTheCatalogLineTellsThePluginWhetherTheInstanceIsReady() throws {
+        func t3Instance() throws -> Bool? {
+            let line = AgentCatalog.pluginLine(catalog: AgentCatalog(agents: []))
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: line) as? [String: Any])["t3Instance"] as? Bool
+        }
+        XCTAssertEqual(try t3Instance(), false, "no instance yet")
+        try T3Settings.enable(wrapper: wrapper)
+        XCTAssertEqual(try t3Instance(), true)
+        try T3Settings.disable(wrapper: wrapper)
+        XCTAssertEqual(try t3Instance(), false, "turned off")
+    }
+
     func testStatusReportsAMissingWrapperAndAbsence() throws {
         XCTAssertEqual(T3Settings.acpStatus(), .absent)
         try T3Settings.enable(wrapper: wrapper)

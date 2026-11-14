@@ -32,6 +32,8 @@ final class ACPServer: @unchecked Sendable {
         var cancelWait: TimeInterval = 7
         /// After SIGTERM, how long before SIGKILL.
         var killGrace: TimeInterval = 2
+        /// How long an untagged run's room check may take before the prompt fails.
+        var routeTimeout: TimeInterval = 30
 
         /// This same binary.
         static func live() -> Options {
@@ -221,24 +223,52 @@ final class ACPServer: @unchecked Sendable {
         guard params["configId"] as? String == "model", let value = params["value"] as? String else {
             return fail(id, -32602, "lastdrop has only a model option.")
         }
-        setModel(of: session, value)
+        if let refusal = setModel(of: session, value) { return fail(id, -32602, refusal) }
         answer(id, ["configOptions": configOptions(current: session.model)])
     }
 
     private func setModel(_ id: Any, _ params: [String: Any]) {
         guard let session = session(params) else { return fail(id, -32002, unknownSession(params)) }
         guard let value = params["modelId"] as? String else { return fail(id, -32602, "session/set_model needs a modelId.") }
-        setModel(of: session, value)
+        if let refusal = setModel(of: session, value) { return fail(id, -32602, refusal) }
         answer(id, [:])
     }
 
-    private func setModel(of session: Session, _ model: String) {
-        lock.withLock {
+    /// The model for the session's next turn; the reason it can't change, else nil. Once the runner started the run,
+    /// it stays on what it runs (the same model again is fine: T3 sets it when it opens a thread). Before that, an
+    /// untagged run takes the new model; a tagged one runs what its tag says.
+    private func setModel(of session: Session, _ model: String) -> String? {
+        let catalog = AgentCatalog.load(from: options.catalog)
+        let refusal: String? = lock.withLock {
+            guard var entry = session.entry else { session.model = model; return nil }
+            if model == entry.model { return nil }
+            if entry.ran {
+                return "This run stays on \(entry.agent ?? entry.runModel ?? entry.parentModel ?? entry.model ?? "its model"); start a new task for \(model)."
+            }
+            if entry.checksRoom == true {
+                guard let what = Self.untaggedRun(model, catalog) else { return Self.unknownModel(model) }
+                entry.agent = what.agent
+                entry.runModel = what.model
+                entry.parentModel = what.model
+            }
+            entry.model = model
+            session.entry = entry
             session.model = model
-            // A run keeps what it started with; the model only names the session (and runs an untagged task).
-            if session.entry != nil { session.entry?.model = model }
+            return nil
         }
-        startWatching()
+        if refusal == nil { startWatching() }
+        return refusal
+    }
+
+    /// What an untagged run of `model` runs: an agent of lastdrop's list, or one of Claude's models; nil for neither.
+    static func untaggedRun(_ model: String, _ catalog: AgentCatalog) -> (agent: String?, model: String?)? {
+        if catalog.agent(model) != nil { return (model, nil) }
+        if claudeModels.contains(where: { $0.id == model }) { return (nil, model) }
+        return nil
+    }
+
+    static func unknownModel(_ model: String) -> String {
+        "lastdrop has no model \(model). Pick one of lastdrop's agents, or fable, opus, sonnet or haiku."
     }
 
     private func close(_ id: Any, _ params: [String: Any]) {
@@ -394,9 +424,9 @@ final class ACPServer: @unchecked Sendable {
             if found == nil {
                 // A child the model started on this instance itself (the plugin never changes the call): it runs the
                 // model T3 picked for the session, with no effort or description, and is checked for room first.
-                if catalog.agent(picked) != nil { agent = picked } else if Self.claudeModels.contains(where: { $0.id == picked }) { model = picked } else {
-                    throw PromptError(code: -32602, message: "lastdrop has no model \(picked). Pick one of lastdrop's agents, or fable, opus, sonnet or haiku.")
-                }
+                guard let what = Self.untaggedRun(picked, catalog) else { throw PromptError(code: -32602, message: Self.unknownModel(picked)) }
+                agent = what.agent
+                model = what.model
             }
             if agent == nil && found != nil, run?.model == nil, catalog.agent(picked) != nil { agent = picked }
             let runID = run?.id ?? "acp-\(UUID().uuidString.lowercased())"
@@ -451,10 +481,11 @@ final class ACPServer: @unchecked Sendable {
     private func drive(_ turn: Turn, _ request: [String: Any], _ session: Session, _ view: TurnView) throws -> Outcome {
         let plain = request["agent"] == nil && request["resume"] == nil
         if request["resume"] == nil, lock.withLock({ session.entry?.checksRoom == true }) {
-            switch Self.admit(options.router, request) {
+            switch Self.admit(options.router, request, timeout: options.routeTimeout, cancelled: { turn.cancelled }) {
             case .routed: break
             case .noRoom: return .failed(Self.noRoom(request, plain: plain))
             case .failed(let message): return .failed(message)
+            case .cancelled: return .cancelled
             }
             if turn.cancelled { return .cancelled }
         }
@@ -493,11 +524,12 @@ final class ACPServer: @unchecked Sendable {
         return .failed(started ? "lastdrop’s runner ended without the agent’s report." : "lastdrop’s runner ended before the agent started.")
     }
 
-    enum Admission: Equatable { case routed, noRoom, failed(String) }
+    enum Admission: Equatable { case routed, noRoom, failed(String), cancelled }
 
     /// `lastdrop --agent-route` with the request the plugin's `admission` sends for a delegate_task child (the
     /// turn's request without its run id): it picks nothing and starts nothing, it only says whether there is room.
-    static func admit(_ router: [String], _ turnRequest: [String: Any]) -> Admission {
+    static func admit(_ router: [String], _ turnRequest: [String: Any], timeout: TimeInterval = 30,
+                      cancelled: () -> Bool = { false }) -> Admission {
         var request = turnRequest
         request["id"] = nil
         guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.withoutEscapingSlashes]) else {
@@ -514,8 +546,25 @@ final class ACPServer: @unchecked Sendable {
         do { try process.run() } catch { return .failed("lastdrop’s routing check failed: \(error.localizedDescription)") }
         try? stdin.fileHandleForWriting.write(contentsOf: data)
         try? stdin.fileHandleForWriting.close()
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        // Read on its own thread, so a cancel or a check that hangs ends it here instead of holding the turn.
+        let done = DispatchSemaphore(value: 0)
+        let box = OutputBox()
+        let reader = stdout.fileHandleForReading
+        DispatchQueue.global().async {
+            box.data = reader.readDataToEndOfFile()
+            done.signal()
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while done.wait(timeout: .now() + 0.05) == .timedOut {
+            let stop: Admission? = cancelled() ? .cancelled : Date() >= deadline
+                ? .failed("lastdrop’s routing check didn’t answer in \(Int(timeout)) s.") : nil
+            if let stop {
+                process.terminate()
+                return stop
+            }
+        }
         process.waitUntilExit()
+        let output = box.data
         let line = output.split(separator: 0x0A).lazy.compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }.first
         switch line?["type"] as? String {
         case "routed": return .routed
@@ -578,6 +627,8 @@ final class ACPServer: @unchecked Sendable {
         return nil
     }
 }
+
+private final class OutputBox: @unchecked Sendable { var data = Data() }
 
 /// One open ACP session.
 final class Session {

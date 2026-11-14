@@ -229,10 +229,38 @@ replaced by this:
   Tagged first prompts run exactly as before.
 - **Permission mode of an untagged child.** T3 tells a generic ACP agent no mode, and no tag carries the parent's.
   T3's Plan heading still runs a turn as `plan`; otherwise the request has no `permissionMode`, which the runner maps
-  to auto. So a child of a full-access (bypass) thread now runs in auto mode, where lastdrop's checks apply.
-- Known differences: the runner inherits T3's environment, so the session's "own" account (a last resort in picking
-  and `carryOn`) may differ. A runtime mode the user changes on the child thread later isn't seen (Plan is). A call
-  on the instance that T3 refuses (instance unhealthy, model not offered) returns T3's error to the model; nothing
-  retries it on T3's Claude instance.
+  to auto. So a child of a full-access (bypass) thread now runs in auto mode, where lastdrop's checks apply, and a
+  child of an `acceptEdits` thread runs looser than its parent did.
+- **What an untagged child drops.** `target.options` (effort: the instance offers no `thought_level`, so an agent
+  runs at its own effort; the listing says so and asks for no options) and the call's `title` (no description).
+
+Review fixes (Fable, same day):
+
+- **A refused instance.** Settings can say ready while T3 refuses the instance (probe failing, `canRunChildTask`
+  false). The plugin reads the answer of each call on the instance; one T3 refused before creating anything (the
+  `T3_REFUSED_TARGET` errors) stamps it for 10 minutes, as before. Meanwhile the instance counts as not set up:
+  the listing (if frozen then) doesn't name it, added agents take the tag path outside auto mode, and in auto mode
+  they are denied pointing to the Agent type. T3's error gets a note saying which. No loop between the deny and
+  T3's refusal.
+- **Plain Claude children.** With the instance usable and room, a plain call is denied once with the instance form
+  (`lastdrop has room for opus: …`; no model names the parent's model by family), so lastdrop's picking and mid-run
+  handover apply. The same call (session + task) sent again goes unchanged: a child the server then finds no room
+  for can always fall back to T3's Claude instance. Calls the instance can't carry (options, own modes, a full
+  model id) go unchanged.
+- **Listing.** The instance clause leads the paragraph and stands alone with an empty catalog.
+- **Unknown mode.** The mod API has no live permission mode, only classic events. Unknown (after a reload) counts as
+  auto for the tag branch: a plain child goes unchanged, an added agent is denied with its Agent type.
+- **Model changes.** Before the run starts, an untagged session takes a new model (agent or Claude model again);
+  after, a different model is refused with -32602 "This run stays on <x>; start a new task for <y>." The same model
+  again is accepted (T3 sets it when it opens a thread).
+- **Room check.** Ended after 30 s ("didn't answer") or at once on a cancel, which answers `cancelled`.
+- **Threads the user starts on the provider (open).** T3's source (2026-11-03 clone) gives an ACP agent no sign of a
+  delegated child: `session/new` is `{cwd, mcpServers, additionalDirectories}` (`AcpSessionRuntime.ts`), the
+  prompt wrapper (`orchestrationInstructions.ts`) is the same for both, and the child flag
+  (`lineage.relationshipToParent === "subagent"`, `ProviderSessionManager.ts` prepareMcpSession) only reaches T3's
+  MCP session registry. Asking T3's MCP endpoint about the thread from the server would be the only check, and it
+  isn't built. So a user-started thread runs like a child: no T3 tools, and a rollback (a bare `session/new`)
+  starts a new run without the conversation. Documented in docs/agents.md and the app's T3 setting
+  ("for background tasks"). Ask T3 for a child marker in `session/new` `_meta`, with the Phase 2 rollback request.
 - `CommandJudgeTests` hang now and then in a full `swift test` on `main` too (unrelated).
   `AntigravityBackendTests.testSIGTERMEndsTheReportedChildPromptly` can fail under heavy load.
