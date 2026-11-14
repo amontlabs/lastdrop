@@ -231,8 +231,8 @@ replaced by this:
   T3's Plan heading still runs a turn as `plan`; otherwise the request has no `permissionMode`, which the runner maps
   to auto. So a child of a full-access (bypass) thread now runs in auto mode, where lastdrop's checks apply, and a
   child of an `acceptEdits` thread runs looser than its parent did.
-- **What an untagged child drops.** `target.options` (effort: the instance offers no `thought_level`, so an agent
-  runs at its own effort; the listing says so and asks for no options) and the call's `title` (no description).
+- **What an untagged child drops.** The call's `title` (no description). (`target.options` effort: see "Model
+  names and effort" below.)
 
 Review fixes (Fable, same day):
 
@@ -327,3 +327,26 @@ ignores sessions with `LASTDROP_SUBAGENT` (the runner sets it on every session i
 
 - `CommandJudgeTests` hang now and then in a full `swift test` on `main` too (unrelated).
   `AntigravityBackendTests.testSIGTERMEndsTheReportedChildPromptly` can fail under heavy load.
+
+Model names and effort (same day):
+
+- **Order and names.** Claude's models first, then the catalog's enabled agents in its order. Values unchanged
+  (`fable`… and agent names); names "Claude Fable 5.2", "Claude Opus 5.5", "Claude Sonnet 5.5", "Claude Haiku 5.5",
+  and "<agent> · <first provider> <model name>" ("build · Antigravity Claude Sonnet 5.5"; a Claude agent reads
+  "judge · Claude Fable 5.2"). Versions live once, in `ClaudeBackend.aliases`; model names come from
+  `UsagePrice.displayName` (GLM ids stay raw). Description: the agent's description, then its chain summary. Cut at
+  T3's 160/1024.
+- **Effort.** A `thought_level` select (id `effort`) is published while the selected model takes an effort from the
+  caller: Claude models always (low…max, Claude Code takes every level on every alias), an agent only when its
+  `effort` is nil (Settings' "Auto"), with its provider's levels known without asking it (`callerEfforts`: Z.ai
+  low/high/max, others low…max; Codex/OpenRouter/Antigravity models may take fewer, and a level a model lacks fails
+  that attempt with the provider's message). First value `auto` = no effort, the default. The probe's `sonnet` has
+  it, so `delegate_task`'s `target.options` effort passes T3's check. A model change sends `config_option_update`
+  (option added, removed or changed). `set_config_option effort`: an unknown level is refused; on a fixed-effort
+  agent any value is accepted and ignored; before the run starts it is taken (an effort the next model lacks falls
+  back to auto); after, only the same value is accepted, since the runner resumes a run at its first effort. The
+  untagged run's request carries it (`effort`); tagged runs keep the tag's. A fixed agent never gets one (a request
+  effort would override the agent's own in `AgentRun.effort`).
+- **Listing.** New sessions read that `target.options [{id:"effort"}]` works for Claude models and agents without a
+  fixed effort; paragraphs frozen with "no options" keep their bytes. The `delegate_task` supplement says the same.
+- Not tried live: T3 sending the effort before or after the model, and skipping a value the live option lacks.

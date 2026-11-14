@@ -1640,7 +1640,7 @@ const OLD_BACKGROUND = 'Background work in T3 Code goes to lastdrop\'s T3 instan
 test('in T3 Code with the lastdrop instance set up, the listing leads with background work there', async ($, on) => {
   engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' }, t3Instance: true })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${BACKGROUND} For an added agent, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<name>" } and no options, where <name> is a lastdrop: agent type without lastdrop:; effort comes from the agent's own settings. ${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent with them for foreground work.${COMMAND}`)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${BACKGROUND} For an added agent, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<name>" }, where <name> is a lastdrop: agent type without lastdrop:. target.options [{ id: "effort", value: "low" | "medium" | "high" | "xhigh" | "max" }] works for Claude models and for added agents without a fixed effort (one whose description names no effort); an agent with a fixed effort keeps it. ${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent with them for foreground work.${COMMAND}`)
 })
 
 test('with the lastdrop instance set up and no added agents, the listing still names the instance, and stays frozen', async ($, on) => {
@@ -1658,6 +1658,14 @@ test('a listing frozen with the earlier instance paragraph keeps its bytes', asy
   e.store.set('listing:session-1', OLD_BACKGROUND)
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${OLD_BACKGROUND}`)
+})
+
+test('a listing frozen with the "no options" agent paragraph keeps its bytes', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1' }, t3Instance: true })
+  const frozen = `${BACKGROUND} For an added agent, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<name>" } and no options, where <name> is a lastdrop: agent type without lastdrop:; effort comes from the agent's own settings. ${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent with them for foreground work.${COMMAND}`
+  e.store.set('listing:session-1', frozen)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${frozen}`)
 })
 
 test('outside T3, or with the instance refused, the listing doesn\'t name it', async ($, on) => {
@@ -1968,7 +1976,7 @@ test('a failing note ledger leaves the thread on its own model, and the parent\'
 async function described($: Body[0]) {
   return (await $.tool.describe({ tool: DELEGATE, description: 'Delegate a task.', provider: { plugin: 'mcp:t3-code', tier: 'user' } } as never)).description
 }
-const SUPPLEMENT = '\n\nThe agents the user added to lastdrop (argon, sol) run only with target.providerInstanceId "lastdrop" and target.model set to the agent\'s name; Claude models need no providerInstanceId.'
+const SUPPLEMENT = '\n\nThe agents the user added to lastdrop (argon, sol) run only with target.providerInstanceId "lastdrop" and target.model set to the agent\'s name; Claude models need no providerInstanceId. An effort option works for Claude models and for added agents without a fixed effort.'
 
 test('delegate_task\'s description names the added agents and the instance, the same at every read', async ($, on) => {
   engine([$, on], { catalog: CATALOG, t3Instance: true })

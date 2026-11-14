@@ -128,12 +128,13 @@ const TYPES = 'The lastdrop: agent types are agents the user added; each runs on
 const TYPES_T3 = "The lastdrop: agent types are agents the user added; each runs on the provider and model its description names. delegate_task's target.model also accepts their names without the lastdrop: prefix. They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent, and delegate_task only for background work."
 /**
  * In T3 Code with lastdrop's own T3 instance set up. It leads the paragraph, and stands alone when the user added
- * no agents. A Claude child needs nothing (lastdrop notes it, see DELEGATE); an added agent needs the instance, which
- * has no options: effort comes from each agent's own settings.
+ * no agents. A Claude child needs nothing (lastdrop notes it, see DELEGATE); an added agent needs the instance, whose
+ * only option is effort, offered for an agent without a fixed effort of its own (its type's description then names
+ * none). Frozen texts that start with T3_BACKGROUND keep their bytes, the earlier "no options" wording included.
  */
 const T3_BACKGROUND = 'Background work in T3 Code'
 const T3_BACKGROUND_CLAUDE = `${T3_BACKGROUND} on Claude models (fable, opus, sonnet, haiku) uses delegate_task as usual; lastdrop picks the account.`
-const T3_BACKGROUND_TYPES = `${T3_BACKGROUND_CLAUDE} For an added agent, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<name>" } and no options, where <name> is a lastdrop: agent type without lastdrop:; effort comes from the agent's own settings.`
+const T3_BACKGROUND_TYPES = `${T3_BACKGROUND_CLAUDE} For an added agent, call delegate_task with target: { providerInstanceId: "lastdrop", model: "<name>" }, where <name> is a lastdrop: agent type without lastdrop:. target.options [{ id: "effort", value: "low" | "medium" | "high" | "xhigh" | "max" }] works for Claude models and for added agents without a fixed effort (one whose description names no effort); an agent with a fixed effort keeps it.`
 const TYPES_T3_INSTANCE = `${T3_BACKGROUND_TYPES} ${TYPES} They run through the Agent tool like Claude's own agents, so the rule to use delegate_task for another provider's model doesn't apply to them: use Agent with them for foreground work.`
 /** The headers of the frozen list of versions from before the types, which they added at each read. */
 const OLD_ADDED = "The Agent tool's model parameter also accepts these models the user added:\n"
@@ -273,7 +274,7 @@ let lastDescribed: string | undefined
  */
 function delegateSupplement(): string {
   if (!t3Instance || !agentModels || catalog.size === 0) return ''
-  return `\n\nThe agents the user added to lastdrop (${[...catalog.keys()].sort().join(', ')}) run only with target.providerInstanceId "lastdrop" and target.model set to the agent's name; Claude models need no providerInstanceId.`
+  return `\n\nThe agents the user added to lastdrop (${[...catalog.keys()].sort().join(', ')}) run only with target.providerInstanceId "lastdrop" and target.model set to the agent's name; Claude models need no providerInstanceId. An effort option works for Claude models and for added agents without a fixed effort.`
 }
 
 /**

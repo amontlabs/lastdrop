@@ -43,8 +43,12 @@ final class ACPServer: @unchecked Sendable {
         }
     }
 
-    /// T3's models of Claude's own, beside the catalog's agents.
-    static let claudeModels: [(id: String, name: String)] = [("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
+    /// T3's models of Claude's own, before the catalog's agents: the alias as the value, "Claude Opus 5.5" as the name.
+    static let claudeModels: [(id: String, name: String, model: String)] = ClaudeBackend.aliases.map {
+        ($0.alias, modelName(.claude, $0.alias), $0.model)
+    }
+    /// The effort option's value for no effort: the run takes the agent's or Claude Code's own default.
+    static let autoEffort = "auto"
     static let defaultModel = "sonnet"
     static let protocolVersion = 1
     /// What a turn tells the runner the child is, as `delegatedTurn` does.
@@ -196,14 +200,14 @@ final class ACPServer: @unchecked Sendable {
         let session = Session(id: "lastdrop-\(UUID().uuidString.lowercased())", cwd: params["cwd"] as? String ?? FileManager.default.currentDirectoryPath)
         session.model = Self.defaultModel
         lock.withLock { sessions[session.id] = session }
-        answer(id, ["sessionId": session.id, "configOptions": configOptions(current: session.model)])
+        answer(id, ["sessionId": session.id, "configOptions": configOptions(session)])
     }
 
     private func resume(_ id: Any, _ params: [String: Any]) {
         guard let sessionID = params["sessionId"] as? String else { return fail(id, -32602, "session/resume needs a sessionId.") }
         if let live = lock.withLock({ sessions[sessionID] }) {
             startWatching()
-            return answer(id, ["configOptions": configOptions(current: live.model)])
+            return answer(id, ["configOptions": configOptions(live)])
         }
         guard let entry = ACPSessions.lookup(sessionID, at: options.sessions) else {
             SubagentLog.write("acp: resume of unknown session \(sessionID)")
@@ -212,26 +216,41 @@ final class ACPServer: @unchecked Sendable {
         let session = Session(id: sessionID, cwd: params["cwd"] as? String ?? entry.cwd)
         session.entry = entry
         session.model = entry.model ?? Self.defaultModel
+        session.effort = entry.effort
         lock.withLock { sessions[sessionID] = session }
         SubagentLog.write("acp: resumed session \(sessionID) (run \(entry.run), ran \(entry.ran))")
         startWatching()
-        answer(id, ["configOptions": configOptions(current: session.model)])
+        answer(id, ["configOptions": configOptions(session)])
     }
 
     private func setConfig(_ id: Any, _ params: [String: Any]) {
         guard let session = session(params) else { return fail(id, -32002, unknownSession(params)) }
-        guard params["configId"] as? String == "model", let value = params["value"] as? String else {
-            return fail(id, -32602, "lastdrop has only a model option.")
+        let configID = params["configId"] as? String
+        guard configID == "model" || configID == "effort", let value = params["value"] as? String else {
+            return fail(id, -32602, "lastdrop has only a model and an effort option.")
         }
+        if configID == "effort" {
+            if let refusal = setEffort(of: session, value) { return fail(id, -32602, refusal) }
+            return answer(id, ["configOptions": configOptions(session)])
+        }
+        let before = lock.withLock { session.model }
         if let refusal = setModel(of: session, value) { return fail(id, -32602, refusal) }
-        answer(id, ["configOptions": configOptions(current: session.model)])
+        answer(id, ["configOptions": configOptions(session)])
+        if before != value { modelChanged(session) }
+    }
+
+    /// The effort option comes, goes or changes its values with the model: T3 reads the update live.
+    private func modelChanged(_ session: Session) {
+        update(session.id, ["sessionUpdate": "config_option_update", "configOptions": configOptions(session)])
     }
 
     private func setModel(_ id: Any, _ params: [String: Any]) {
         guard let session = session(params) else { return fail(id, -32002, unknownSession(params)) }
         guard let value = params["modelId"] as? String else { return fail(id, -32602, "session/set_model needs a modelId.") }
+        let before = lock.withLock { session.model }
         if let refusal = setModel(of: session, value) { return fail(id, -32602, refusal) }
         answer(id, [:])
+        if before != value { modelChanged(session) }
     }
 
     /// The model for the session's next turn; the reason it can't change, else nil. Once the runner started the run,
@@ -250,6 +269,7 @@ final class ACPServer: @unchecked Sendable {
                 entry.agent = what.agent
                 entry.runModel = what.model
                 entry.parentModel = what.model
+                entry.effort = Self.effort(session.effort, for: model, catalog)
             }
             entry.model = model
             session.entry = entry
@@ -258,6 +278,47 @@ final class ACPServer: @unchecked Sendable {
         }
         if refusal == nil { startWatching() }
         return refusal
+    }
+
+    /// The effort for the session's runs; the reason it can't change, else nil. "auto" is no effort. A model whose
+    /// effort is fixed (an agent with its own) takes any value and ignores it, as T3 then shows no effort option.
+    /// Once the runner started the run, it keeps its effort: the runner continues a run at the effort it began with.
+    private func setEffort(of session: Session, _ value: String) -> String? {
+        let catalog = AgentCatalog.load(from: options.catalog)
+        let effort = value == Self.autoEffort ? nil : value
+        return lock.withLock {
+            let model = session.model ?? Self.defaultModel
+            guard let allowed = Self.efforts(for: model, catalog) else { return nil }
+            if let effort, !allowed.contains(effort) {
+                return "\(model) takes effort \(([Self.autoEffort] + allowed).joined(separator: ", ")), not \(effort)."
+            }
+            guard var entry = session.entry else { session.effort = effort; return nil }
+            if effort == entry.effort { session.effort = effort; return nil }
+            if entry.ran {
+                return "This run stays at effort \(entry.effort ?? Self.autoEffort); start a new task for effort \(value)."
+            }
+            session.effort = effort
+            // A tagged run keeps the effort its tag gave.
+            if entry.checksRoom == true {
+                entry.effort = effort
+                session.entry = entry
+            }
+            return nil
+        }
+    }
+
+    /// The efforts a caller may pick for `model`, "auto" aside: every one Claude Code takes for a Claude model, the
+    /// provider's for an agent without an effort of its own; nil when the model's effort is fixed or unknown.
+    static func efforts(for model: String, _ catalog: AgentCatalog) -> [String]? {
+        if claudeModels.contains(where: { $0.id == model }) { return ClaudeBackend.efforts }
+        guard let agent = catalog.agent(model), agent.effort == nil else { return nil }
+        return agent.provider.callerEfforts
+    }
+
+    /// `effort` if `model` takes it, else nil (the model's own default).
+    static func effort(_ effort: String?, for model: String, _ catalog: AgentCatalog) -> String? {
+        guard let effort, efforts(for: model, catalog)?.contains(effort) == true else { return nil }
+        return effort
     }
 
     /// What an untagged run of `model` runs: an agent of lastdrop's list, or one of Claude's models; nil for neither.
@@ -328,24 +389,55 @@ final class ACPServer: @unchecked Sendable {
 
     // MARK: Models
 
-    /// The model select: every enabled agent of lastdrop's list, then Claude's own models.
-    func configOptions(current: String?) -> [[String: Any]] {
-        var options = Self.modelOptions(AgentCatalog.load(from: self.options.catalog))
-        let value = current ?? Self.defaultModel
-        if !options.contains(where: { $0["value"] as? String == value }) {
-            options.append(["value": value, "name": value, "description": "No longer in lastdrop's list"])
-        }
-        return [["id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": value, "options": options]]
+    /// The session's options: the model select, and an effort select (T3's reasoning menu) when that model takes
+    /// an effort from the caller.
+    func configOptions(_ session: Session) -> [[String: Any]] {
+        let (model, effort, entry) = lock.withLock { (session.model ?? Self.defaultModel, session.effort, session.entry) }
+        return Self.configOptions(model: model, effort: entry.map { $0.effort } ?? effort, AgentCatalog.load(from: options.catalog))
     }
 
+    static func configOptions(model value: String, effort: String?, _ catalog: AgentCatalog) -> [[String: Any]] {
+        var models = modelOptions(catalog)
+        if !models.contains(where: { $0["value"] as? String == value }) {
+            models.append(["value": value, "name": value, "description": "No longer in lastdrop's list"])
+        }
+        var options: [[String: Any]] = [["id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": value, "options": models]]
+        if let efforts = efforts(for: value, catalog) {
+            let auto: [String: Any] = ["value": autoEffort, "name": "Auto",
+                                       "description": "No effort set: the \(catalog.agent(value) == nil ? "model's" : "agent's") own default."]
+            let current = self.effort(effort, for: value, catalog) ?? autoEffort
+            options.append(["id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": current,
+                            "options": [auto] + efforts.map { ["value": $0, "name": $0.capitalized] }])
+        }
+        return options
+    }
+
+    /// Claude's own models, then every enabled agent of lastdrop's list, in its order.
     static func modelOptions(_ catalog: AgentCatalog) -> [[String: Any]] {
-        let agents = catalog.enabled.filter { !AgentCatalog.isReserved($0.name) }.map { agent -> [String: Any] in
-            ["value": agent.name, "name": agent.name, "description": agent.summary]
-        }
         let claude = claudeModels.map { model -> [String: Any] in
-            ["value": model.id, "name": model.name, "description": "Claude · \(model.name) on your Claude accounts"]
+            ["value": model.id, "name": model.name, "description": "\(model.model) on your Claude accounts, the one with the most room."]
         }
-        return agents + claude
+        let agents = catalog.enabled.filter { !AgentCatalog.isReserved($0.name) }.map { agent -> [String: Any] in
+            // "build · Antigravity Claude Sonnet 5.5"; a Claude agent is "judge · Claude Fable 5.2", not "Claude Claude".
+            let provider = agent.provider.displayName, model = modelName(agent.provider, agent.model)
+            let runsOn = model.hasPrefix(provider + " ") ? model : "\(provider) \(model)"
+            return ["value": agent.name, "name": bounded("\(agent.name) · \(runsOn)", 160),
+                    "description": bounded("\(agent.description) (\(agent.summary))", 1024)]
+        }
+        return claude + agents
+    }
+
+    /// The name people know a model by: "Claude Opus 5.5" for `opus` or `claude-opus-5-5`, "GPT-6.1 Sol",
+    /// "Gemini 3.8 Flash"; other ids as they are.
+    static func modelName(_ provider: AgentProvider, _ model: String) -> String {
+        let id = ClaudeBackend.aliases.first { $0.alias == model }?.model ?? model
+        let name = UsagePrice.displayName(id)
+        return id.hasPrefix("claude-") ? "Claude " + name : name
+    }
+
+    /// T3 cuts names at 160 characters and descriptions at 1024; cut here first, with an ellipsis.
+    static func bounded(_ text: String, _ limit: Int) -> String {
+        text.count <= limit ? text : String(text.prefix(limit - 1)) + "…"
     }
 
     /// Polls the catalog while sessions are open; a changed list goes to every open session, since T3 publishes
@@ -371,7 +463,7 @@ final class ACPServer: @unchecked Sendable {
         }
         guard let open else { return }
         for session in open {
-            update(session.id, ["sessionUpdate": "config_option_update", "configOptions": configOptions(current: session.model)])
+            update(session.id, ["sessionUpdate": "config_option_update", "configOptions": configOptions(session)])
         }
     }
 
@@ -420,18 +512,20 @@ final class ACPServer: @unchecked Sendable {
             let run = found?.run
             let picked = session.model ?? Self.defaultModel
             let catalog = AgentCatalog.load(from: options.catalog)
-            var agent = run?.agent, model = run?.model
+            var agent = run?.agent, model = run?.model, effort = run?.effort
             if found == nil {
                 // A child the model started on this instance itself (the plugin never changes the call): it runs the
-                // model T3 picked for the session, with no effort or description, and is checked for room first.
+                // model T3 picked for the session, at the effort T3 picked if that model takes one, with no description,
+                // and is checked for room first.
                 guard let what = Self.untaggedRun(picked, catalog) else { throw PromptError(code: -32602, message: Self.unknownModel(picked)) }
                 agent = what.agent
                 model = what.model
+                effort = Self.effort(session.effort, for: picked, catalog)
             }
             if agent == nil && found != nil, run?.model == nil, catalog.agent(picked) != nil { agent = picked }
             let runID = run?.id ?? "acp-\(UUID().uuidString.lowercased())"
             let parent = Self.claudeModels.contains(where: { $0.id == picked }) ? picked : nil
-            session.entry = ACPSessions.Entry(run: runID, model: picked, agent: agent, runModel: model, effort: run?.effort,
+            session.entry = ACPSessions.Entry(run: runID, model: picked, agent: agent, runModel: model, effort: effort,
                                               description: run?.description, permissionMode: run?.permissionMode, parentModel: parent,
                                               cwd: session.cwd, ran: false, task: task, checksRoom: found == nil ? true : nil, updated: .now)
             SubagentLog.write("acp: session \(session.id) runs \(runID) (\(agent ?? model ?? parent ?? "session model"))\(found == nil ? ", untagged" : "")")
@@ -635,6 +729,8 @@ final class Session {
     let id: String
     var cwd: String
     var model: String?
+    /// The effort T3 picked (`effort` option); nil for auto. A run takes it only when its model takes one.
+    var effort: String?
     var entry: ACPSessions.Entry?
     var turn: Turn?
     /// T3 set the thread to Plan: turns run read-only until it says Default.

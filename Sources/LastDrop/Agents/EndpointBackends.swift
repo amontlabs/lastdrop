@@ -3,9 +3,11 @@ import Foundation
 /// Claude Code on the Z.ai Coding Plan's Anthropic endpoint.
 /// Model and effort list: https://docs.z.ai/devpack/latest-model
 enum ZAIBackend: AgentBackend {
+    static let efforts = ["low", "high", "max"]
+
     static func models() async throws -> [AgentModel] {
         ["glm-5.3", "glm-5.3-flash"].map {
-            AgentModel(id: $0, name: $0, efforts: ["low", "high", "max"], defaultEffort: "max")
+            AgentModel(id: $0, name: $0, efforts: efforts, defaultEffort: "max")
         }
     }
 

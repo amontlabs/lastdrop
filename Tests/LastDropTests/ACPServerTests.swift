@@ -36,8 +36,17 @@ final class ACPServerTests: LastDropTestCase {
         XCTAssertEqual(model["type"] as? String, "select")
         XCTAssertEqual(model["currentValue"] as? String, "sonnet")
         let options = try XCTUnwrap(model["options"] as? [[String: Any]])
-        XCTAssertEqual(options.map { $0["value"] as? String ?? "" }, ["flash", "fable", "opus", "sonnet", "haiku"])
-        XCTAssertEqual(options[0]["description"] as? String, "Antigravity · gemini-3.8-flash · low")
+        XCTAssertEqual(options.map { $0["value"] as? String ?? "" }, ["fable", "opus", "sonnet", "haiku", "flash"])
+        XCTAssertEqual(options.map { $0["name"] as? String ?? "" },
+                       ["Claude Fable 5.2", "Claude Opus 5.5", "Claude Sonnet 5.5", "Claude Haiku 5.5", "flash · Antigravity Gemini 3.8 Flash"])
+        XCTAssertEqual(options[4]["description"] as? String, "Quick work (Antigravity · gemini-3.8-flash · low)")
+        // The default model takes an effort, so delegate_task's `target.options` effort passes T3's check.
+        let effort = try XCTUnwrap((new["configOptions"] as? [[String: Any]])?.last)
+        XCTAssertEqual(effort["id"] as? String, "effort")
+        XCTAssertEqual(effort["category"] as? String, "thought_level")
+        XCTAssertEqual(effort["type"] as? String, "select")
+        XCTAssertEqual(effort["currentValue"] as? String, "auto")
+        XCTAssertEqual((effort["options"] as? [[String: Any]])?.map { $0["value"] as? String ?? "" }, ["auto", "low", "medium", "high", "xhigh", "max"])
         t3.end()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: ACPSessions.file.path), "session/new records nothing")
@@ -438,13 +447,127 @@ final class ACPServerTests: LastDropTestCase {
         let session = try open(t3, model: "flash")
         try AgentCatalog.update { $0.agents.append(AgentDefinition(name: "glm", description: "Cheap", provider: .zai, model: "glm-5.3")) }
         let update = try t3.waitFor(timeout: 5) {
-            (($0["params"] as? [String: Any])?["update"] as? [String: Any])?["sessionUpdate"] as? String == "config_option_update"
+            let update = ($0["params"] as? [String: Any])?["update"] as? [String: Any]
+            let models = (update?["configOptions"] as? [[String: Any]])?.first?["options"] as? [[String: Any]] ?? []
+            return update?["sessionUpdate"] as? String == "config_option_update" && models.contains { $0["value"] as? String == "glm" }
         }
         let options = (((update["params"] as? [String: Any])?["update"] as? [String: Any])?["configOptions"] as? [[String: Any]])?.first
         XCTAssertEqual(options?["currentValue"] as? String, "flash")
-        XCTAssertEqual((options?["options"] as? [[String: Any]])?.map { $0["value"] as? String ?? "" }, ["flash", "glm", "fable", "opus", "sonnet", "haiku"])
+        XCTAssertEqual((options?["options"] as? [[String: Any]])?.map { $0["value"] as? String ?? "" }, ["fable", "opus", "sonnet", "haiku", "flash", "glm"])
         XCTAssertEqual(((update["params"] as? [String: Any])?["sessionId"] as? String), session)
         t3.end()
+    }
+
+    // MARK: Effort
+
+    func testNamesAndEffortsFollowEachModel() throws {
+        try addAgents()
+        let catalog = AgentCatalog.load(from: LastDropPaths.agentCatalog)
+        let names = ACPServer.modelOptions(catalog).map { $0["name"] as? String ?? "" }
+        XCTAssertEqual(names, ["Claude Fable 5.2", "Claude Opus 5.5", "Claude Sonnet 5.5", "Claude Haiku 5.5", "flash · Antigravity Gemini 3.8 Flash",
+                               "build · Antigravity Claude Sonnet 5.5", "judge · Claude Fable 5.2", "glm · Z.ai glm-5.3", "codex · Codex GPT-6.1 Sol"])
+        XCTAssertEqual(ACPServer.modelOptions(catalog)[5]["description"] as? String,
+                       "Implementation (Antigravity · claude-sonnet-5-5, then Claude · sonnet)")
+        for model in ["fable", "opus", "sonnet", "haiku", "judge"] { XCTAssertEqual(ACPServer.efforts(for: model, catalog), ClaudeBackend.efforts, model) }
+        XCTAssertEqual(ACPServer.efforts(for: "build", catalog), AntigravityBackend.efforts)
+        XCTAssertEqual(ACPServer.efforts(for: "glm", catalog), ["low", "high", "max"])
+        XCTAssertNil(ACPServer.efforts(for: "flash", catalog), "its effort is fixed")
+        XCTAssertNil(ACPServer.efforts(for: "nope", catalog))
+        XCTAssertEqual(ACPServer.configOptions(model: "flash", effort: "high", catalog).count, 1, "no effort option for a fixed effort")
+        XCTAssertEqual(ACPServer.configOptions(model: "glm", effort: "medium", catalog).last?["currentValue"] as? String, "auto",
+                       "an effort the model doesn't take shows as auto")
+        XCTAssertEqual(ACPServer.bounded(String(repeating: "a", count: 200), 160).count, 160)
+    }
+
+    func testAModelChangeSendsTheEffortOptionForTheNewModel() throws {
+        let t3 = try client()
+        let session = try open(t3, model: nil)
+        _ = try t3.call("session/set_config_option", ["sessionId": session, "configId": "model", "value": "flash"])
+        let fixed = try configUpdate(t3, session)
+        XCTAssertEqual(fixed.map { $0["id"] as? String ?? "" }, ["model"], "a fixed-effort agent has no effort option")
+        t3.clearUpdates()
+        let set = try t3.call("session/set_config_option", ["sessionId": session, "configId": "model", "value": "haiku"])
+        XCTAssertEqual((set["configOptions"] as? [[String: Any]])?.map { $0["id"] as? String ?? "" }, ["model", "effort"])
+        let claude = try configUpdate(t3, session)
+        XCTAssertEqual(claude.map { $0["id"] as? String ?? "" }, ["model", "effort"])
+        XCTAssertEqual(claude.last?["currentValue"] as? String, "auto")
+        t3.clearUpdates()
+        _ = try t3.call("session/set_model", ["sessionId": session, "modelId": "flash"])
+        XCTAssertEqual(try configUpdate(t3, session).count, 1)
+        t3.end()
+    }
+
+    func testTheChosenEffortGoesToTheRunAndStaysWithIt() throws {
+        try scenario([[["type": "started", "agentId": "x", "account": "work"], ["type": "result", "text": "Ok.", "isError": false]]])
+        let t3 = try client()
+        let session = try open(t3, model: "opus")
+        let set = try t3.call("session/set_config_option", ["sessionId": session, "configId": "effort", "value": "xhigh"])
+        XCTAssertEqual((set["configOptions"] as? [[String: Any]])?.last?["currentValue"] as? String, "xhigh")
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "effort", "value": "huge"]),
+                       "opus takes effort auto, low, medium, high, xhigh, max, not huge.")
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "mode", "value": "x"]),
+                       "lastdrop has only a model and an effort option.")
+        _ = try t3.call("session/prompt", ["sessionId": session, "prompt": t3Prompt("Do it", first: true)])
+        XCTAssertEqual(try runnerRequests()[0]["effort"] as? String, "xhigh")
+        XCTAssertEqual(try jsonLines("routes.jsonl")[0]["effort"] as? String, "xhigh")
+        XCTAssertEqual(ACPSessions.lookup(session)?.effort, "xhigh")
+        // The runner continues a run at the effort it began with: the same is fine, another is refused.
+        XCTAssertNoThrow(try t3.call("session/set_config_option", ["sessionId": session, "configId": "effort", "value": "xhigh"]))
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "effort", "value": "auto"]),
+                       "This run stays at effort xhigh; start a new task for effort auto.")
+        t3.end()
+    }
+
+    func testAnAgentWithoutAnEffortTakesTheCallersAndAFixedOneIgnoresIt() throws {
+        try addAgents()
+        try scenario([[["type": "started", "agentId": "x", "account": "Antigravity"], ["type": "result", "text": "Ok.", "isError": false]],
+                      [["type": "started", "agentId": "y", "account": "Antigravity"], ["type": "result", "text": "Ok.", "isError": false]]])
+        let t3 = try client()
+        // As T3 may send them: the effort first, on the default model, then the model.
+        let build = try open(t3, model: nil)
+        _ = try t3.call("session/set_config_option", ["sessionId": build, "configId": "effort", "value": "max"])
+        _ = try t3.call("session/set_config_option", ["sessionId": build, "configId": "model", "value": "build"])
+        _ = try t3.call("session/prompt", ["sessionId": build, "prompt": t3Prompt("Do it", first: true)])
+        XCTAssertEqual(try runnerRequests()[0]["agent"] as? String, "build")
+        XCTAssertEqual(try runnerRequests()[0]["effort"] as? String, "max")
+
+        let flash = try open(t3, model: nil)
+        _ = try t3.call("session/set_config_option", ["sessionId": flash, "configId": "effort", "value": "high"])
+        _ = try t3.call("session/set_config_option", ["sessionId": flash, "configId": "model", "value": "flash"])
+        let ignored = try t3.call("session/set_config_option", ["sessionId": flash, "configId": "effort", "value": "medium"])
+        XCTAssertEqual((ignored["configOptions"] as? [[String: Any]])?.count, 1)
+        _ = try t3.call("session/prompt", ["sessionId": flash, "prompt": t3Prompt("Do it", first: true)])
+        XCTAssertEqual(try runnerRequests()[1]["agent"] as? String, "flash")
+        XCTAssertNil(try runnerRequests()[1]["effort"], "flash runs at its own low")
+
+        let glm = try open(t3, model: "glm")
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": glm, "configId": "effort", "value": "medium"]),
+                       "glm takes effort auto, low, high, max, not medium.")
+        t3.end()
+    }
+
+    private func addAgents() throws {
+        try AgentCatalog.update {
+            $0.agents += [
+                AgentDefinition(name: "build", description: "Implementation", provider: .antigravity, model: "claude-sonnet-5-5",
+                                fallbacks: [AgentFallback(provider: .claude, model: "sonnet")]),
+                AgentDefinition(name: "judge", description: "Judgement", provider: .claude, model: "fable"),
+                AgentDefinition(name: "glm", description: "Cheap", provider: .zai, model: "glm-5.3"),
+                AgentDefinition(name: "codex", description: "Reviews", provider: .codex, model: "gpt-6.1-sol"),
+            ]
+        }
+    }
+
+    /// The session's next `config_option_update`.
+    private func configUpdate(_ t3: FakeT3, _ session: String) throws -> [[String: Any]] {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if let update = t3.updates(session).first(where: { $0["sessionUpdate"] as? String == "config_option_update" }) {
+                return update["configOptions"] as? [[String: Any]] ?? []
+            }
+            usleep(50_000)
+        }
+        throw NSError(domain: "acp", code: 2, userInfo: [NSLocalizedDescriptionKey: "no config_option_update"])
     }
 
     // MARK: Text
@@ -484,12 +607,18 @@ final class ACPServerTests: LastDropTestCase {
 
     // MARK: Helpers
 
-    private func open(_ t3: FakeT3, model: String) throws -> String {
+    private func open(_ t3: FakeT3, model: String?) throws -> String {
         _ = try t3.call("initialize", ["protocolVersion": 2])
         let new = try t3.call("session/new", ["cwd": folder.path, "mcpServers": []])
         let session = try XCTUnwrap(new["sessionId"] as? String)
+        guard let model else { return session }
         let set = try t3.call("session/set_config_option", ["sessionId": session, "configId": "model", "value": model])
         XCTAssertEqual((set["configOptions"] as? [[String: Any]])?.first?["currentValue"] as? String, model)
+        // A changed model sends its options again (the effort option follows it): read before the test's own updates.
+        if model != ACPServer.defaultModel {
+            _ = try t3.waitFor { (($0["params"] as? [String: Any])?["sessionId"] as? String) == session }
+        }
+        t3.clearUpdates()
         return session
     }
 
