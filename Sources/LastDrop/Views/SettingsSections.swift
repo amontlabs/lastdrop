@@ -377,7 +377,7 @@ struct SuggestedAgentsSection: View {
         adding = agent.name
         defer { adding = nil }
         do {
-            let models = try await agent.provider.backend.models()
+            let models = try await agent.provider.models()
             guard models.isEmpty || models.contains(where: { $0.id == agent.model }) else {
                 problems[agent.name] = "\(agent.provider.displayName) no longer offers \(agent.model)."
                 return

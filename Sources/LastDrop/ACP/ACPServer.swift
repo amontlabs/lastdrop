@@ -25,6 +25,8 @@ final class ACPServer: @unchecked Sendable {
         var router: [String]
         var catalog: URL
         var sessions: URL
+        /// The efforts each provider's models took when lastdrop last listed them.
+        var models: URL = AgentModelCache.file
         /// How often a live session checks the catalog for a changed model list.
         var catalogPoll: TimeInterval = 2
         /// How long a cancelled turn waits for the runner to report it stopped before it ends it itself and answers.
@@ -257,7 +259,7 @@ final class ACPServer: @unchecked Sendable {
     /// it stays on what it runs (the same model again is fine: T3 sets it when it opens a thread). Before that, an
     /// untagged run takes the new model; a tagged one runs what its tag says.
     private func setModel(of session: Session, _ model: String) -> String? {
-        let catalog = AgentCatalog.load(from: options.catalog)
+        let catalog = AgentCatalog.load(from: options.catalog), known = AgentModelCache.load(options.models)
         let refusal: String? = lock.withLock {
             guard var entry = session.entry else { session.model = model; return nil }
             if model == entry.model { return nil }
@@ -269,7 +271,7 @@ final class ACPServer: @unchecked Sendable {
                 entry.agent = what.agent
                 entry.runModel = what.model
                 entry.parentModel = what.model
-                entry.effort = Self.effort(session.effort, for: model, catalog)
+                entry.effort = Self.effort(session.effort, for: model, catalog, known)
             }
             entry.model = model
             session.entry = entry
@@ -284,11 +286,11 @@ final class ACPServer: @unchecked Sendable {
     /// effort is fixed (an agent with its own) takes any value and ignores it, as T3 then shows no effort option.
     /// Once the runner started the run, it keeps its effort: the runner continues a run at the effort it began with.
     private func setEffort(of session: Session, _ value: String) -> String? {
-        let catalog = AgentCatalog.load(from: options.catalog)
+        let catalog = AgentCatalog.load(from: options.catalog), known = AgentModelCache.load(options.models)
         let effort = value == Self.autoEffort ? nil : value
         return lock.withLock {
             let model = session.model ?? Self.defaultModel
-            guard let allowed = Self.efforts(for: model, catalog) else { return nil }
+            guard let allowed = Self.efforts(for: model, catalog, known) else { return nil }
             if let effort, !allowed.contains(effort) {
                 return "\(model) takes effort \(([Self.autoEffort] + allowed).joined(separator: ", ")), not \(effort)."
             }
@@ -307,17 +309,24 @@ final class ACPServer: @unchecked Sendable {
         }
     }
 
-    /// The efforts a caller may pick for `model`, "auto" aside: every one Claude Code takes for a Claude model, the
-    /// provider's for an agent without an effort of its own; nil when the model's effort is fixed or unknown.
-    static func efforts(for model: String, _ catalog: AgentCatalog) -> [String]? {
+    /// The efforts a caller may pick for `model`, "auto" aside; nil when there is none to pick. A Claude model takes
+    /// every one Claude Code takes. An agent takes one only without an effort of its own, and only a level every
+    /// model of its chain that takes efforts takes: the call's effort goes to each attempt (`AgentRun.effort`), so a
+    /// level its fallback lacks would fail the fallback. Each model's levels are the ones lastdrop last listed for it
+    /// (`known`), else its provider's (`callerEfforts`). A first model that takes none gives no option; a fallback
+    /// that takes none is left out of the check (it takes no effort from any caller, Agent calls included).
+    static func efforts(for model: String, _ catalog: AgentCatalog, _ known: [String: AgentModelCache.Entry]) -> [String]? {
         if claudeModels.contains(where: { $0.id == model }) { return ClaudeBackend.efforts }
         guard let agent = catalog.agent(model), agent.effort == nil else { return nil }
-        return agent.provider.callerEfforts
+        let levels = agent.chain.map { AgentModelCache.efforts($0.provider, $0.model, in: known) ?? $0.provider.callerEfforts }
+        guard let first = levels.first, !first.isEmpty else { return nil }
+        let common = levels.dropFirst().filter { !$0.isEmpty }.reduce(first) { kept, next in kept.filter(next.contains) }
+        return common.isEmpty ? nil : common
     }
 
     /// `effort` if `model` takes it, else nil (the model's own default).
-    static func effort(_ effort: String?, for model: String, _ catalog: AgentCatalog) -> String? {
-        guard let effort, efforts(for: model, catalog)?.contains(effort) == true else { return nil }
+    static func effort(_ effort: String?, for model: String, _ catalog: AgentCatalog, _ known: [String: AgentModelCache.Entry]) -> String? {
+        guard let effort, efforts(for: model, catalog, known)?.contains(effort) == true else { return nil }
         return effort
     }
 
@@ -393,19 +402,21 @@ final class ACPServer: @unchecked Sendable {
     /// an effort from the caller.
     func configOptions(_ session: Session) -> [[String: Any]] {
         let (model, effort, entry) = lock.withLock { (session.model ?? Self.defaultModel, session.effort, session.entry) }
-        return Self.configOptions(model: model, effort: entry.map { $0.effort } ?? effort, AgentCatalog.load(from: options.catalog))
+        return Self.configOptions(model: model, effort: entry.map { $0.effort } ?? effort, AgentCatalog.load(from: options.catalog),
+                                  AgentModelCache.load(options.models))
     }
 
-    static func configOptions(model value: String, effort: String?, _ catalog: AgentCatalog) -> [[String: Any]] {
+    static func configOptions(model value: String, effort: String?, _ catalog: AgentCatalog,
+                              _ known: [String: AgentModelCache.Entry] = [:]) -> [[String: Any]] {
         var models = modelOptions(catalog)
         if !models.contains(where: { $0["value"] as? String == value }) {
             models.append(["value": value, "name": value, "description": "No longer in lastdrop's list"])
         }
         var options: [[String: Any]] = [["id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": value, "options": models]]
-        if let efforts = efforts(for: value, catalog) {
+        if let efforts = efforts(for: value, catalog, known) {
             let auto: [String: Any] = ["value": autoEffort, "name": "Auto",
                                        "description": "No effort set: the \(catalog.agent(value) == nil ? "model's" : "agent's") own default."]
-            let current = self.effort(effort, for: value, catalog) ?? autoEffort
+            let current = self.effort(effort, for: value, catalog, known) ?? autoEffort
             options.append(["id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": current,
                             "options": [auto] + efforts.map { ["value": $0, "name": $0.capitalized] }])
         }
@@ -520,7 +531,7 @@ final class ACPServer: @unchecked Sendable {
                 guard let what = Self.untaggedRun(picked, catalog) else { throw PromptError(code: -32602, message: Self.unknownModel(picked)) }
                 agent = what.agent
                 model = what.model
-                effort = Self.effort(session.effort, for: picked, catalog)
+                effort = Self.effort(session.effort, for: picked, catalog, AgentModelCache.load(options.models))
             }
             if agent == nil && found != nil, run?.model == nil, catalog.agent(picked) != nil { agent = picked }
             let runID = run?.id ?? "acp-\(UUID().uuidString.lowercased())"

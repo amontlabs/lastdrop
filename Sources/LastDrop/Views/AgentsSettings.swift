@@ -157,7 +157,7 @@ private struct ModelRow: View {
         models = []
         modelsError = nil
         do {
-            models = try await entry.provider.backend.models()
+            models = try await entry.provider.models()
             if models.isEmpty { modelsError = "\(entry.provider.displayName) lists no models here: type the model's id." }
         } catch {
             modelsError = "Couldn't list \(entry.provider.displayName)'s models (\(error.localizedDescription)). Type the model's id."
@@ -290,7 +290,7 @@ struct JudgeRow: View {
         models = []
         modelsError = nil
         do {
-            models = try await provider.backend.models()
+            models = try await provider.models()
             if models.isEmpty { modelsError = "\(provider.displayName) lists no models here: type the judge's model id." }
         } catch {
             modelsError = "Couldn't list \(provider.displayName)'s models (\(error.localizedDescription)). Type the judge's model id."

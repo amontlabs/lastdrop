@@ -207,6 +207,7 @@ enum CodexBackend: AgentBackend {
                 try await server.initialize()
                 if let effort {
                     let available = try await models(server)
+                    AgentModelCache.save(.codex, available)
                     guard let selected = available.first(where: { $0.id == model }) else { throw Failure("Codex doesn't advertise model \(model); its reasoning effort cannot be validated.", unavailable: true) }
                     guard selected.efforts.contains(effort) else { throw Failure("Codex model \(model) doesn't support effort \(effort). Supported: \(selected.efforts.joined(separator: ", ")).", unavailable: true) }
                 }

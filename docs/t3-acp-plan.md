@@ -339,14 +339,19 @@ Model names and effort (same day):
 - **Effort.** A `thought_level` select (id `effort`) is published while the selected model takes an effort from the
   caller: Claude models always (low…max, Claude Code takes every level on every alias), an agent only when its
   `effort` is nil (Settings' "Auto"), with its provider's levels known without asking it (`callerEfforts`: Z.ai
-  low/high/max, others low…max; Codex/OpenRouter/Antigravity models may take fewer, and a level a model lacks fails
-  that attempt with the provider's message). First value `auto` = no effort, the default. The probe's `sonnet` has
+  low/high/max, others low…max), narrowed by the listed levels below. First value `auto` = no effort, the default. The probe's `sonnet` has
   it, so `delegate_task`'s `target.options` effort passes T3's check. A model change sends `config_option_update`
   (option added, removed or changed). `set_config_option effort`: an unknown level is refused; on a fixed-effort
   agent any value is accepted and ignored; before the run starts it is taken (an effort the next model lacks falls
   back to auto); after, only the same value is accepted, since the runner resumes a run at its first effort. The
   untagged run's request carries it (`effort`); tagged runs keep the tag's. A fixed agent never gets one (a request
   effort would override the agent's own in `AgentRun.effort`).
+- **Levels per model (follow-up).** No model list was kept on disk, so one is now: `agent-models.json`
+  (`AgentModelCache`), written whenever lastdrop lists a provider's models anyway (Settings, `--agents`, and each
+  Antigravity or Codex run), never by the server, which only reads it. An agent's option offers the levels lastdrop
+  last listed for each model of its chain (else the provider's `callerEfforts`), keeping only those every model
+  that takes efforts shares, since the call's effort goes to every attempt; a first model taking none, or nothing
+  shared, gives no option. A fallback taking none is left out (given an effort it fails, as for Agent calls).
 - **Listing.** New sessions read that `target.options [{id:"effort"}]` works for Claude models and agents without a
   fixed effort; paragraphs frozen with "no options" keep their bytes. The `delegate_task` supplement says the same.
 - Not tried live: T3 sending the effort before or after the model, and skipping a value the live option lacks.

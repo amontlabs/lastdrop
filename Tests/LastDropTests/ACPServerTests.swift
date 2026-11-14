@@ -468,11 +468,11 @@ final class ACPServerTests: LastDropTestCase {
                                "build · Antigravity Claude Sonnet 5.5", "judge · Claude Fable 5.2", "glm · Z.ai glm-5.3", "codex · Codex GPT-6.1 Sol"])
         XCTAssertEqual(ACPServer.modelOptions(catalog)[5]["description"] as? String,
                        "Implementation (Antigravity · claude-sonnet-5-5, then Claude · sonnet)")
-        for model in ["fable", "opus", "sonnet", "haiku", "judge"] { XCTAssertEqual(ACPServer.efforts(for: model, catalog), ClaudeBackend.efforts, model) }
-        XCTAssertEqual(ACPServer.efforts(for: "build", catalog), AntigravityBackend.efforts)
-        XCTAssertEqual(ACPServer.efforts(for: "glm", catalog), ["low", "high", "max"])
-        XCTAssertNil(ACPServer.efforts(for: "flash", catalog), "its effort is fixed")
-        XCTAssertNil(ACPServer.efforts(for: "nope", catalog))
+        for model in ["fable", "opus", "sonnet", "haiku", "judge"] { XCTAssertEqual(ACPServer.efforts(for: model, catalog, [:]), ClaudeBackend.efforts, model) }
+        XCTAssertEqual(ACPServer.efforts(for: "build", catalog, [:]), AntigravityBackend.efforts)
+        XCTAssertEqual(ACPServer.efforts(for: "glm", catalog, [:]), ["low", "high", "max"])
+        XCTAssertNil(ACPServer.efforts(for: "flash", catalog, [:]), "its effort is fixed")
+        XCTAssertNil(ACPServer.efforts(for: "nope", catalog, [:]))
         XCTAssertEqual(ACPServer.configOptions(model: "flash", effort: "high", catalog).count, 1, "no effort option for a fixed effort")
         XCTAssertEqual(ACPServer.configOptions(model: "glm", effort: "medium", catalog).last?["currentValue"] as? String, "auto",
                        "an effort the model doesn't take shows as auto")
@@ -543,6 +543,44 @@ final class ACPServerTests: LastDropTestCase {
         let glm = try open(t3, model: "glm")
         XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": glm, "configId": "effort", "value": "medium"]),
                        "glm takes effort auto, low, high, max, not medium.")
+        t3.end()
+    }
+
+    func testListedModelsGiveTheirOwnLevelsAndAChainKeepsOnlyCommonOnes() throws {
+        try addAgents()
+        try AgentCatalog.update {
+            $0.agents += [
+                AgentDefinition(name: "mixed", description: "Chain", provider: .antigravity, model: "gemini-4-argon",
+                                fallbacks: [AgentFallback(provider: .zai, model: "glm-5.3"), AgentFallback(provider: .codex, model: "plain")]),
+                AgentDefinition(name: "none", description: "No effort", provider: .codex, model: "plain"),
+                AgentDefinition(name: "apart", description: "Nothing shared", provider: .zai, model: "glm-5.3",
+                                fallbacks: [AgentFallback(provider: .codex, model: "gpt-6.1-sol")]),
+            ]
+        }
+        let url = AgentModelCache.file
+        AgentModelCache.save(.codex, [AgentModel(id: "gpt-6.1-sol", name: "GPT-6.1 Sol", efforts: ["medium", "xhigh"], defaultEffort: "medium"),
+                                      AgentModel(id: "plain", name: "Plain", efforts: [], defaultEffort: nil)], at: url)
+        AgentModelCache.save(.antigravity, [AgentModel(id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", efforts: ["low", "medium", "high"], defaultEffort: "medium"),
+                                            AgentModel(id: "gemini-4-argon", name: "Gemini 4 Argon", efforts: ["low", "high"], defaultEffort: "high")], at: url)
+        AgentModelCache.save(.zai, [], at: url)
+        let known = AgentModelCache.load(url)
+        XCTAssertNil(known["zai"], "an empty list is not written")
+        let catalog = AgentCatalog.load(from: LastDropPaths.agentCatalog)
+        XCTAssertEqual(ACPServer.efforts(for: "codex", catalog, known), ["medium", "xhigh"], "the model's own levels")
+        XCTAssertNil(ACPServer.efforts(for: "none", catalog, known), "a model that takes none has no option")
+        XCTAssertEqual(ACPServer.efforts(for: "build", catalog, known), ["low", "medium", "high"], "Claude · sonnet takes these too")
+        XCTAssertEqual(ACPServer.efforts(for: "mixed", catalog, known), ["low", "high"], "Z.ai's low/high/max kept both; plain takes none")
+        XCTAssertNil(ACPServer.efforts(for: "apart", catalog, known), "no level both take")
+        XCTAssertEqual(ACPServer.efforts(for: "glm", catalog, known), ["low", "high", "max"], "never listed: the provider's levels")
+
+        // The probe reads the file, not the provider.
+        let t3 = try client()
+        let session = try open(t3, model: "codex")
+        let set = try t3.call("session/set_config_option", ["sessionId": session, "configId": "effort", "value": "xhigh"])
+        XCTAssertEqual(((set["configOptions"] as? [[String: Any]])?.last?["options"] as? [[String: Any]])?.map { $0["value"] as? String ?? "" },
+                       ["auto", "medium", "xhigh"])
+        XCTAssertEqual(try t3.callError("session/set_config_option", ["sessionId": session, "configId": "effort", "value": "high"]),
+                       "codex takes effort auto, medium, xhigh, not high.")
         t3.end()
     }
 
