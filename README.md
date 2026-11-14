@@ -26,8 +26,8 @@ https://github.com/user-attachments/assets/cf7e7f33-c58a-4633-a22e-8449d3a87664
 ## What it does
 
 - **Any model as a subagent.** Turn a model on any connected plan into an agent Claude can call: a name, when to
-  use it, a model and an effort. Claude calls it like its own:
-  `Agent({ subagent_type: "general-purpose", model: "<name>" })`.
+  use it, a model and an effort. Claude Code lists it as an agent type, and Claude calls it like its own:
+  `Agent({ subagent_type: "lastdrop:<name>" })`, in every permission mode, auto included.
 - **Fallbacks.** Give an agent several models in order. If the first is out of quota or can't start, the next
   one runs.
 - **Several Claude accounts, one Claude.** Subagents run on your other Claude accounts, so your main session
