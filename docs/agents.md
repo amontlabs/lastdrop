@@ -165,6 +165,14 @@ with no extra providers or accounts set up in T3.
   `<!-- lastdrop {"id":…,"agent"|"model":…,"effort":…,"description":…} -->`, and an added model is removed
   from `target` (T3 doesn't know it; the child keeps the session's model, which never runs for it). Other
   instances, other models and other machines are left to T3. The transcript keeps the model's own arguments.
+- **lastdrop's T3 instance (first try).** For those same children the plugin first calls `delegate_task` with the
+  same tagged task and `target` = `{…, providerInstanceId: "lastdrop", model}` (the added agent, or the Claude
+  model's alias: `fable`/`opus`/`sonnet`/`haiku`, from the session's model when none was given; `options` and
+  `driverKind` dropped, effort stays in the tag). T3's answers then name the real model and instance, so nothing is
+  rewritten. If T3 answers an error that says it refused the target before creating anything (instance unknown,
+  disabled or unhealthy, model not offered), the call is made once more as described here, and the instance is
+  skipped for 10 minutes. Any other error is returned as it is, never retried. The rest of this section is that
+  fallback path, which also serves children started before an update.
 - **Child (`turn.step` on the main loop).** When the session's first user message ends with that tag, the
   plugin answers each turn with `lastdrop --agent-run` (the task, then each new message with `resume`), so the
   child's own model never runs. Accounts, added models, fallbacks at a limit and stop are the runner's, as for

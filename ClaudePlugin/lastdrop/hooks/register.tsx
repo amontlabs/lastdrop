@@ -710,6 +710,23 @@ const TAG_END = ' -->'
 /** T3's built-in Claude instance; another instance may be another provider, which lastdrop leaves alone. */
 const T3_CLAUDE = 'claudeAgent'
 
+/**
+ * lastdrop's own T3 provider instance (an ACP server, `lastdrop --acp`): a child created on it is run by lastdrop
+ * and T3 names its real model and instance, so none of T3's answers about it need a rewrite.
+ */
+const T3_LASTDROP = 'lastdrop'
+/** How long a refused attempt on that instance keeps the next children on T3's Claude instance. */
+const T3_LASTDROP_SKIP_MS = 10 * 60_000
+const T3_LASTDROP_FAILED = 't3-lastdrop:failed'
+/** The Claude models the instance offers, by alias. */
+const T3_CLAUDE_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
+/**
+ * What T3's `delegate_task` answers (isError) when it refused the target before creating anything: the
+ * instance unknown, disabled or unhealthy, the model not offered (OrchestratorMcpService resolveTarget, and
+ * ThreadManagementProviderInstanceDisabledError). Any other error is returned as it is, never retried.
+ */
+const T3_REFUSED_TARGET = /provider_unavailable|model_unavailable|is not registered|cannot run a child task|is not advertised by provider|is disabled for project|No available V2 provider|No V2 provider adapter|No instance of driver|has no model available/i
+
 const CAPABILITIES = 'mcp__t3-code__orchestrator_capabilities'
 const T3_TOOLS = /^mcp__t3-code__/
 
@@ -797,6 +814,7 @@ function editAnswer<T extends { result?: unknown; text?: unknown }>(answer: T, e
 async function rewriteT3<T extends { result?: unknown; text?: unknown }>($: EngineInterface, tool: string, answer: T): Promise<T> {
   if (tool === CAPABILITIES) {
     if (!agentModels || catalog.size === 0) return answer
+    if (listsLastdrop(jsonOf(answer), [...catalog.keys()])) return answer
     const added = [...catalog.keys()].map(model => ({ model, runsOn: runsOn(model) }))
     return editAnswer(answer, json => (json !== null && typeof json === 'object' && !Array.isArray(json) ? { ...json, addedModels: added } : json))
   }
@@ -806,6 +824,32 @@ async function rewriteT3<T extends { result?: unknown; text?: unknown }>($: Engi
     if (typeof agent === 'string') children.set(id, agent)
   }
   return children.size === 0 ? answer : editAnswer(answer, json => rewriteChildren(json, children))
+}
+
+/** Whether T3's capabilities already list a healthy `lastdrop` instance with these models (so none are added twice). */
+function listsLastdrop(answers: unknown[], models: string[]): boolean {
+  return answers.some(json => {
+    const providers = (json as { providers?: unknown } | null)?.providers
+    if (!Array.isArray(providers)) return false
+    return providers.some(p => {
+      if (p?.providerInstanceId !== T3_LASTDROP || p.canRunChildTask !== true || !Array.isArray(p.models)) return false
+      const ids = new Set(p.models.map((m: { id?: unknown }) => m?.id))
+      // T3 lists a few models and counts the rest.
+      return models.every(m => ids.has(m)) || (typeof p.omittedModels === 'number' && p.omittedModels > 0)
+    })
+  })
+}
+
+/** Whether a delegate_task answer is T3 refusing the target before it created anything. */
+function refusedTarget(answer: { isError?: unknown; text?: unknown; result?: unknown }): boolean {
+  if (answer.isError !== true) return false
+  const text = [answer.text, ...textsOf(answer)].filter((t): t is string => typeof t === 'string').join('\n')
+  return T3_REFUSED_TARGET.test(text)
+}
+
+/** The model id lastdrop's instance offers for a Claude model: its alias, or undefined when it isn't one. */
+function claudeAlias(model: string): string | undefined {
+  return NATIVE.has(model) ? model : T3_CLAUDE_ALIASES.find(alias => model.includes(alias))
 }
 
 /** A delegated child's run, as its tag carries it. */
@@ -1124,7 +1168,18 @@ export const register: Register = on => {
     const childTarget = agent ? rest : target
     const { target: __, ...args } = call
     const routed = Object.keys(childTarget).length > 0 ? { ...args, target: childTarget } : args
-    const answer = await next({ ...routed, task: tag(call.task, run) } as unknown as typeof e)
+    const task = tag(call.task, run)
+    // First on lastdrop's own T3 instance (the same tagged task; the instance has no options, effort is in the
+    // tag). T3 refusing the target before creating anything falls back to the call as it always was.
+    const hosted = agent ?? claudeAlias(model ?? await $.session.model())
+    const failedAt = await $.store.get(T3_LASTDROP_FAILED)
+    if (hosted !== undefined && !(typeof failedAt === 'number' && Date.now() - failedAt < T3_LASTDROP_SKIP_MS)) {
+      const { options: ___, driverKind: ____, ...own } = target
+      const first = await next({ ...args, task, target: { ...own, providerInstanceId: T3_LASTDROP, model: hosted } } as unknown as typeof e)
+      if (!refusedTarget(first)) return first
+      await put($, T3_LASTDROP_FAILED, Date.now())
+    }
+    const answer = await next({ ...routed, task } as unknown as typeof e)
     if (answer.deny !== undefined || !agent) return answer
     // The answer names the child thread's own model: the model reads the added one, and where it runs.
     // The child exists now, so a failure here keeps T3's answer instead of failing (or repeating) the call.
