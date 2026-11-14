@@ -7,8 +7,10 @@ import Foundation
 ///
 /// One file in lastdrop's support folder, `delegate-notes.json`, shared by every account profile (parent and child may
 /// run under different `CLAUDE_CONFIG_DIR`s), every change under `delegate-notes.lock`. A note is a JSON object the
-/// plugin owns; this reads only `id` (the run id), `createdAt` (ms since 1970), and the binding it adds, `thread` and
-/// `claimedAt`. Unclaimed notes expire after ten minutes; claimed ones stay 30 days, the newest 500 at most.
+/// plugin owns; this reads only `id` (the run id), `createdAt` (ms since 1970), and what it adds: `child` (the thread T3
+/// answered the call with), `thread` (the thread that claimed it), `claimedAt` and `usedAt` (the binding's last
+/// lookup). Unclaimed notes expire after ten minutes; claimed ones 30 days after their last use, the 500 most
+/// recently used kept. The file is always replaced whole (atomically), so the plugin reads it without the lock.
 enum DelegateNotes {
     static let unclaimedTTL: TimeInterval = 10 * 60
     static let claimedTTL: TimeInterval = 30 * 24 * 3600
@@ -24,8 +26,7 @@ enum DelegateNotes {
     static func put(_ note: Note, now: Date = Date()) -> Bool {
         guard let id = note["id"] as? String, !id.isEmpty else { return false }
         var clean = note
-        clean.removeValue(forKey: "thread")
-        clean.removeValue(forKey: "claimedAt")
+        for key in ["thread", "claimedAt", "usedAt", "child"] { clean.removeValue(forKey: key) }
         if !(clean["createdAt"] is NSNumber) { clean["createdAt"] = ms(now) }
         withNotes(now: now) { notes in
             notes.removeAll { $0["id"] as? String == id }
@@ -48,32 +49,61 @@ enum DelegateNotes {
         }
     }
 
-    /// Binds note `id` to `thread`, once: the note, or nil when it is gone, expired or another thread has it. The same
-    /// thread claiming again gets it back.
+    /// Binds note `id` to `thread`, once: the note, or nil when it is gone, expired, meant for another child thread or
+    /// another thread has it. The same thread claiming again gets it back, and marks it used now.
     static func claim(_ id: String, thread: String, now: Date = Date()) -> Note? {
         withNotes(now: now) { notes in
             guard let i = notes.firstIndex(where: { $0["id"] as? String == id }) else { return nil }
-            if let owner = notes[i]["thread"] as? String { return owner == thread ? notes[i] : nil }
+            if let owner = notes[i]["thread"] as? String {
+                guard owner == thread else { return nil }
+                notes[i]["usedAt"] = ms(now)
+                return notes[i]
+            }
+            if let child = notes[i]["child"] as? String, child != thread { return nil }
             notes[i]["thread"] = thread
             notes[i]["claimedAt"] = ms(now)
+            notes[i]["usedAt"] = ms(now)
             return notes[i]
+        }
+    }
+
+    enum Expected: String { case ok, replay, gone, other }
+
+    /// Records that T3 answered note `id`'s call with child thread `child`. `replay` when another note already names
+    /// that thread (T3 replayed a task it had: no new child), and the note is dropped if unclaimed; `other` when a
+    /// different thread claimed it first; `gone` when it isn't there.
+    static func expect(_ id: String, child: String, now: Date = Date()) -> Expected {
+        withNotes(now: now) { notes in
+            guard let i = notes.firstIndex(where: { $0["id"] as? String == id }) else { return .gone }
+            let taken = notes.contains { $0["id"] as? String != id && ($0["thread"] as? String == child || $0["child"] as? String == child) }
+            if let owner = notes[i]["thread"] as? String { return owner == child ? .ok : (taken ? .replay : .other) }
+            if taken {
+                notes.remove(at: i)
+                return .replay
+            }
+            notes[i]["child"] = child
+            return .ok
         }
     }
 
     private static func ms(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
     private static func created(_ note: Note) -> Double { (note["createdAt"] as? NSNumber)?.doubleValue ?? 0 }
+    /// A claimed note's last use: its last lookup, else its claim, else its creation.
+    private static func used(_ note: Note) -> Double {
+        (note["usedAt"] as? NSNumber)?.doubleValue ?? (note["claimedAt"] as? NSNumber)?.doubleValue ?? created(note)
+    }
 
-    /// Drops expired notes: unclaimed after ten minutes, claimed after 30 days or past the newest 500.
+    /// Drops expired notes: unclaimed after ten minutes, claimed 30 days after their last use or past the 500 most
+    /// recently used.
     private static func prune(_ notes: inout [Note], now: Date) {
         let nowMs = Double(ms(now))
         notes.removeAll { note in
             let claimed = note["thread"] != nil
-            let since = ((claimed ? note["claimedAt"] : nil) as? NSNumber)?.doubleValue ?? created(note)
-            return (nowMs - since) / 1000 > (claimed ? claimedTTL : unclaimedTTL)
+            return (nowMs - (claimed ? used(note) : created(note))) / 1000 > (claimed ? claimedTTL : unclaimedTTL)
         }
         let claimed = notes.enumerated().filter { $0.element["thread"] != nil }
         if claimed.count > keptClaimed {
-            let oldest = Set(claimed.sorted { created($0.element) < created($1.element) }.prefix(claimed.count - keptClaimed).map(\.offset))
+            let oldest = Set(claimed.sorted { used($0.element) < used($1.element) }.prefix(claimed.count - keptClaimed).map(\.offset))
             notes = notes.enumerated().filter { !oldest.contains($0.offset) }.map(\.element)
         }
     }
@@ -128,12 +158,17 @@ enum DelegateNotes {
             }
             if let note = claim(id, thread: thread, now: now) { return ["type": "ok", "note": note] }
             return ["type": "taken"]
+        case "expect":
+            guard let id = request["id"] as? String, let child = request["child"] as? String, !child.isEmpty else {
+                return ["type": "error", "text": "delegate-note: expect needs an id and a child"]
+            }
+            return ["type": "ok", "result": expect(id, child: child, now: now).rawValue]
         default:
             return ["type": "error", "text": "delegate-note: unknown op \(op)"]
         }
     }
 
-    /// `lastdrop --delegate-note`: one request on stdin (`{"op":"put"|"drop"|"list"|"claim",…}`), one JSON line out.
+    /// `lastdrop --delegate-note`: one request on stdin (`{"op":"put"|"drop"|"list"|"claim"|"expect",…}`), one JSON line out.
     static func main() -> Never {
         let input = FileHandle.standardInput.readDataToEndOfFile()
         let out = answer(input)

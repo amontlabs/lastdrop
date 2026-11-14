@@ -283,6 +283,8 @@ struct AgentCatalog: Codable, Equatable, Sendable {
         json["t3Instance"] = t3Instance
         // `lastdrop --delegate-note` exists: the plugin notes plain T3 children there instead of tagging their task.
         json["delegateNotes"] = true
+        // Read by the plugin without the lock (the file is replaced whole), so an ordinary thread spawns nothing.
+        json["delegateNotesFile"] = DelegateNotes.file.path
         return (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
     }
 

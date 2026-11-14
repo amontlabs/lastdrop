@@ -39,13 +39,20 @@ type Options = {
   t3Instance?: boolean
   /** `--delegate-note` answers an error, as with a full disk. */
   notesFail?: boolean
+  /** The catalog names no notes file (the plugin then asks `--delegate-note list`), or the file can't be read. */
+  notesFile?: false | 'unreadable'
+
   /** T3 tools that answer with this error (isError), as T3 failing a call. */
   t3Errors?: Record<string, string>
   /** false: an app without `--delegate-note` (older), so plain T3 children take the tag path outside auto mode. */
   notes?: false
+  /** `t3_thread_read`'s answer leads with a text block that isn't JSON. */
+  lineageJunk?: boolean
   /** What `t3_thread_read` on the child's own thread says: its parent, no parent (null), or an error. */
   lineage?: string | null | 'error'
 }
+
+const NOTES_FILE = '/test-support/delegate-notes.json'
 
 function engine([$test, on]: Body, options: Options = {}) {
   const calls: { flag: string; request: Record<string, unknown> }[] = []
@@ -60,6 +67,7 @@ function engine([$test, on]: Body, options: Options = {}) {
   // lastdrop's note ledger (`--delegate-note`), as the app keeps it: expiry is the plugin's to check here.
   const notes: Record<string, unknown>[] = []
   const mcpCalls: Record<string, unknown>[] = []
+  let notesReads = 0
   let env: Record<string, string> = { ...options.env }
   // The session's folder as a hook reads it: a worktree subagent's own loop reads its worktree.
   let cwd = '/work'
@@ -71,7 +79,13 @@ function engine([$test, on]: Body, options: Options = {}) {
   // Folders that are gone (a worktree the engine removed); git answers by subcommand.
   const missing = new Set<string>()
   const gitAnswers: Record<string, string> = { 'status': ' M notes.txt', 'symbolic-ref': 'worktree-agent-x', 'reflog': 'a\nb' }
-  on('fs.exists', (_, e) => ({ value: !missing.has(e.path) }))
+  on('fs.exists', (_, e) => ({ value: e.path === NOTES_FILE ? notes.length > 0 || options.notesFile === 'unreadable' : !missing.has(e.path) }))
+  on('fs.read', (_, e) => {
+    if (e.path !== NOTES_FILE) return { deny: 'ENOENT' } as never
+    notesReads++
+    if (options.notesFile === 'unreadable') return { value: '{"notes": [' } as never
+    return { value: JSON.stringify({ notes }) } as never
+  })
   on('env.get', (_, e) => ({ value: env[e.name] }))
   on('clock.sleep', () => ({ value: undefined }))
   on('mcp.call', (_, e) => {
@@ -79,7 +93,8 @@ function engine([$test, on]: Body, options: Options = {}) {
     if (options.lineage === 'error' || options.lineage === undefined) return { value: { content: [{ type: 'text', text: 'not connected' }], isError: true } } as never
     const threadId = (e.args as Record<string, unknown>).threadId
     const thread = { threadId, parentThreadId: options.lineage, relationshipToParent: options.lineage === null ? null : 'subagent' }
-    return { value: { content: [{ type: 'text', text: JSON.stringify({ thread, recentRuns: [], items: [] }) }], isError: false } } as never
+    const junk = options.lineageJunk ? [{ type: 'text', text: 'Thread read:' }] : []
+    return { value: { content: [...junk, { type: 'text', text: JSON.stringify({ thread, recentRuns: [], items: [] }) }], isError: false } } as never
   })
   on('session.cwd', () => ({ value: cwd }))
   on('session.id', () => ({ value: options.sessionId?.() ?? 'session-1' }))
@@ -122,7 +137,7 @@ function engine([$test, on]: Body, options: Options = {}) {
     calls.push({ flag, request })
     if (options.runnerFails) throw new Error('no runner')
     if (flag === '--agent-route') yield { stream: 'stdout', text: lines(options.route ?? { type: 'routed' }) }
-    else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }), ...(options.notes === false ? {} : { delegateNotes: true }) }) }
+    else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }), ...(options.notes === false ? {} : { delegateNotes: true, ...(options.notesFile === false ? {} : { delegateNotesFile: NOTES_FILE }) }) }) }
     else if (flag === '--delegate-note' && options.notesFail) yield { stream: 'stdout', text: lines({ type: 'error', text: 'disk full' }) }
     else if (flag === '--delegate-note') {
       const op = request.op
@@ -131,9 +146,17 @@ function engine([$test, on]: Body, options: Options = {}) {
       if (op === 'list') {
         const bound = notes.find(n => n.thread === request.thread)
         yield { stream: 'stdout', text: lines({ type: 'ok', open: notes.filter(n => n.thread === undefined), ...(bound ? { bound } : {}) }) }
+      } else if (op === 'expect') {
+        const note = notes.find(n => n.id === request.id)
+        const taken = notes.some(n => n.id !== request.id && (n.thread === request.child || n.child === request.child))
+        let result = 'gone'
+        if (note && note.thread !== undefined) result = note.thread === request.child ? 'ok' : taken ? 'replay' : 'other'
+        else if (note && taken) { notes.splice(notes.indexOf(note), 1); result = 'replay' }
+        else if (note) { note.child = request.child; result = 'ok' }
+        yield { stream: 'stdout', text: lines({ type: 'ok', result }) }
       } else if (op === 'claim') {
         const note = notes.find(n => n.id === request.id)
-        if (note && (note.thread === undefined || note.thread === request.thread)) {
+        if (note && (note.thread === undefined ? note.child === undefined || note.child === request.thread : note.thread === request.thread)) {
           note.thread = request.thread
           yield { stream: 'stdout', text: lines({ type: 'ok', note }) }
         } else yield { stream: 'stdout', text: lines({ type: 'taken' }) }
@@ -180,6 +203,7 @@ function engine([$test, on]: Body, options: Options = {}) {
     return { turnId: e.turnId, index: e.index, answer: 'built-in response', toolUses: [], stopReason: 'end_turn', usage: null }
   })
   return { calls, spawned, nativeCalls, nativeInputs, statuses, submitted, invalidated, store, registered, notes, mcpCalls,
+    get notesReads() { return notesReads },
     cwd(value: string) { cwd = value },
     env(value: Record<string, string>) { env = value },
     remove(path: string) { missing.add(path) },
@@ -1864,8 +1888,9 @@ for (const [what, lineage] of [['a thread T3 says nobody delegated', null], ['a 
     expect(e.modelSteps).toBe(2)
     expect(e.runCount).toBe(0)
     expect(e.notes[0]!.thread).toBeUndefined()
-    // Asked once per process.
-    expect(e.calls.filter(c => c.flag === '--delegate-note' && c.request.op === 'list').length).toBe(1)
+    // Read once per process, from the file: no process started.
+    expect(e.notesReads).toBe(1)
+    expect(e.calls.some(c => c.flag === '--delegate-note' && c.request.op === 'list')).toBe(false)
   })
 }
 
@@ -1943,7 +1968,7 @@ test('a failing note ledger leaves the thread on its own model, and the parent\'
 async function described($: Body[0]) {
   return (await $.tool.describe({ tool: DELEGATE, description: 'Delegate a task.', provider: { plugin: 'mcp:t3-code', tier: 'user' } } as never)).description
 }
-const SUPPLEMENT = '\n\nThe agents the user added to lastdrop (sol, argon) run only with target.providerInstanceId "lastdrop" and target.model set to the agent\'s name; Claude models need no providerInstanceId.'
+const SUPPLEMENT = '\n\nThe agents the user added to lastdrop (argon, sol) run only with target.providerInstanceId "lastdrop" and target.model set to the agent\'s name; Claude models need no providerInstanceId.'
 
 test('delegate_task\'s description names the added agents and the instance, the same at every read', async ($, on) => {
   engine([$, on], { catalog: CATALOG, t3Instance: true })
@@ -1967,4 +1992,165 @@ test('a change to the added agents or the instance invalidates delegate_task\'s 
   await $.classic.UserPromptSubmit(AUTO as never)
   expect(e.invalidated.filter(x => x === 'tool.describe').length).toBe(1)
   expect(await described($)).toBe('Delegate a task.')
+})
+
+// Review fixes: lastdrop failing never refuses a plain call; bindings hold only while the task does; reads are cheap.
+for (const [what, options] of [['an error from the room check', { route: { type: 'error', text: 'boom' } }],
+                               ['an app without native tasks', { nativeTasks: false }],
+                               ['a runner that fails to start', { runnerFails: true }]] as const) {
+  test(`${what} leaves a plain child unchanged, never refused`, async ($, on) => {
+    const e = engine([$, on], { ...options, env: PARENT })
+    await $.classic.UserPromptSubmit(AUTO as never)
+    const answer = await delegate($, { target: { model: 'opus' } })
+    expect(answer.deny).toBeUndefined()
+    expect(passed(e)).toEqual(asWritten({ target: { model: 'opus' } }))
+    expect(e.notes.length).toBe(0)
+  })
+}
+
+test('a bound thread whose session no longer holds its task (a handoff) runs on its own model, every turn', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.runCount).toBe(1)
+  // T3 started a fresh Claude session in the thread, led by its handoff text.
+  e.messages(child('Context from the earlier session: …', { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    { role: 'user', content: [{ type: 'text', text: 'go on' }] }))
+  expect(report(await childStep($, 'turn-2'))).toBe('built-in response')
+  expect(report(await childStep($, 'turn-3'))).toBe('built-in response')
+  expect(e.runCount).toBe(1)
+})
+
+test('a binding found only in the store or the notes also needs the task in the session', async ($, on) => {
+  const e = engine([$, on], { env: CHILD })
+  const note = { id: 't3-old', run: { id: 't3-old' }, task: 'review the diff', parentThread: 'parent-1', createdAt: Date.now(), thread: 'child-1' }
+  e.store.set('delegated-thread:child-1', note)
+  e.store.set('delegated:t3-old', { ran: true, native: false, sent: 5 })
+  e.messages(child('handoff summary', { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, { role: 'user', content: [{ type: 'text', text: 'next' }] }))
+  expect(report(await childStep($, 'turn-2'))).toBe('built-in response')
+  expect(e.runCount).toBe(0)
+})
+
+test('a bound child marks its note used once per process', async ($, on) => {
+  const e = engine([$, on], { env: CHILD })
+  e.notes.push({ id: 't3-old', run: { id: 't3-old' }, task: 'review the diff', createdAt: Date.now(), thread: 'child-1' })
+  e.messages(child('review the diff', { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, { role: 'user', content: [{ type: 'text', text: 'next' }] }))
+  await childStep($, 'turn-2')
+  await childStep($, 'turn-3')
+  expect(e.calls.filter(c => c.flag === '--delegate-note').map(c => c.request)).toEqual([{ op: 'claim', id: 't3-old', thread: 'child-1' }])
+})
+
+test('an ordinary T3 thread starts no process to look for notes: no file, or a thread that already answered', async ($, on) => {
+  const e = engine([$, on], { env: CHILD, lineage: 'parent-1' })
+  e.messages(child('hello'))
+  await childStep($, 'turn-1')
+  e.notes.push({ id: 'x', run: { id: 'x' }, task: 'hello', parentThread: 'parent-1', createdAt: Date.now() })
+  e.env({ T3CODE_THREAD_ID: 'other' })
+  e.messages(child('hello', { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }, { role: 'user', content: [{ type: 'text', text: 'more' }] }))
+  await childStep($, 'turn-2')
+  expect(e.calls.some(c => c.flag === '--delegate-note')).toBe(false)
+  expect(e.mcpCalls.length).toBe(0)
+  expect(e.modelSteps).toBe(2)
+})
+
+test('without the notes file\'s path, the child asks lastdrop for its notes', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1', notesFile: false })
+  await delegateThenChild(e, $)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.calls.some(c => c.flag === '--delegate-note' && c.request.op === 'list')).toBe(true)
+  expect(e.runCount).toBe(1)
+})
+
+test('notes that can\'t be read at all are not asked for again in the process', async ($, on) => {
+  const e = engine([$, on], { env: CHILD, notesFile: 'unreadable', notesFail: true })
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  await childStep($, 'turn-1b')
+  expect(e.notesReads).toBe(1)
+  expect(e.calls.filter(c => c.flag === '--delegate-note').length).toBe(1)
+  expect(e.modelSteps).toBe(2)
+})
+
+test('when T3 can\'t say whose child it is and two notes match, the next step asks nothing again', async ($, on) => {
+  const e = engine([$, on], { lineage: 'error' })
+  await delegateThenChild(e, $, { target: { model: 'opus' } }, { target: { model: 'sonnet' } })
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  await childStep($, 'turn-1b')
+  expect(e.mcpCalls.length).toBe(3)
+  expect(e.modelSteps).toBe(2)
+})
+
+test('T3\'s thread read is understood past a block that isn\'t JSON', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1', lineageJunk: true })
+  await delegateThenChild(e, $, { target: { model: 'opus' } }, { target: { model: 'sonnet' } })
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.runCount).toBe(1)
+  expect(e.mcpCalls.length).toBe(1)
+})
+
+const CHILD_SHELL = { ...SHELL, childThreadId: 'child-1' }
+
+test('the child thread T3 answers with is recorded, and only it may claim the note, without asking T3 its parent', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1', t3: { [DELEGATE]: CHILD_SHELL } })
+  await delegateThenChild(e, $)
+  expect(e.notes[0]!.child).toBe('child-1')
+  e.env({ T3CODE_THREAD_ID: 'child-2' })
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(e.runCount).toBe(0)
+  e.env(CHILD)
+  await childStep($, 'turn-1')
+  expect(e.runCount).toBe(1)
+  expect(e.notes[0]!.thread).toBe('child-1')
+  // Neither asked T3 its parent: the note named its child.
+  expect(e.mcpCalls.length).toBe(0)
+})
+
+test('a replayed task (T3 answers with a child another note has) drops the new note', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1', t3: { [DELEGATE]: CHILD_SHELL } })
+  await delegateThenChild(e, $)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  e.env(PARENT)
+  await delegate($)
+  expect(e.notes.length).toBe(1)
+  expect(e.notes[0]!.thread).toBe('child-1')
+})
+
+test('an answer that names no child thread here drops the note', async ($, on) => {
+  const e = engine([$, on], { env: PARENT, t3: { [DELEGATE]: { ...SHELL, childThreadId: null, remoteChild: { threadId: 'r' } } } })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  await delegate($)
+  expect(e.notes.length).toBe(0)
+})
+
+test('a plain T3 answer that isn\'t JSON keeps the note', async ($, on) => {
+  const e = engine([$, on], { env: PARENT })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  await delegate($)
+  expect(e.notes.length).toBe(1)
+})
+
+test('a description first read while the catalog couldn\'t be is invalidated once it can', async ($, on) => {
+  let ready = false
+  const e = engine([$, on], { liveCatalog: () => { if (!ready) throw new Error('app busy'); return { ...CATALOG, t3Instance: true } } })
+  expect(await described($)).toBe('Delegate a task.')
+  ready = true
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect(e.invalidated.filter(x => x === 'tool.describe').length).toBe(1)
+  expect(await described($)).toBe(`Delegate a task.${SUPPLEMENT}`)
+})
+
+test('the description\'s names don\'t follow the catalog\'s order', async ($, on) => {
+  let live: object = { ...CATALOG, t3Instance: true }
+  const e = engine([$, on], { liveCatalog: () => live })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  live = { ...CATALOG, revision: 4, agents: [...CATALOG.agents].reverse(), t3Instance: true }
+  await $.classic.UserPromptSubmit(AUTO as never)
+  expect(e.invalidated.filter(x => x === 'tool.describe').length).toBe(0)
+  expect(await described($)).toBe(`Delegate a task.${SUPPLEMENT}`)
 })

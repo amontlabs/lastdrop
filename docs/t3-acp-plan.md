@@ -301,5 +301,22 @@ and its run rides beside the call instead of in it:
 - Not tried in a live T3 yet: the `$.mcp.call` server name and timing at a child's first turn, and T3's exact first
   message for a Claude child, come from T3's source and the tag path's evidence.
 
+Review fixes (Fable, same day, on the notes):
+
+- Any lastdrop failure on the plain path (catalog read, room check, runner) sends the call to T3 unchanged, never a deny.
+- A binding counts only while the session's first user blocks still end with the noted task (same match as the
+  claim); a fresh session T3 starts in the thread (a handoff) runs on its own model, like a tagged child that lost
+  its tag.
+- The plugin reads `delegate-notes.json` itself without the lock (the catalog's `delegateNotesFile`; the app always
+  replaces the file whole), so an ordinary T3 thread starts no process; `--delegate-note list` is the fallback. The
+  first look's outcome, a failure or an unanswered lineage included, is kept for the process.
+- After T3 answers, the parent records the child thread (`expect`): only that thread may claim the note, without
+  asking T3 its lineage. An answer naming a thread another note has is a replayed task, and its note is dropped; one
+  naming no child thread here (another machine) drops the note too. Identical tasks still go oldest first.
+- Claimed notes expire 30 days after their last use (`usedAt`, refreshed once per child process); the 500 cap keeps
+  the most recently used.
+- `t3_thread_read` blocks that aren't JSON are skipped. The description's agent names are sorted, and a description
+  given while the catalog couldn't be read is invalidated once it can.
+
 - `CommandJudgeTests` hang now and then in a full `swift test` on `main` too (unrelated).
   `AntigravityBackendTests.testSIGTERMEndsTheReportedChildPromptly` can fail under heavy load.

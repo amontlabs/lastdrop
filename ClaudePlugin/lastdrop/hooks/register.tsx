@@ -52,6 +52,8 @@ let agentModels = false
 let t3Instance = false
 /** Whether the app has `lastdrop --delegate-note` (an older one doesn't, and would start its window instead). */
 let delegateNotes = false
+/** lastdrop's notes file, which the plugin reads without the app's lock (the app replaces it whole). */
+let notesFile: string | undefined
 
 /** Claude's own Agent models. */
 const NATIVE = new Set(['sonnet', 'opus', 'haiku', 'fable'])
@@ -241,12 +243,13 @@ async function syncCatalog($: EngineInterface): Promise<void> {
   }
   const parsed = JSON.parse(text.trim() || '{}') as {
     revision?: number; agents?: Defined[]; saveClaude?: boolean; saveClaudeText?: string; nativeTasks?: boolean; agentModels?: boolean
-    t3Instance?: boolean; delegateNotes?: boolean
+    t3Instance?: boolean; delegateNotes?: boolean; delegateNotesFile?: string
   }
   nativeTasks = parsed.nativeTasks === true
   agentModels = parsed.agentModels === true
   t3Instance = parsed.t3Instance === true
   delegateNotes = parsed.delegateNotes === true
+  notesFile = typeof parsed.delegateNotesFile === 'string' && parsed.delegateNotesFile ? parsed.delegateNotesFile : undefined
   if (parsed.revision === undefined || parsed.revision !== revision) {
     catalog = new Map((parsed.agents ?? []).map(agent => [agent.name, agent] as const))
     revision = parsed.revision
@@ -270,7 +273,7 @@ let lastDescribed: string | undefined
  */
 function delegateSupplement(): string {
   if (!t3Instance || !agentModels || catalog.size === 0) return ''
-  return `\n\nThe agents the user added to lastdrop (${[...catalog.keys()].join(', ')}) run only with target.providerInstanceId "lastdrop" and target.model set to the agent's name; Claude models need no providerInstanceId.`
+  return `\n\nThe agents the user added to lastdrop (${[...catalog.keys()].sort().join(', ')}) run only with target.providerInstanceId "lastdrop" and target.model set to the agent's name; Claude models need no providerInstanceId.`
 }
 
 /**
@@ -1030,7 +1033,9 @@ function userBlocks(message: ApiMessage): string[] {
  * A plain T3 child's run, noted by its parent before T3 saw the call: what a tag carried, plus what the child
  * matches it by. `thread` is the child that claimed it (the app adds it).
  */
-type Note = { id: string; run: Delegated; task: string; parentThread?: string; parentModel?: string; createdAt: number; thread?: string }
+type Note = { id: string; run: Delegated; task: string; parentThread?: string; parentModel?: string; createdAt: number; thread?: string
+              /** The child thread T3 answered the call with, once the parent recorded it. */
+              child?: string }
 
 /** How long a note waits for its child; the app drops it then too. */
 const NOTE_TTL_MS = 10 * 60_000
@@ -1087,7 +1092,12 @@ async function parentOf($: EngineInterface, thread: string): Promise<string | nu
       if (answer.isError) continue
       for (const block of answer.content ?? []) {
         if (block?.type !== 'text' || typeof (block as { text?: unknown }).text !== 'string') continue
-        const read = JSON.parse((block as { text: string }).text) as { thread?: { threadId?: unknown; parentThreadId?: unknown; relationshipToParent?: unknown } }
+        let read: { thread?: { threadId?: unknown; parentThreadId?: unknown; relationshipToParent?: unknown } } | null
+        try {
+          read = JSON.parse((block as { text: string }).text)
+        } catch {
+          continue
+        }
         if (!read?.thread || read.thread.threadId !== thread) continue
         const parent = read.thread.parentThreadId
         return read.thread.relationshipToParent === 'subagent' && typeof parent === 'string' ? parent : null
@@ -1100,64 +1110,87 @@ async function parentOf($: EngineInterface, thread: string): Promise<string | nu
 }
 
 /**
+ * lastdrop's notes as the file reads now, read without the app's lock (the app replaces it whole), so an ordinary
+ * thread starts no process: the note bound to `thread` and the open ones, oldest first. Without the file's path, or
+ * when it can't be read, `lastdrop --delegate-note list`. Undefined when neither answers.
+ */
+async function readNotes($: EngineInterface, thread: string): Promise<{ bound?: Note; open: Note[] } | undefined> {
+  if (notesFile) {
+    try {
+      if (!await $.fs.exists(notesFile)) return { open: [] }
+      const json = JSON.parse(await $.fs.read(notesFile) as string) as { notes?: unknown } | null
+      const notes = (Array.isArray(json?.notes) ? json.notes : []).filter(isNote)
+      return { bound: notes.filter(note => note.thread === thread).at(-1),
+               open: notes.filter(note => note.thread === undefined).sort((a, b) => a.createdAt - b.createdAt) }
+    } catch (error) {
+      $.ui.log(`lastdrop: reading its T3 notes file failed: ${String(error)}`, { to: 'debug' })
+    }
+  }
+  try {
+    const listed = await noteCall($, { op: 'list', thread })
+    return { bound: isNote(listed.bound) ? listed.bound : undefined, open: (Array.isArray(listed.open) ? listed.open : []).filter(isNote) }
+  } catch (error) {
+    $.ui.log(`lastdrop: reading its T3 notes failed: ${String(error)}`, { to: 'debug' })
+    return undefined
+  }
+}
+
+/**
  * The run of a T3 child whose parent noted it rather than tagging its task, and how many first blocks its task
- * spans; undefined when this thread is no such child. A follow-up finds the note bound to this thread (this
- * session's store first, then lastdrop's notes: a later process may run on another account's profile). A first
- * turn claims an open note: its task must end the first blocks; the parent T3 names must be the note's (a thread T3
- * says nobody delegated claims nothing), or, when T3 can't say, it must be the only note that matches. Among
- * several, the one whose model is the child's, then the oldest.
+ * spans; undefined when this thread is no such child. A binding counts only while the session's first blocks still
+ * end with the noted task: a fresh session T3 starts in the thread (a handoff) runs on its own model, as a tagged
+ * child that lost its tag does. A follow-up finds the note bound to this thread (this session's store first, then
+ * lastdrop's notes: a later process may run on another account's profile), and marks it used. A first turn claims
+ * an open note whose task ends the first blocks. The note T3 named this thread for (see the parent's `expect`) is
+ * taken without asking T3 more; otherwise the parent T3 names must be the note's (a thread T3 says nobody
+ * delegated claims nothing), or, when T3 can't say, it must be the only note that matches. Among several, the
+ * one whose model is the child's, then the oldest (identical tasks started together go first come, first served).
+ * Whatever the first look finds is kept for the process, a failure included.
  */
 async function noted($: EngineInterface, blocks: string[], answered: boolean, model?: string): Promise<{ note: Note; tagged: number } | undefined> {
   if (blocks.length === 0) return undefined
   const thread = await $.env.get('T3CODE_THREAD_ID')
   if (!thread) return undefined
-  const found = (note: Note) => ({ note, tagged: spans(blocks, note.task) || 1 })
+  const found = (note: Note) => {
+    const tagged = spans(blocks, note.task)
+    return tagged > 0 ? { note, tagged } : undefined
+  }
   const known = bindings.get(thread)
   if (known !== undefined) return known ? found(known) : undefined
-  const stored = await $.store.get(`delegated-thread:${thread}`)
-  if (isNote(stored)) {
-    bindings.set(thread, stored)
-    return found(stored)
-  }
-  if (revision === undefined) await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
-  if (!delegateNotes) return undefined
-  const bind = async (note: Note) => {
+  const bind = async (note: Note, save: boolean, refresh: boolean) => {
     bindings.set(thread, note)
-    await put($, `delegated-thread:${thread}`, note)
+    if (save) await put($, `delegated-thread:${thread}`, note)
+    // Keeps the binding from expiring while the thread is in use (a claim by its own thread marks it used).
+    if (refresh) void noteCall($, { op: 'claim', id: note.id, thread }).catch(error => $.ui.log(`lastdrop: refreshing its T3 note failed: ${String(error)}`, { to: 'debug' }))
     return found(note)
   }
-  // A failure leaves the thread on its own model for this turn, and asks again at the next; it never binds.
-  let listed: Record<string, unknown>
-  try {
-    listed = await noteCall($, { op: 'list', thread })
-  } catch (error) {
-    $.ui.log(`lastdrop: reading its T3 notes failed: ${String(error)}`, { to: 'debug' })
-    return undefined
-  }
-  if (isNote(listed.bound)) return bind(listed.bound)
+  const stored = await $.store.get(`delegated-thread:${thread}`)
+  if (isNote(stored)) return bind(stored, false, true)
+  if (revision === undefined) await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
+  if (!delegateNotes) return undefined
+  bindings.set(thread, null)
+  const listed = await readNotes($, thread)
+  if (!listed) return undefined
+  if (listed.bound) return bind(listed.bound, true, true)
   // Only a first turn claims: a thread that already answered on its own model isn't a child of a note.
-  const open = answered ? [] : (Array.isArray(listed.open) ? listed.open : []).filter(isNote)
-    .filter(note => Date.now() - note.createdAt <= NOTE_TTL_MS && spans(blocks, note.task) > 0)
-  if (open.length === 0) {
-    bindings.set(thread, null)
-    return undefined
-  }
-  const parent = await parentOf($, thread)
-  const candidates = parent === undefined ? (open.length === 1 ? open : []) : parent === null ? [] : open.filter(note => note.parentThread === parent)
+  if (answered) return undefined
+  const open = listed.open.filter(note => Date.now() - note.createdAt <= NOTE_TTL_MS && (note.child === undefined || note.child === thread)
+    && spans(blocks, note.task) > 0)
+  if (open.length === 0) return undefined
+  const named = open.filter(note => note.child === thread)
+  const parent = named.length > 0 ? undefined : await parentOf($, thread)
+  const candidates = named.length > 0 ? named
+    : parent === undefined ? (open.length === 1 ? open : []) : parent === null ? [] : open.filter(note => note.parentThread === parent)
   const mine = family(model)
   const expected = (note: Note) => family(note.run.model ?? note.parentModel)
   candidates.sort((a, b) => Number(expected(b) === mine) - Number(expected(a) === mine) || a.createdAt - b.createdAt)
-  let failed = false
   for (const note of candidates) {
     const answer = await noteCall($, { op: 'claim', id: note.id, thread }).catch(error => {
       $.ui.log(`lastdrop: claiming its T3 note failed: ${String(error)}`, { to: 'debug' })
-      failed = true
-      return {}
+      return {} as Record<string, unknown>
     })
-    if (answer.type === 'ok' && isNote(answer.note)) return bind(answer.note)
+    if (answer.type === 'ok' && isNote(answer.note)) return bind(answer.note, true, false)
   }
-  // A thread T3 says nobody delegated, or notes another child took, are final; an unanswered question isn't.
-  if (!failed && (parent !== undefined || candidates.length > 0)) bindings.set(thread, null)
   return undefined
 }
 
@@ -1453,7 +1486,10 @@ export const register: Register = on => {
       return withNote(answer, note)
     }
     if ((target.providerInstanceId ?? T3_CLAUDE) !== T3_CLAUDE || (target.driverKind ?? T3_CLAUDE) !== T3_CLAUDE) return next(e)
-    if (revision === undefined || (model !== undefined && !model.startsWith('claude-') && !NATIVE.has(model) && !catalog.has(model))) await syncCatalog($)
+    if (revision === undefined || (model !== undefined && !model.startsWith('claude-') && !NATIVE.has(model) && !catalog.has(model))) {
+      // Unread, the catalog leaves a plain child (and any model it can't name) to T3 unchanged.
+      await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
+    }
     const agent = model !== undefined && agentModels && catalog.has(model) ? model : undefined
     // Another provider's model on this instance: T3 answers it.
     if (model !== undefined && agent === undefined && !model.startsWith('claude-') && !NATIVE.has(model)) return next(e)
@@ -1467,8 +1503,16 @@ export const register: Register = on => {
     // Unknown counts as auto: after a reload the mode is only known from the next classic event.
     const auto = permissionMode === undefined || permissionMode === 'auto'
     if (agent === undefined && delegateNotes) {
-      // Unchanged in every mode: the run is noted beside the call. No room: an ordinary T3 Claude thread.
-      if (await admission($, request) === 'no_room') return next(e)
+      // Unchanged in every mode: the run is noted beside the call. No room, or lastdrop failing in any way: an
+      // ordinary T3 Claude thread, never a refusal.
+      let room: Awaited<ReturnType<typeof admission>>
+      try {
+        room = await admission($, request)
+      } catch (error) {
+        $.ui.log(`lastdrop: its room check for a T3 child failed: ${String(error)}`, { to: 'debug' })
+        return next(e)
+      }
+      if (room === 'no_room') return next(e)
       const id = `t3-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
       const parentThread = await $.env.get('T3CODE_THREAD_ID')
       const note: Note = { id, run: { id, model, effort, description, permissionMode }, task: call.task,
@@ -1489,7 +1533,24 @@ export const register: Register = on => {
         throw error
       }
       // No child (or one T3 failed at once): nothing will claim it. A child that claimed it keeps it.
-      if (answer.deny !== undefined || (answer as { isError?: unknown }).isError === true) await drop()
+      if (answer.deny !== undefined || (answer as { isError?: unknown }).isError === true) {
+        await drop()
+        return answer
+      }
+      // The child T3 made: only it may claim the note. An answer naming no child thread made none here (another
+      // machine), and one naming a thread another note has is a replayed task (the app drops the note then).
+      try {
+        const answers = jsonOf(answer).filter(json => json !== null && typeof json === 'object' && !Array.isArray(json)) as Record<string, unknown>[]
+        const child = answers.map(json => json.childThreadId).find(id => typeof id === 'string' && id !== '') as string | undefined
+        if (child !== undefined) {
+          const expected = await noteCall($, { op: 'expect', id, child })
+          if (expected.result !== 'ok') $.ui.log(`lastdrop: T3 child ${child}: its note was ${String(expected.result)}`, { to: 'debug' })
+        } else if (answers.length > 0) {
+          await drop()
+        }
+      } catch (error) {
+        $.ui.log(`lastdrop: recording a T3 child failed: ${String(error)}`, { to: 'debug' })
+      }
       return answer
     }
     if (agent !== undefined && await instanceUsable($)) {
@@ -1531,6 +1592,8 @@ export const register: Register = on => {
     const answer = await next(e)
     if (revision === undefined) await syncCatalog($).catch(error => $.ui.log(`lastdrop: reading lastdrop's agents failed: ${String(error)}`, { to: 'debug' }))
     const supplement = delegateSupplement()
+    // What the engine now holds: a later catalog read that changes it invalidates, even after a failed first read.
+    lastDescribed = supplement
     return supplement ? { ...answer, description: `${answer.description}${supplement}` } : answer
   }).catch(($, e, next) => next(e))
 

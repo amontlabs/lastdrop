@@ -222,7 +222,9 @@ with no extra providers or accounts set up in T3.
     `--agent-route` is asked as for Agent; with room, lastdrop first notes the run (`lastdrop --delegate-note`, a
     locked `delegate-notes.json` in its support folder, shared by every account profile) with the parent's thread
     id and the task. The child's plugin claims the note at its first turn (see Child) and answers its turns as on
-    the tag path. T3 failing the call drops the note; no room leaves an ordinary T3 Claude thread.
+    the tag path. T3 failing the call drops the note; no room, or lastdrop failing, leaves an ordinary T3 Claude
+    thread. The parent records the child thread T3 answers with, so only that thread claims the note (a replayed
+    task's note is dropped). The child reads the notes file without starting a process.
   - Other instances, other models and other machines are left to T3.
 - **Without the instance (the tag path).** When the instance isn't set up (or the app is older, or T3 refused it in
   the last 10 minutes), a session in auto mode, or one whose mode isn't known yet (after a plugin reload, until the
@@ -239,7 +241,9 @@ with no extra providers or accounts set up in T3.
   lastdrop's notes: a follow-up). At its first turn it claims an open note (under 10 minutes old) whose task ends its
   first user blocks (after T3's "Act as the … sub-agent" line, before a merged steer), and whose parent is the one
   `t3_thread_read` names for this thread (a thread T3 says nobody delegated claims nothing; when T3 can't say, only
-  a lone matching note). Several: the child's model family first, then the oldest. Then as below.
+  a lone matching note). Several: the child's model family first, then the oldest. A binding holds only while the
+  session's first message still ends with the task: a fresh session T3 starts in the thread runs on its own model.
+  Then as below.
 - **Child (`turn.step` on the main loop).** When the session's first user message ends with that tag, the
   plugin answers each turn with `lastdrop --agent-run` (the task, then each new message with `resume`), so the
   child's own model never runs. Accounts, added models, fallbacks at a limit and stop are the runner's, as for
