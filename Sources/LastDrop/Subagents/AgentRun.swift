@@ -439,8 +439,9 @@ enum AgentRun {
         // An attempt at its limit partway through: the next one picks the work up where it is.
         var handover: (prompt: String, directory: String)?
         func name(_ entry: (provider: AgentProvider, model: String)) -> String {
-            // A model that appears twice in the chain is told apart by its provider.
-            attempts.filter { $0.model == entry.model }.count > 1 ? "\(entry.provider.displayName) \(entry.model)" : entry.model
+            // With its provider, as the chain reads: a bare model id in "Ran on claude-2 (claude-sonnet-5-5,
+            // claude-sonnet-5-5 unavailable)" reads like the model that ran.
+            "\(entry.provider.displayName) · \(entry.model)"
         }
         for (index, attempt) in attempts.enumerated() {
             if index > 0, AgentRegistry.wasStopped(agentID), let last {

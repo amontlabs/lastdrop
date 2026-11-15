@@ -1651,6 +1651,16 @@ for (const mode of ['auto', 'default', 'bypassPermissions', undefined]) {
   }
 }
 
+test('in a T3 Code lastdrop thread whose runner gave no catalog, a plain child is left to the fork, never noted', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { ...PARENT, LASTDROP_RUNNER: FORK_RUNNER }, forkCatalog: '' })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  const fields = { target: { model: 'opus' } }
+  await delegate($, fields)
+  expect(passed(e)).toEqual(asWritten(fields))
+  expect(e.notes.length).toBe(0)
+  expect(routeChecks(e)).toBe(0)
+})
+
 test('a plain child with no model, a full model id or a mode of its own goes unchanged, noted', async ($, on) => {
   const e = engine([$, on], { t3Instance: true, env: PARENT })
   await $.classic.UserPromptSubmit(AUTO as never)
@@ -1972,6 +1982,19 @@ test('a noted child claims its run by its task and runs on lastdrop\'s runner', 
   expect(e.modelSteps).toBe(0)
   expect(e.notes[0]!.thread).toBe('child-1')
   expect(e.mcpCalls[0]).toMatchObject({ server: 't3-code', tool: 't3_thread_read', args: { threadId: 'child-1', limit: 1, maxCharsPerItem: 1 } })
+})
+
+test('a T3 Code lastdrop thread never claims a note: the fork already put it on an account', async ($, on) => {
+  const e = engine([$, on], { lineage: 'parent-1' })
+  await delegateThenChild(e, $)
+  expect(e.notes.length).toBe(1)
+  e.env({ ...CHILD, LASTDROP_RUNNER: FORK_RUNNER })
+  await $.classic.UserPromptSubmit(AUTO as never)
+  e.messages(child('review the diff'))
+  await childStep($, 'turn-1')
+  expect(runs(e).length).toBe(0)
+  expect(e.modelSteps).toBe(1)
+  expect(e.notes[0]!.thread).toBeUndefined()
 })
 
 test('a noted child\'s task may follow T3\'s role line, and a steer merged after it reaches the first run', async ($, on) => {

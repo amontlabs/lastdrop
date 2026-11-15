@@ -65,7 +65,7 @@ enum SubagentRunner {
         /// It failed before starting any work for a reason about availability that no limit or model flag says: the
         /// provider isn't installed, signed in or keyed, or doesn't take this effort. An agent's fallback may take it.
         var unavailable = false
-        /// For an agent with fallbacks: the models tried before this one ran and skipped.
+        /// For an agent with fallbacks: the entries tried before this one ran and skipped, as "Provider · model".
         var skipped: [String] = []
         /// Claude Code's `api_error_status`, when it reported one.
         var apiErrorStatus: Int?
