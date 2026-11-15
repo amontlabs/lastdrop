@@ -306,8 +306,13 @@ const routes = new Map<string, Route>()
 /** A native step can arrive before its spawn's reply has crossed the worker boundary. */
 const spawning = new Set<Promise<void>>()
 
-/** lastdrop's own binary: beside this plugin inside lastdrop.app, else the usual install. */
+/**
+ * lastdrop's own binary: the runner T3 Code lastdrop (the T3 Code fork) names in its threads' environment, which
+ * answers the same commands through the fork; else beside this plugin inside lastdrop.app, else the usual install.
+ */
 async function runner($: EngineInterface): Promise<string> {
+  const fork = await $.env.get('LASTDROP_RUNNER')
+  if (fork && await $.fs.exists(fork)) return fork
   const bundled = `${$.plugin.root}/../../../MacOS/lastdrop`
   return (await $.fs.exists(bundled)) ? bundled : '/Applications/lastdrop.app/Contents/MacOS/lastdrop'
 }

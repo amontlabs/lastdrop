@@ -55,7 +55,7 @@ type Options = {
 const NOTES_FILE = '/test-support/delegate-notes.json'
 
 function engine([$test, on]: Body, options: Options = {}) {
-  const calls: { flag: string; request: Record<string, unknown> }[] = []
+  const calls: { flag: string; request: Record<string, unknown>; runner: string }[] = []
   const spawned: object[] = []
   const nativeCalls: string[] = []
   const nativeInputs: Record<string, unknown>[] = []
@@ -134,7 +134,7 @@ function engine([$test, on]: Body, options: Options = {}) {
   on('process.spawn', async function* (_, e) {
     const flag = e.argv[1] ?? ''
     const request = JSON.parse(e.input || '{}') as Record<string, unknown>
-    calls.push({ flag, request })
+    calls.push({ flag, request, runner: e.argv[0] ?? '' })
     if (options.runnerFails) throw new Error('no runner')
     if (flag === '--agent-route') yield { stream: 'stdout', text: lines(options.route ?? { type: 'routed' }) }
     else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }), ...(options.notes === false ? {} : { delegateNotes: true, ...(options.notesFile === false ? {} : { delegateNotesFile: NOTES_FILE }) }) }) }
@@ -820,6 +820,29 @@ test('the main loop listing gets what the lastdrop: types are, and the pointer t
   engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
+})
+
+// T3 Code lastdrop (the T3 Code fork) names its own runner in each thread's environment: it answers the same
+// commands through the fork, so the fork works without the app. Without it, or once its file is gone, the app's.
+const FORK_RUNNER = '/Users/me/.t3/lastdrop/bin/lastdrop'
+
+test('in a T3 Code lastdrop thread every runner command goes to the fork\'s runner', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1', LASTDROP_RUNNER: FORK_RUNNER } })
+  await $.session.start({ cwd: '/work' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_fork' })
+  await step($, 'turn-fork')
+  expect(await listing($)).toContain(`${POINTER}${FORK_RUNNER} --agents --help`)
+  expect(new Set(e.calls.map(c => c.flag))).toEqual(new Set(['--agent-catalog', '--agent-selftest', '--agent-warm', '--agent-route', '--agent-run']))
+  expect(e.calls.every(c => c.runner === FORK_RUNNER)).toBe(true)
+})
+
+test('a fork runner whose file is gone leaves the commands to the app', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { LASTDROP_RUNNER: FORK_RUNNER } })
+  e.remove(FORK_RUNNER)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
+  expect(e.calls.length > 0 && e.calls.every(c => c.runner.endsWith('/../../../MacOS/lastdrop'))).toBe(true)
 })
 
 test('each enabled agent is registered as a lastdrop: type, with its description and where it runs', async ($, on) => {
