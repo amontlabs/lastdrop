@@ -388,6 +388,116 @@ test('after a long remote turn, a native agent’s follow-up goes through', asyn
   expect(e.modelSteps).toBe(0)
 })
 
+// An added agent's remote run on a 1M model, its last request at 387k: past the default window Claude Code gives
+// a model it doesn't know, such as the agent's name its loop is labelled with.
+const BIG = { ...RESULT, model: 'claude-opus-5-5',
+              context: { inputTokens: 5, outputTokens: 900, cacheReadInputTokens: 380_000, cacheCreationInputTokens: 6_000 } }
+const COMPACTED = 'Earlier turns of this agent ran in lastdrop, which keeps their conversation on the agent’s own provider.'
+const FOLLOW_UP: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'initial task' }] },
+  { role: 'assistant', content: [{ type: 'text', text: RESULT.text }] },
+  { role: 'user', content: [{ type: 'text', text: 'next task' }] }]
+const ROWS = [{ role: 'user', text: 'initial task', toolUses: [], handle: 'm1' },
+              { role: 'assistant', text: RESULT.text, toolUses: [], handle: 'm2' }]
+
+test('a long added-agent run reports no context, so Claude Code never measures it against its label', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, outputs: [BIG] })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
+  expect(e.spawned[0]?.model).toBe('sol')
+  const first = await step($)
+  expect(report(first)).toBe(`Ran on claude-opus-5-5.\n\n${RESULT.text}`)
+  // Reported, 387k would be over the label's window: the follow-up failed with "Prompt is too long".
+  expect(first.find(c => c.kind === 'stop')?.usage).toBeNull()
+  e.messages(FOLLOW_UP)
+  await resume($, 'next task')
+  const second = await step($, 'turn-2')
+  expect(second.find(c => c.kind === 'stop')?.usage).toBeNull()
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'next task', resume: ID, agent: 'sol' })
+  expect(e.modelSteps).toBe(0)
+})
+
+test('a long reroute still reports the remote run’s last request', async ($, on) => {
+  const e = engine([$, on], { outputs: [BIG] })
+  await e.launch()
+  expect(contextOf(await step($))).toBe(386_905)
+})
+
+test('an added agent’s compaction never reaches a model, and its follow-up still runs remotely', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, outputs: [BIG] })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
+  await step($)
+  e.messages(FOLLOW_UP)
+  await resume($, 'next task')
+  // As Claude Code compacts before the follow-up's step, on a conversation an older version reported 387k for.
+  const compacted = await $.session.compact({ trigger: 'auto', agentId: ID, messages: ROWS } as never)
+  expect(compacted).toEqual({ messages: [{ role: 'user', text: COMPACTED, toolUses: [] }] })
+  e.messages([{ role: 'user', content: [{ type: 'text', text: '<system-reminder>\ncontext\n</system-reminder>' }, { type: 'text', text: COMPACTED }] }])
+  const second = await step($, 'turn-2')
+  expect(report(second)).toBe(`Ran on claude-opus-5-5.\n\n${RESULT.text}`)
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'next task', resume: ID })
+  expect(e.modelSteps).toBe(0)
+  // The cursor starts over on the compacted conversation: a later message is forwarded alone.
+  e.messages([{ role: 'user', content: [{ type: 'text', text: COMPACTED }] },
+    { role: 'assistant', content: [{ type: 'text', text: RESULT.text }] },
+    { role: 'user', content: [{ type: 'text', text: 'third task' }] }])
+  await step($, 'turn-3')
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'third task', resume: ID })
+})
+
+test('a message lastdrop hasn’t forwarded survives an added agent’s compaction', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, outputs: [BIG] })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
+  await step($)
+  e.messages(FOLLOW_UP)
+  await $.session.compact({ trigger: 'auto', agentId: ID, messages: ROWS } as never)
+  e.messages([{ role: 'user', content: [{ type: 'text', text: COMPACTED }] }])
+  await step($, 'turn-2')
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'next task', resume: ID })
+})
+
+test('an added agent keeps its handback across a compaction that dropped the instruction', async ($, on) => {
+  // The kit adds the instruction to every transcript unless told not to; here only these messages hold it.
+  const e = engine([$, on], { catalog: CATALOG, outputs: [BIG], handback: false })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
+  e.messages([{ role: 'user', content: [{ type: 'text', text: HANDBACK }, { type: 'text', text: 'initial task' }] }])
+  expect((await step($)).some(c => c.kind === 'tool')).toBe(true)
+  e.messages([...FOLLOW_UP.slice(0, 2).map((m, i) => i === 0 ? { ...m, content: [{ type: 'text', text: HANDBACK }, ...m.content] } : m), FOLLOW_UP[2]!])
+  await resume($, 'next task')
+  await $.session.compact({ trigger: 'auto', agentId: ID, messages: ROWS } as never)
+  e.messages([{ role: 'user', content: [{ type: 'text', text: COMPACTED }] }])
+  const second = await step($, 'turn-2')
+  expect(second.some(c => c.kind === 'tool')).toBe(true)
+  expect(report(second)).toBe(`Ran on claude-opus-5-5.\n\n${RESULT.text}`)
+  expect(e.calls.filter(c => c.flag === '--agent-run').at(-1)!.request).toMatchObject({ prompt: 'next task', resume: ID })
+})
+
+test('an added agent not yet run, or one precomputing, keeps its conversation whole without a model', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG })
+  await e.launch({ subagent_type: 'lastdrop:sol' })
+  expect((await $.session.compact({ trigger: 'auto', agentId: ID, messages: ROWS } as never)).skip).toBeDefined()
+  await step($)
+  expect((await $.session.compact({ trigger: 'precompute', agentId: ID, messages: ROWS } as never)).skip).toBeDefined()
+})
+
+test('a reroute’s compaction and an unknown subagent’s still run on the engine', async ($, on) => {
+  const e = engine([$, on])
+  await e.launch()
+  await step($)
+  expect(await $.session.compact({ trigger: 'auto', agentId: ID, messages: ROWS } as never)).toEqual({ messages: ROWS })
+  expect(await $.session.compact({ trigger: 'auto', agentId: 'a-other', messages: ROWS } as never)).toEqual({ messages: ROWS })
+})
+
+test('a T3 child running an added agent reports no context for a long run', async ($, on) => {
+  const e = engine([$, on], { outputs: [BIG] })
+  e.messages(child('review it\n\n<!-- lastdrop {"id":"t3-abc","agent":"sol"} -->'))
+  expect((await mainStep($, 'turn-1')).find(c => c.kind === 'stop')?.usage).toBeNull()
+})
+
+test('a plain T3 child still reports a long run’s last request', async ($, on) => {
+  const e = engine([$, on], { outputs: [BIG] })
+  e.messages(child('note it\n\n<!-- lastdrop {"id":"t3-def","model":"claude-haiku-5-5"} -->'))
+  expect(contextOf(await mainStep($, 'turn-1'))).toBe(386_905)
+})
+
 test('an admission failure refuses the native spawn instead of falling back', async ($, on) => {
   const e = engine([$, on], { route: { type: 'error', text: 'routing is broken' } })
   expect((await e.launch()).deny).toContain('routing is broken')

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, TurnStepChunk, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
+import type { EngineInterface, Register, SessionCompactInput, SessionCompactResult, TurnStepChunk, TurnStepInput, TurnStepResult, TurnUsage } from 'claude-code'
 
 import type { RemoteAgent, TranscriptItem } from '../types'
 
@@ -300,7 +300,7 @@ type Request = Record<string, unknown>
  * call came from, where a follow-up goes once the engine removed the worktree.
  */
 type Route = { request: Request; description: string; toolUseId: string; ran: boolean; cursor: number; handback?: boolean; resumePrompt?: string; error?: string
-               worktree?: { path: string; branch?: string }; parentCwd?: string }
+               worktree?: { path: string; branch?: string }; parentCwd?: string; compacted?: boolean }
 const claims = new Map<string, Request>()
 const routes = new Map<string, Route>()
 /** A native step can arrive before its spawn's reply has crossed the worker boundary. */
@@ -471,15 +471,18 @@ async function inbox($: EngineInterface, id: string, route: Route): Promise<stri
   const messages = await $.session.messages({ agentId: id, as: 'api' })
   if (!Array.isArray(messages)) throw new Error(messages.deny)
   // $.tool.list() lists the main loop's tools. The native request itself carries this instruction in auto mode.
+  // A compaction may have dropped the instruction's message, so one seen before it still counts.
   route.handback = messages.some(m => m.role === 'user' && m.content.some(b => b.type === 'text'
     && typeof b.text === 'string' && b.text.startsWith('<system-reminder>\nYour final report is delivered through SubagentHandback:')))
+    || (route.compacted === true && route.handback === true)
   if (messages.length < route.cursor) throw new Error('The native agent’s transcript was compacted before lastdrop read its messages.')
   const text: string[] = []
   for (const message of messages.slice(route.cursor)) {
     if (message.role !== 'user') continue
     const blocks = message.content.filter(b => b.type === 'text' && typeof b.text === 'string').map(b => String(b.text))
     // A resumed turn can contain the coordinator's reminder and the same message as its own text block.
-    const plain = blocks.filter(t => !t.startsWith('<system-reminder>') && !t.startsWith('The coordinator sent a message while you were working:\n'))
+    const plain = blocks.filter(t => !t.startsWith('<system-reminder>') && !t.startsWith('The coordinator sent a message while you were working:\n')
+      && t !== COMPACTED)
     for (const block of blocks) {
       const prefix = 'The coordinator sent a message while you were working:\n'
       const suffix = '\n\nAddress this before completing your current task.\n'
@@ -603,8 +606,15 @@ function header(request: Request, line: Line, made?: Route['worktree']): string 
  * the run's last top-level request (`context`) stands in, as a native subagent's last request would. A backend
  * that can't say (Codex, Antigravity) gives no usage, and Claude Code counts the local conversation instead.
  * The totals stay on the runner's line for cost.
+ *
+ * An added agent (`added`) reports none either. Its loop's model is the agent's name, a label Claude Code
+ * doesn't know, so it measures the context against a default window (about 200k) and compacts with that label
+ * as the model. A remote run on a 1M model past that size then failed the next follow-up before lastdrop saw
+ * it: "Prompt is too long · automatic compaction failed: There's an issue with the selected model (build-hard)".
+ * The remote backend keeps its own context; the local conversation is only the prompts and reports.
  */
-function usageOf(line: Line, model: string): TurnUsage | null {
+function usageOf(line: Line, model: string, added = false): TurnUsage | null {
+  if (added) return null
   const context = line.context as Record<string, unknown> | undefined
   if (!context || typeof context !== 'object') return null
   return { model: String(line.model ?? model), input_tokens: Number(context.inputTokens ?? 0),
@@ -1298,12 +1308,41 @@ async function delegatedTurn($: EngineInterface, e: TurnStepInput, signal: Abort
     }
     if (!result) throw new Error('lastdrop’s runner ended without the agent’s report.')
     if (result.isError === true || result.type === 'error') throw new Error(String(result.text ?? 'The remote agent failed.'))
-    return { ...result, text: delegatedHeader(result) + String(result.text ?? '') }
+    return { ...result, text: delegatedHeader(result) + String(result.text ?? ''), added: run.agent !== undefined }
   } finally {
     signal.removeEventListener('abort', stop)
     await stopping
     stream?.stop()
   }
+}
+
+/** What an added agent's compacted conversation holds in place of its turns; never forwarded to the run. */
+const COMPACTED = 'Earlier turns of this agent ran in lastdrop, which keeps their conversation on the agent’s own provider.'
+
+/**
+ * An added agent's compaction, answered here: its model is a label, so Claude Code's own summary request would
+ * name a model that doesn't exist and fail the turn. No model reads this conversation (the remote run keeps its
+ * own context), so it becomes one note. What the agent was sent and lastdrop hasn't forwarded yet is kept for
+ * its next turn; a resume's follow-up is already held there (`resumePrompt`) and stands for them, as in a turn.
+ * With nothing run yet, or a message lastdrop can't forward, it stays as it is.
+ */
+async function remoteCompaction($: EngineInterface, e: SessionCompactInput, route: Route): Promise<SessionCompactResult> {
+  const id = e.agentId!
+  if (e.trigger === 'precompute') return { skip: 'lastdrop compacts this agent’s conversation when it is due.' }
+  if (!route.ran) return { skip: 'lastdrop has not run this agent yet; its conversation stays whole.' }
+  let pending: string
+  try {
+    pending = await inbox($, id, route)
+  } catch (error) {
+    return { skip: `lastdrop kept this agent’s conversation whole: ${String(error instanceof Error ? error.message : error)}` }
+  }
+  // As a turn reads them: a resume's follow-up stands for the messages it was sent with.
+  route.resumePrompt = route.resumePrompt || pending || undefined
+  route.cursor = 0
+  route.compacted = true
+  routes.set(id, route)
+  if (!await put($, `native-agent:${id}`, route)) return { skip: 'lastdrop could not save the agent’s route: the store refused it.' }
+  return { messages: [{ role: 'user', text: COMPACTED, toolUses: [] }] }
 }
 
 export const register: Register = on => {
@@ -1360,6 +1399,10 @@ export const register: Register = on => {
   // A compaction builds the listing again. A precomputed one installs later, with no `session.compact`
   // of its own then, so the notice row it files is the sign; a replayed row never raises `session.append`.
   on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined) {
+      const route = routes.get(e.agentId) ?? await $.store.get(`native-agent:${e.agentId}`) as Route | undefined
+      if (route && route.request.agent !== undefined) return await remoteCompaction($, e, route)
+    }
     // A delegated child's own model never reads its conversation, and the summary would drop the tag.
     if (e.agentId === undefined && e.trigger !== 'precompute') {
       const child = await delegatedChild($)
@@ -1697,7 +1740,7 @@ export const register: Register = on => {
         if (shown.value) return yield* respond(e, 'lastdrop agent failed: its runner handed the turn back after showing its work.', null, false, 1)
         return yield* next(e)
       }
-      return yield* respond(e, String(result.text ?? ''), usageOf(result, e.model), false, shown.value ? 1 : 0)
+      return yield* respond(e, String(result.text ?? ''), usageOf(result, e.model, result.added === true), false, shown.value ? 1 : 0)
     }
     if (spawning.size > 0) await Promise.all([...spawning])
     const route = routes.get(e.agentId) ?? await $.store.get(`native-agent:${e.agentId}`) as Route | undefined
@@ -1735,7 +1778,7 @@ export const register: Register = on => {
       return yield* next(e)
     }
     const text = lead + String(result.text ?? '')
-    const usage = usageOf(result, e.model)
+    const usage = usageOf(result, e.model, route.request.agent !== undefined)
     return yield* respond(e, text, usage, route.handback === true, shown.value ? 1 : 0)
   }).catch(async function* ($, e, next) {
     // A routing adapter must never fail open to a model request on the session's account.
