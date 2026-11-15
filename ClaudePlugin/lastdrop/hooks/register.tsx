@@ -238,11 +238,21 @@ async function resetListing($: EngineInterface): Promise<void> {
  * engine announces types added and removed; `prompt.submit`'s note tells a changed description.
  */
 async function syncCatalog($: EngineInterface): Promise<void> {
-  let text = ''
-  for await (const chunk of $.process.spawn({ argv: [await runner($), '--agent-catalog'] })) {
-    if (chunk.stream === 'stdout') text += chunk.text
+  // Set once the read ends: commands running meanwhile keep the runner the last read chose.
+  const fork = await forkFile($)
+  let read = fork === undefined ? undefined : await readCatalog($, fork)
+  forkFailed = fork !== undefined && read === undefined
+  if (forkFailed) {
+    $.ui.log('lastdrop: T3 Code lastdrop\'s runner gave no catalog; the lastdrop app runs the agents', { to: 'debug' })
   }
-  const parsed = JSON.parse(text.trim() || '{}') as {
+  if (read === undefined) {
+    let text = ''
+    for await (const chunk of $.process.spawn({ argv: [await appRunner($), '--agent-catalog'] })) {
+      if (chunk.stream === 'stdout') text += chunk.text
+    }
+    read = JSON.parse(text.trim() || '{}') as Record<string, unknown>
+  }
+  const parsed = read as {
     revision?: number; agents?: Defined[]; saveClaude?: boolean; saveClaudeText?: string; nativeTasks?: boolean; agentModels?: boolean
     t3Instance?: boolean; delegateNotes?: boolean; delegateNotesFile?: string
   }
@@ -306,10 +316,45 @@ const routes = new Map<string, Route>()
 /** A native step can arrive before its spawn's reply has crossed the worker boundary. */
 const spawning = new Set<Promise<void>>()
 
-/** lastdrop's own binary: beside this plugin inside lastdrop.app, else the usual install. */
+/**
+ * lastdrop's own binary: the runner T3 Code lastdrop (the T3 Code fork) names in its threads' environment, which
+ * answers the same commands through the fork; else beside this plugin inside lastdrop.app, else the usual install.
+ */
 async function runner($: EngineInterface): Promise<string> {
+  return (await forkRunner($)) ?? appRunner($)
+}
+
+/**
+ * The fork's runner while it answers: unset, its file gone, or its last catalog read failed (a refused token,
+ * the fork's server down, no output), the app's runner takes every command until a catalog read works again.
+ */
+let forkFailed = false
+async function forkRunner($: EngineInterface): Promise<string | undefined> {
+  return forkFailed ? undefined : forkFile($)
+}
+
+async function forkFile($: EngineInterface): Promise<string | undefined> {
+  const fork = await $.env.get('LASTDROP_RUNNER')
+  return fork && await $.fs.exists(fork) ? fork : undefined
+}
+
+async function appRunner($: EngineInterface): Promise<string> {
   const bundled = `${$.plugin.root}/../../../MacOS/lastdrop`
   return (await $.fs.exists(bundled)) ? bundled : '/Applications/lastdrop.app/Contents/MacOS/lastdrop'
+}
+
+/** A runner's `--agent-catalog` output; undefined when it gave no catalog (an error line, nothing, a failure). */
+async function readCatalog($: EngineInterface, binary: string): Promise<Record<string, unknown> | undefined> {
+  let text = ''
+  try {
+    for await (const chunk of $.process.spawn({ argv: [binary, '--agent-catalog'] })) {
+      if (chunk.stream === 'stdout') text += chunk.text
+    }
+    const parsed = JSON.parse(text.trim()) as Record<string, unknown>
+    return parsed && typeof parsed === 'object' && parsed.type !== 'error' && Array.isArray(parsed.agents) ? parsed : undefined
+  } catch {
+    return undefined
+  }
 }
 
 type Chunk = { stream: string; text: string }
@@ -679,7 +724,8 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
   const id = e.agentId!
   if (route.error) throw new Error(route.error)
   if (e.index !== 0) throw new Error('Claude Code requested another model step after lastdrop’s handback.')
-  if (!route.ran && route.request.isolation === 'worktree') await engineWorktree($, route)
+  // T3 Code lastdrop runs the agent as a T3 thread, in a worktree T3 makes: the call's isolation goes to its runner.
+  if (!route.ran && route.request.isolation === 'worktree' && !await forkRunner($)) await engineWorktree($, route)
   else await leftWorktree($, route)
   const previous = route.cursor
   const message = await inbox($, id, route)

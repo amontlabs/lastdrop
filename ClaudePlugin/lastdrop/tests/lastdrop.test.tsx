@@ -32,7 +32,7 @@ type Message = { role: 'user' | 'assistant'; content: { type: string; text?: str
 type Options = {
   route?: object; background?: boolean; fork?: boolean; workflow?: boolean; refusal?: string; 
   outputs?: object[]; gate?: Promise<void>; wrongID?: boolean; noStart?: boolean; catalog?: typeof CATALOG; handback?: boolean
-  storeFailure?: boolean; selfTest?: object; nativeTasks?: boolean; liveCatalog?: () => object; runnerFails?: boolean; agentModels?: boolean; before?: object[]; spawnId?: () => string; noAgentTool?: boolean; storeLimit?: number; sessionId?: () => string; env?: Record<string, string>; t3?: Record<string, object>; t3Throws?: boolean
+  storeFailure?: boolean; selfTest?: object; nativeTasks?: boolean; liveCatalog?: () => object; runnerFails?: boolean; agentModels?: boolean; before?: object[]; spawnId?: () => string; noAgentTool?: boolean; storeLimit?: number; sessionId?: () => string; env?: Record<string, string>; forkCatalog?: string; t3?: Record<string, object>; t3Throws?: boolean
   /** How T3 answers a delegate_task on the `lastdrop` instance: refuses (the default, so the tests of the call as it was run on it), accepts, or answers a given error. */
   lastdrop?: 'accept' | { error: string }
   /** What `--agent-catalog` says of lastdrop's own T3 instance: set up (true), or not (absent, as an older app). */
@@ -55,7 +55,7 @@ type Options = {
 const NOTES_FILE = '/test-support/delegate-notes.json'
 
 function engine([$test, on]: Body, options: Options = {}) {
-  const calls: { flag: string; request: Record<string, unknown> }[] = []
+  const calls: { flag: string; request: Record<string, unknown>; runner: string }[] = []
   const spawned: object[] = []
   const nativeCalls: string[] = []
   const nativeInputs: Record<string, unknown>[] = []
@@ -134,9 +134,10 @@ function engine([$test, on]: Body, options: Options = {}) {
   on('process.spawn', async function* (_, e) {
     const flag = e.argv[1] ?? ''
     const request = JSON.parse(e.input || '{}') as Record<string, unknown>
-    calls.push({ flag, request })
+    calls.push({ flag, request, runner: e.argv[0] ?? '' })
     if (options.runnerFails) throw new Error('no runner')
     if (flag === '--agent-route') yield { stream: 'stdout', text: lines(options.route ?? { type: 'routed' }) }
+    else if (flag === '--agent-catalog' && options.forkCatalog !== undefined && e.argv[0] === options.env?.LASTDROP_RUNNER) { if (options.forkCatalog) yield { stream: 'stdout', text: options.forkCatalog } }
     else if (flag === '--agent-catalog') yield { stream: 'stdout', text: lines({ ...(options.liveCatalog?.() ?? options.catalog ?? { revision: 1, agents: [] }), nativeTasks: options.nativeTasks ?? true, agentModels: options.agentModels ?? true, ...(options.t3Instance === undefined ? {} : { t3Instance: options.t3Instance }), ...(options.notes === false ? {} : { delegateNotes: true, ...(options.notesFile === false ? {} : { delegateNotesFile: NOTES_FILE }) }) }) }
     else if (flag === '--delegate-note' && options.notesFail) yield { stream: 'stdout', text: lines({ type: 'error', text: 'disk full' }) }
     else if (flag === '--delegate-note') {
@@ -930,6 +931,56 @@ test('the main loop listing gets what the lastdrop: types are, and the pointer t
   engine([$, on], { catalog: CATALOG })
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
   expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
+})
+
+// T3 Code lastdrop (the T3 Code fork) names its own runner in each thread's environment: it answers the same
+// commands through the fork, so the fork works without the app. Without it, or once its file is gone, the app's.
+const FORK_RUNNER = '/Users/me/.t3/lastdrop/bin/lastdrop'
+
+test('in a T3 Code lastdrop thread every runner command goes to the fork\'s runner', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1', LASTDROP_RUNNER: FORK_RUNNER } })
+  await $.session.start({ cwd: '/work' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_fork' })
+  await step($, 'turn-fork')
+  expect(await listing($)).toContain(`${POINTER}${FORK_RUNNER} --agents --help`)
+  expect(new Set(e.calls.map(c => c.flag))).toEqual(new Set(['--agent-catalog', '--agent-selftest', '--agent-warm', '--agent-route', '--agent-run']))
+  expect(e.calls.every(c => c.runner === FORK_RUNNER)).toBe(true)
+})
+
+test('a fork runner whose file is gone leaves the commands to the app', async ($, on) => {
+  const e = engine([$, on], { catalog: CATALOG, env: { LASTDROP_RUNNER: FORK_RUNNER } })
+  e.remove(FORK_RUNNER)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
+  expect(e.calls.length > 0 && e.calls.every(c => c.runner.endsWith('/../../../MacOS/lastdrop'))).toBe(true)
+})
+
+for (const [why, output] of [['a refused token', lines({ type: 'error', text: 'lastdrop\'s runner refused the request' })], ['no output (server down)', '']]) {
+  test(`a fork runner that gives no catalog (${why}) leaves every command to the app`, async ($, on) => {
+    const e = engine([$, on], { catalog: CATALOG, env: { LASTDROP_RUNNER: FORK_RUNNER }, forkCatalog: output })
+    await $.session.start({ cwd: '/work' } as never)
+    await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+    expect(e.registered.map(r => r.name)).toEqual(['sol', 'argon'])
+    await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_fallback' })
+    await step($, 'turn-fallback')
+    const after = e.calls.filter(c => c.flag !== '--agent-catalog')
+    expect(after.length > 0 && after.every(c => c.runner.endsWith('/../../../MacOS/lastdrop'))).toBe(true)
+  })
+}
+
+test('in a T3 Code lastdrop thread a worktree call goes to the fork, which makes the worktree and names it', async ($, on) => {
+  const worktree = '/Users/me/.t3/worktrees/work/t3-abc'
+  const e = engine([$, on], { env: { LASTDROP_RUNNER: FORK_RUNNER },
+                              outputs: [{ ...RESULT, worktreePath: worktree, worktreeBranch: 't3/sol' }] })
+  await e.launch({ isolation: 'worktree' })
+  // The engine made its own worktree too (the call reaches it unchanged); the runner doesn't run there.
+  e.cwd('/work/.claude/worktrees/agent-x')
+  expect(report(await step($))).toBe(`Worktree: ${worktree} (branch t3/sol).\n\n${RESULT.text}`)
+  const run = e.calls.find(c => c.flag === '--agent-run')!
+  expect(run.runner).toBe(FORK_RUNNER)
+  expect(run.request.isolation).toBe('worktree')
+  expect(run.request.cwd).not.toContain('.claude/worktrees')
 })
 
 test('each enabled agent is registered as a lastdrop: type, with its description and where it runs', async ($, on) => {
