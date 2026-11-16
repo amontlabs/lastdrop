@@ -340,8 +340,8 @@ agent stopped after repeated temporary API errors.
 
 For the plugin, each switch is a `moved` line (with the next `provider` and `model`), followed by a new `started`
 line with the same `agentId` and the attempt's own `account`, `model` and `provider`, which updates the same row.
-The `result` line carries `provider` (what ran) and `unavailable`, the models tried and skipped, when there are
-any, and the report starts `Ran on gemini-4-argon-high (gpt-6.1-sol unavailable).` If every attempt fails the
+The `result` line carries `provider` (what ran) and `unavailable`, the entries tried and skipped (`Provider · model`), when there are
+any, and the report starts `Ran on gemini-4-argon-high (Codex · gpt-6.1-sol unavailable).` If every attempt fails the
 error lists each one and why. Claude never stands in, unless the user put a Claude entry in the list.
 
 The same model at another effort is its own attempt (`sol` at `xhigh`, then `sol` at `high`). A catalog saved by an

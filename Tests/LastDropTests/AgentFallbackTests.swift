@@ -83,7 +83,7 @@ final class AgentFallbackTests: LastDropTestCase {
         let result = lines[2]
         XCTAssertEqual(result["text"] as? String, "done")
         XCTAssertEqual(result["provider"] as? String, "antigravity")
-        XCTAssertEqual(result["unavailable"] as? [String], ["gpt-6.1-sol"])
+        XCTAssertEqual(result["unavailable"] as? [String], ["Codex · gpt-6.1-sol"])
         // The entry a follow-up continues is the attempt that ran, with no chain.
         let entry = try XCTUnwrap(AgentRegistry.lookup(id))
         XCTAssertEqual(entry.definition?.provider, .antigravity)
@@ -215,7 +215,7 @@ final class AgentFallbackTests: LastDropTestCase {
         await AgentRun.runDefined(d, try request(#","effort":"max""#), agentID: "fb-" + UUID().uuidString, resume: nil, mcpConfig: nil)
         XCTAssertEqual(FakeCodex.calls.first?.effort, "max")
         XCTAssertEqual(FakeAntigravity.calls.first?.effort, "max")
-        XCTAssertEqual(lines.last?["unavailable"] as? [String], ["gpt-6.1-sol"])
+        XCTAssertEqual(lines.last?["unavailable"] as? [String], ["Codex · gpt-6.1-sol"])
         FakeAntigravity.calls = []
         await AgentRun.runDefined(d, try request(), agentID: "fb-" + UUID().uuidString, resume: nil, mcpConfig: nil)
         XCTAssertEqual(FakeAntigravity.calls.first?.effort, "low")   // its own, when the call names none
@@ -487,12 +487,12 @@ final class AgentFallbackTests: LastDropTestCase {
         FakeZAI.script = { _, _ in .init(text: "Add a key.", isError: true, limitReached: false, turns: 0, permissionDenials: 0, unavailable: true) }
         FakeAntigravity.script = { [self] _, events in events.started("Antigravity", "gemini-4-argon"); return answered("Antigravity") }
         await AgentRun.runDefined(definition(fallbacks: chain), try request(), agentID: "fb-" + UUID().uuidString, resume: nil, mcpConfig: nil)
-        XCTAssertEqual(lines.last?["unavailable"] as? [String], ["Codex gpt-6.1-sol", "Z.ai gpt-6.1-sol"])
+        XCTAssertEqual(lines.last?["unavailable"] as? [String], ["Codex · gpt-6.1-sol", "Z.ai · gpt-6.1-sol"])
         // The last attempt started and failed before work: it is the failure, not one of the skipped.
         lines = []
         FakeAntigravity.script = { [self] _, events in events.started("Antigravity", "gemini-4-argon"); return limited() }
         await AgentRun.runDefined(definition(fallbacks: chain), try request(), agentID: "fb-" + UUID().uuidString, resume: nil, mcpConfig: nil)
-        XCTAssertEqual(lines.last?["unavailable"] as? [String], ["Codex gpt-6.1-sol", "Z.ai gpt-6.1-sol"])
+        XCTAssertEqual(lines.last?["unavailable"] as? [String], ["Codex · gpt-6.1-sol", "Z.ai · gpt-6.1-sol"])
         XCTAssertTrue((lines.last?["text"] as? String)?.contains("gemini-4-argon") == true)
     }
 }

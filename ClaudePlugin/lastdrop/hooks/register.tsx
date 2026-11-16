@@ -259,7 +259,10 @@ async function syncCatalog($: EngineInterface): Promise<void> {
   nativeTasks = parsed.nativeTasks === true
   agentModels = parsed.agentModels === true
   t3Instance = parsed.t3Instance === true
-  delegateNotes = parsed.delegateNotes === true
+  // In a T3 Code lastdrop thread (`LASTDROP_RUNNER` set) the fork routes plain Claude children itself, so no note
+  // is written or claimed even when the app's catalog answered (the fork's runner gave none): a claimed note would
+  // have the app re-route a thread the fork already put on an account.
+  delegateNotes = parsed.delegateNotes === true && !await $.env.get('LASTDROP_RUNNER')
   notesFile = typeof parsed.delegateNotesFile === 'string' && parsed.delegateNotesFile ? parsed.delegateNotesFile : undefined
   if (parsed.revision === undefined || parsed.revision !== revision) {
     catalog = new Map((parsed.agents ?? []).map(agent => [agent.name, agent] as const))
