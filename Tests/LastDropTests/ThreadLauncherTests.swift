@@ -161,11 +161,28 @@ final class ThreadLauncherTests: LastDropTestCase {
         XCTAssertTrue(decision.reason.contains("gone"))
     }
 
-    func testAThreadOnAGoneAccountFallsBackToMainWhenNobodyHasRoom() {
+    func testAThreadOnAGoneAccountFallsBackToClaudeCodesOwnLoginWhenNobodyHasRoom() {
         let decision = decide(["--resume", "X"], sessions: ["X": "Gone"],
                               candidates: [candidate("A", 100, 100)], transcript: transcript(age: 60))
         XCTAssertEqual(decision.action, .move)
+        XCTAssertEqual(decision.account, ClaudeAccount.terminalID)
+        // A new thread, too.
+        XCTAssertEqual(decide(["--session-id", "N"], candidates: [candidate("A", 100, 100)], transcript: .cold).account,
+                       ClaudeAccount.terminalID)
+    }
+
+    func testAConversationTheLedgerDoesntKnowRanOnClaudeCodesOwnLoginAndMovesOntoAnAccount() {
+        // Plain T3, or a thread from before any account was signed in: warm, it still leaves that login, as a fork.
+        let decision = decide(["--resume", "X"], candidates: [candidate("main", 10, 10)], transcript: transcript(age: 60),
+                              newSessionID: "moved")
+        XCTAssertEqual(decision.action, .move)
         XCTAssertEqual(decision.account, "main")
+        XCTAssertEqual(decision.args, ["--resume", "X", "--fork-session", "--session-id", "moved"])
+        // One recorded on Main (from when Main was that login) stays on Main, now Main's own sign-in.
+        let main = decide(["--resume", "X"], sessions: ["X": "main"], candidates: [candidate("main", 10, 10)],
+                          transcript: transcript(age: 60))
+        XCTAssertEqual(main.action, .stay)
+        XCTAssertEqual(main.account, "main")
     }
 
     // MARK: A conversation that was never written

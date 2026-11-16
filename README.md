@@ -151,6 +151,11 @@ Logins already on your Mac show up on their own. To add one, use **Settings → 
 
 Add as many accounts per plan as you like. For each, pick what the menu bar shows and when you get notified.
 
+Claude accounts, the first one included, are signed in from lastdrop and kept apart from Claude Code's own login,
+so `claude /login` in a terminal never changes them. Until one is signed in, Claude work uses Claude Code's own
+login, and the panel says so. If you used lastdrop before, its first Claude account shows signed out once: sign it
+in from **Settings → Accounts**.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-accounts-dark.png">
@@ -167,8 +172,9 @@ What it writes outside its own folders:
 
 - An expiring Codex token, renewed the way the Codex CLI does it.
 - Its plugin, added to Claude Code when **Agents in Claude Code** is on.
-- A profile per extra Claude account, in `~/.claude-accounts/<name>/profile`: links to `~/.claude`, plus a copy
-  of `~/.claude.json` with that account's own state. `~/.claude.json` itself is only read.
+- A sign-in folder and a profile per Claude account, Main's included, in `~/.claude-accounts/<name>`: the
+  profile links to `~/.claude`, plus a copy of `~/.claude.json` with that account's own state. `~/.claude.json`
+  itself is only read, and `claude /login` in a terminal never changes an account of lastdrop's.
 - T3 Code's Claude binary path, when **T3 Code threads** is on. Turning it off puts it back.
 
 The Stats tab reads the transcripts these tools keep on your Mac and saves only hourly totals, in

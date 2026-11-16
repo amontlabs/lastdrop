@@ -4,7 +4,7 @@ import Foundation
 /// Claude (Pro/Max subscription) limits, read with the OAuth login Claude Code keeps in the keychain.
 struct ClaudeProvider: UsageProvider {
     var id: ProviderID { .claude }
-    /// The Claude Code config folder whose sign-in to read (`CLAUDE_CONFIG_DIR`); nil for the default.
+    /// The Claude Code config folder whose sign-in to read (`CLAUDE_CONFIG_DIR`); nil for Claude Code's own login.
     var configDir: String?
     /// A short-lived runner process: it asks the usage endpoint and nothing else. The plan name and reset grants
     /// are the app's to fetch (their caches live in one process), and the runner reads the plan from the status file.
@@ -13,8 +13,8 @@ struct ClaudeProvider: UsageProvider {
     /// the copy may predate.
     var fresh = false
 
-    /// The id this account has in the shared usage file: "main", or its folder's name.
-    var usageID: String { configDir.map { ($0 as NSString).lastPathComponent } ?? ClaudeAccount.mainID }
+    /// The id this account has in the shared usage file: its folder's name ("main", "Pro").
+    var usageID: String { configDir.map { ($0 as NSString).lastPathComponent } ?? ClaudeAccount.terminalID }
 
     private static let usageURL = "https://api.anthropic.com/api/oauth/usage"
     private static let profileURL = "https://api.anthropic.com/api/oauth/profile"
@@ -138,11 +138,11 @@ struct ClaudeProvider: UsageProvider {
 
     /// Tests point `~/.claude.json` elsewhere.
     nonisolated(unsafe) static var sharedConfigOverride: String?
-    /// Main's `.claude.json`.
+    /// Claude Code's own `~/.claude.json`, which every profile shares all but the account's keys of.
     static var sharedConfig: String { sharedConfigOverride ?? NSHomeDirectory() + "/.claude.json" }
 
-    /// Where Claude Code may have kept this account's answer: `~/.claude.json` (Main's sessions, and the
-    /// sessions lastdrop started before accounts had profiles), the account's profile, where its sessions run,
+    /// Where Claude Code may have kept this account's answer: `~/.claude.json` (sessions on Claude Code's own
+    /// login, and the sessions lastdrop started before accounts had profiles), the account's profile, where its sessions run,
     /// and the account folder's own, written when Claude Code signs in or renews there.
     var cacheFiles: [String] {
         [Self.sharedConfig] + (configDir.map { [ClaudeProfile.configFile(folder: $0), $0 + "/.claude.json"] } ?? [])

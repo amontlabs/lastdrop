@@ -496,7 +496,7 @@ drops `judges` (its encoder doesn't know it), which puts the defaults back.
 Three runners cover five providers.
 
 **1. Claude Code runner (exists).** Claude accounts as today, plus any Anthropic-compatible endpoint. A Claude
-account's folder is only its sign-in. Main runs as plain `claude`. Another account runs with
+account's folder is only its sign-in. Claude Code's own login runs as plain `claude`. An account, Main included, runs with
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` naming its folder and `CLAUDE_CONFIG_DIR` naming `<folder>/profile`, which links
 to everything in `~/.claude` and keeps only its own `.claude.json`. So settings, MCP servers (no `--mcp-config`
 copy) and sessions (`~/.claude/projects`) are the user's own (see [claude-accounts.md](claude-accounts.md)).

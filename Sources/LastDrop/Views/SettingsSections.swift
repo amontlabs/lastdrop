@@ -39,6 +39,9 @@ struct AccountsSections: View {
                             ForEach(Array(accounts.enumerated()), id: \.element.id) { index, info in
                                 row(info, index: index, count: accounts.count)
                             }
+                            if provider == .claude && model.usesClaudeCodeLogin {
+                                Caption(AppModel.claudeCodeLoginNote).padding(.bottom, 6)
+                            }
                             // Agents run on the provider's accounts, so the judge that checks their commands sits with them.
                             if model.agentsEnabled, let judged = AgentProvider.judged.first(where: { $0.usageID == provider }) {
                                 RowDivider()
@@ -129,12 +132,14 @@ struct AccountsSections: View {
                     Button("Move down") { model.moveAccount(info.id, by: 1) }.disabled(index == count - 1)
                 }
                 if info.account.provider == .claude {
-                    Button("Sign in again") { model.signInAgain(info.account.key) }
-                    Button("Sign in again in Terminal") { model.signInInTerminal(info.account) }
+                    let again = info.email == nil ? "" : " again"
+                    Button("Sign in\(again)") { model.signInAgain(info.account.key) }
+                    Button("Sign in\(again) in Terminal") { model.signInInTerminal(info.account) }
                 }
                 if model.canRemove(info.account) {
                     Divider()
-                    Button(info.account.isMain ? "Sign out" : "Remove", role: .destructive) { model.remove(info.account) }
+                    let signsOut = info.account.isMain && info.account.provider != .claude
+                    Button(signsOut ? "Sign out" : "Remove", role: .destructive) { model.remove(info.account) }
                 }
             } label: {
                 Image(systemName: "ellipsis")

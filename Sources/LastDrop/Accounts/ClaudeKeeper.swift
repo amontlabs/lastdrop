@@ -3,7 +3,7 @@ import Network
 import Observation
 
 /// Keeps every Claude account's sign-in renewed before it expires, Main included, so its usage can always be
-/// read and routing never meets an account it can't judge.
+/// read and routing never meets an account it can't judge. Claude Code's own login is never one of them.
 ///
 /// lastdrop never asks Anthropic for tokens: Claude Code is the only OAuth client. Claude Code renews a token
 /// with under 5 minutes left whenever it starts, so the keeper starts it with no prompt (`ClaudeSignIn.renew`)

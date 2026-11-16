@@ -51,13 +51,15 @@ extension AppModel {
     // MARK: What to show
 
     /// The provider's accounts that are connected, or were added: a main account shows once a login is found.
+    /// Claude's Main, a sign-in of lastdrop's own, shows signed out too while Claude Code is in use, to sign in.
     func accounts(_ provider: ProviderID) -> [AccountInfo] {
         let next = nextAccountID(provider)
         return accountsConfig.pool(provider).compactMap { account -> AccountInfo? in
             let s = state(of: account)
             let check = localChecks[account.id]
             let connected = check?.connected ?? (s.snapshot != nil || (s.lastAttempt != nil && !s.notConfigured))
-            guard !account.isMain || connected || s.snapshot != nil else { return nil }
+            let mainShows = connected || s.snapshot != nil || (provider == .claude && claudeCodeSignedIn)
+            guard !account.isMain || mainShows else { return nil }
             return info(account, state: s, check: check)
         }.map { (info: AccountInfo) -> AccountInfo in
             var info = info
@@ -99,6 +101,14 @@ extension AppModel {
         return checks.compactMap(\.problem).first ?? "Connect a \(provider.displayName) account"
     }
 
+    /// No Claude account of lastdrop's is signed in, so Claude work runs on Claude Code's own login (what
+    /// `claude /login` in a terminal changes). The panel and Settings say so.
+    var usesClaudeCodeLogin: Bool {
+        claudeCodeSignedIn && !accountsConfig.pool(.claude).contains { localChecks[$0.id]?.connected == true }
+    }
+
+    static let claudeCodeLoginNote = "Using Claude Code's own login — sign an account in to keep lastdrop separate."
+
     /// Providers with at least one account to show, in the panel's order.
     var connectedProviders: [ProviderID] { order.filter { !accounts($0).isEmpty } }
 
@@ -127,9 +137,12 @@ extension AppModel {
     func refreshLocalChecks() {
         let accounts = accountsConfig.accounts
         Task.detached(priority: .utility) {
-            var checks: [String: LocalCheck] = [:]
-            for account in accounts { checks[account.id] = Self.localCheck(account) }
-            await MainActor.run { if checks != self.localChecks { self.localChecks = checks } }
+            let checks = Dictionary(accounts.map { ($0.id, Self.localCheck($0)) }) { first, _ in first }
+            let claudeCode = ClaudeProvider.signedInAccount(configDir: nil).uuid != nil
+            await MainActor.run {
+                if checks != self.localChecks { self.localChecks = checks }
+                if claudeCode != self.claudeCodeSignedIn { self.claudeCodeSignedIn = claudeCode }
+            }
         }
     }
 
@@ -157,7 +170,8 @@ extension AppModel {
 
     // MARK: Adding
 
-    /// What adding an account of `provider` signs in: its main account while that has no login, else a new one.
+    /// What adding an account of `provider` signs in: its main account while that has no login or none shows
+    /// (Claude's Main comes back that way after being removed), else a new one.
     func connectTarget(_ provider: ProviderID) -> Account {
         let main = Account.main(provider)
         if localChecks[main.id]?.connected == false || accounts(provider).isEmpty { return main }
@@ -258,7 +272,7 @@ extension AppModel {
 
     /// Adds a new account to its pool once signed in, named after its plan, and reads its usage.
     private func finishConnect(_ account: Account) {
-        if !account.isMain, accountsConfig.account(account.id) == nil {
+        if accountsConfig.account(account.id) == nil {
             updateAccounts { $0.append(account) }
         }
         connectStatus = .idle
@@ -282,19 +296,21 @@ extension AppModel {
 
     func moveAccount(_ id: String, by offset: Int) { updateAccounts { $0.move(id, by: offset) } }
 
-    /// A main account of a CLI login (Claude, Codex) stays: signing out is the CLI's business.
-    func canRemove(_ account: Account) -> Bool { !account.isMain || ![.claude, .codex].contains(account.provider) }
+    /// Codex's main account is the CLI's own login and stays: signing out is the CLI's business. Claude's Main
+    /// is a sign-in of lastdrop's like any other.
+    func canRemove(_ account: Account) -> Bool { !account.isMain || account.provider != .codex }
 
     /// Forgets an account and the keys lastdrop kept for it. An added account's CLI folder stays on disk.
-    /// A main account only loses lastdrop's own sign-in.
+    /// A main account (but Claude's) only loses lastdrop's own sign-in.
     func remove(_ account: Account) {
         for (service, item) in Self.ownItems(account.provider) {
             Keychain.delete(service: service, account: account.keychainItem(item))
         }
-        if !account.isMain { updateAccounts { $0.remove(account.id) } }
+        let stays = account.isMain && account.provider != .claude
+        if !stays { updateAccounts { $0.remove(account.id) } }
         forgetUsage(account)
         refreshLocalChecks()
-        if account.isMain { Task { await refresh([account]) } }
+        if stays { Task { await refresh([account]) } }
     }
 
     /// The keychain items lastdrop itself keeps for a provider's accounts (before the per-account suffix).

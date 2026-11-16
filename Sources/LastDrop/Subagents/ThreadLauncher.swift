@@ -115,9 +115,9 @@ enum ThreadLauncher {
                        newSessionID: () -> String = { UUID().uuidString.lowercased() }) -> Decision {
         let parsed = parse(args)
         // Nothing to continue: a new thread (`--session-id X`), or a plain claude run without an id. It starts
-        // on the roomiest account; main is the floor when no account can be trusted with it.
+        // on the roomiest account; Claude Code's own login is the floor when no account can be trusted with it.
         guard let resume = parsed.resume else {
-            let account = SubagentAccounts.pickForThread(candidates)?.account.id ?? ClaudeAccount.mainID
+            let account = SubagentAccounts.pickForThread(candidates)?.account.id ?? ClaudeAccount.terminalID
             let session = parsed.sessionID ?? ""
             return .init(args: args, account: account, action: .new,
                          reason: session.isEmpty ? "no session id" : "new thread",
@@ -125,7 +125,8 @@ enum ThreadLauncher {
                          session: session)
         }
         let current = ledger.resolvedSession(ofThread: resume)
-        let onCurrent = ledger.account(current) ?? ClaudeAccount.mainID
+        // A conversation the ledger doesn't know ran on Claude Code's own login (plain T3, or no account then).
+        let onCurrent = ledger.account(current) ?? ClaudeAccount.terminalID
         // T3 forks the thread itself: it brings the new session id, the launcher only chooses the account.
         if parsed.forkSession {
             let account = SubagentAccounts.pickForThread(candidates)?.account.id ?? onCurrent
@@ -154,7 +155,7 @@ enum ThreadLauncher {
         // Moving costs a full re-read: only toward known room, unless it can't stay where it is.
         let pickedThread = SubagentAccounts.pickForThread(candidates)
         let known = pickedThread.map { $0.sessionUsed != nil && $0.weeklyUsed != nil } ?? false
-        let destination = (known || gone || full ? pickedThread?.account.id : nil) ?? (gone ? ClaudeAccount.mainID : onCurrent)
+        let destination = (known || gone || full ? pickedThread?.account.id : nil) ?? (gone ? ClaudeAccount.terminalID : onCurrent)
         guard destination != onCurrent else {
             return stay(full ? "full, no other account has room" : "already the roomiest")
         }
@@ -429,11 +430,11 @@ enum ThreadLauncher {
             SubagentLog.write("thread: choosing took over \(Int(selectionDeadline)) s, keeping the current account")
             guard let resume = parsed.resume else { return nil }
             let session = ledger.resolvedSession(ofThread: resume)
-            let account = ClaudeAccount(id: ledger.account(session) ?? ClaudeAccount.mainID)
+            let account = ClaudeAccount(id: ledger.account(session) ?? ClaudeAccount.terminalID)
             return Plan(args: replacingResume(resume, with: session, in: args),
                         environment: account.runEnvironment(from: environment), account: account, label: String(resume.prefix(8)))
         }
-        // No account to run on (nobody is signed in anywhere): leave the choice to claude itself.
+        // No account to run on (none of lastdrop's is signed in): claude runs on its own login, as asked.
         guard !candidates.isEmpty else { return nil }
         let decision = decide(args, ledger: ledger, candidates: candidates, transcript: transcript, now: Date())
         for write in decision.writes {

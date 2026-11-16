@@ -3,9 +3,10 @@ import Foundation
 /// One sign-in on one provider. A provider's accounts form its pool, in priority order: the panel lists
 /// them in that order, and work goes to the one with the most room, then the next.
 ///
-/// Every provider has a main account, which uses the login already on the Mac (Claude Code's `~/.claude`,
-/// Codex's `~/.codex`, the Antigravity app, `ZAI_API_KEY`…) and lastdrop's original keychain items. Every
-/// other account keeps its login apart: its own folder for CLIs, or keychain items suffixed with its key.
+/// Every provider has a main account, which uses the login already on the Mac (Codex's `~/.codex`, the
+/// Antigravity app, `ZAI_API_KEY`…) and lastdrop's original keychain items. Every other account keeps its login
+/// apart: its own folder for CLIs, or keychain items suffixed with its key. Claude is the exception: every
+/// account, Main included, has its own sign-in folder, so `claude /login` in a terminal never changes one.
 struct Account: Codable, Hashable, Sendable, Identifiable {
     static let mainKey = "main"
 
@@ -54,13 +55,13 @@ struct Account: Codable, Hashable, Sendable, Identifiable {
     /// Tests point `~/.claude-accounts` elsewhere.
     nonisolated(unsafe) static var claudeFoldersOverride: String?
 
-    /// The folder a CLI keeps this account's login in: `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Nil for a main
-    /// account, which uses the CLI's default, and for providers without a CLI login.
+    /// The folder a CLI keeps this account's login in: `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Every Claude
+    /// account has one (`~/.claude-accounts/<key>`, Main's too); nil for Codex's main account, which uses the
+    /// CLI's default, and for providers without a CLI login.
     var folder: String? {
-        guard !isMain else { return nil }
         switch provider {
         case .claude: return (Self.claudeFoldersOverride ?? NSHomeDirectory() + "/.claude-accounts") + "/\(key)"
-        case .codex: return NSHomeDirectory() + "/.codex-accounts/\(key)"
+        case .codex: return isMain ? nil : NSHomeDirectory() + "/.codex-accounts/\(key)"
         case .antigravity, .zai, .openrouter: return nil
         }
     }
@@ -97,14 +98,18 @@ struct Account: Codable, Hashable, Sendable, Identifiable {
 /// Every account of every provider, and how work picks among a pool. Saved in lastdrop's support folder,
 /// read by the app and by each agent runner.
 struct AccountsConfig: Codable, Equatable, Sendable {
-    /// Each provider's pool in priority order. Always holds exactly one main account per provider.
+    /// Each provider's pool in priority order. Holds exactly one main account per provider but Claude, whose
+    /// accounts are all alike: a new list starts with its Main, which can be removed like any other.
     var accounts: [Account] = []
     /// An account takes work while its Session and its Weekly use are below these (0...1).
     var sessionThreshold = AccountsConfig.defaultThreshold
     var weeklyThreshold = AccountsConfig.defaultThreshold
     static let defaultThreshold = 0.9
 
-    init() { normalize() }
+    init() {
+        accounts = [.main(.claude)]
+        normalize()
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -119,21 +124,21 @@ struct AccountsConfig: Codable, Equatable, Sendable {
 
     func account(_ id: String) -> Account? { accounts.first { $0.id == id } }
 
-    /// Drops duplicate accounts and adds a missing main account at the front of its pool.
+    /// Drops duplicate accounts and adds a missing main account at the front of its pool (not Claude's).
     mutating func normalize() {
         var seen = Set<String>()
         accounts = accounts.filter { seen.insert($0.id).inserted }
-        for provider in ProviderID.allCases where !seen.contains(Account.main(provider).id) {
+        for provider in ProviderID.allCases where provider != .claude && !seen.contains(Account.main(provider).id) {
             let first = accounts.firstIndex { $0.provider == provider } ?? accounts.endIndex
             accounts.insert(.main(provider), at: first)
         }
     }
 
     /// Adds an account at the end of its provider's pool. Nil when the name has no usable characters,
-    /// is "main", or is taken in that pool (compared ignoring case: folder names on macOS do).
+    /// is "main" (but for Claude), or is taken in that pool (compared ignoring case: folder names on macOS do).
     mutating func add(_ provider: ProviderID, name: String) -> Account? {
         let key = Account.slug(name)
-        guard !key.isEmpty, key.lowercased() != Account.mainKey,
+        guard !key.isEmpty, provider == .claude || key.lowercased() != Account.mainKey,
               !pool(provider).contains(where: { $0.key.lowercased() == key.lowercased() }) else { return nil }
         let account = Account(provider: provider, key: key)
         append(account)
@@ -162,9 +167,10 @@ struct AccountsConfig: Codable, Equatable, Sendable {
         change(&accounts[i])
     }
 
-    /// Forgets an account. A main account can't be removed: it stands for the login already on the Mac.
+    /// Forgets an account. A main account can't be removed, it stands for the login already on the Mac; but
+    /// Claude's can, its sign-in being lastdrop's own like the others'.
     mutating func remove(_ id: String) {
-        accounts.removeAll { $0.id == id && !$0.isMain }
+        accounts.removeAll { $0.id == id && (!$0.isMain || $0.provider == .claude) }
     }
 
     /// Moves an account up (-1) or down (+1) its own pool; other providers' accounts don't count as steps.
