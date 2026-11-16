@@ -238,12 +238,12 @@ async function resetListing($: EngineInterface): Promise<void> {
  * engine announces types added and removed; `prompt.submit`'s note tells a changed description.
  */
 async function syncCatalog($: EngineInterface): Promise<void> {
-  // Set once the read ends: commands running meanwhile keep the runner the last read chose.
-  const fork = await forkFile($)
-  let read = fork === undefined ? undefined : await readCatalog($, fork)
-  forkFailed = fork !== undefined && read === undefined
-  if (forkFailed) {
-    $.ui.log('lastdrop: T3 Code lastdrop\'s runner gave no catalog; the lastdrop app runs the agents', { to: 'debug' })
+  // A fork thread never asks the app: a failed read keeps the last good catalog, and the next sync tries again.
+  const fork = await forkRunner($)
+  let read = fork === undefined ? undefined : await $.fs.exists(fork) ? await readCatalog($, fork) : undefined
+  if (fork !== undefined && read === undefined) {
+    $.ui.log('lastdrop: T3 Code lastdrop\'s runner gave no catalog; keeping the last one', { to: 'debug' })
+    return
   }
   if (read === undefined) {
     let text = ''
@@ -259,10 +259,9 @@ async function syncCatalog($: EngineInterface): Promise<void> {
   nativeTasks = parsed.nativeTasks === true
   agentModels = parsed.agentModels === true
   t3Instance = parsed.t3Instance === true
-  // In a T3 Code lastdrop thread (`LASTDROP_RUNNER` set) the fork routes plain Claude children itself, so no note
-  // is written or claimed even when the app's catalog answered (the fork's runner gave none): a claimed note would
-  // have the app re-route a thread the fork already put on an account.
-  delegateNotes = parsed.delegateNotes === true && !await $.env.get('LASTDROP_RUNNER')
+  // In a T3 Code lastdrop thread the fork routes plain Claude children itself, so no note is written or claimed:
+  // a claimed note would have the app re-route a thread the fork already put on an account.
+  delegateNotes = parsed.delegateNotes === true && fork === undefined
   notesFile = typeof parsed.delegateNotesFile === 'string' && parsed.delegateNotesFile ? parsed.delegateNotesFile : undefined
   if (parsed.revision === undefined || parsed.revision !== revision) {
     catalog = new Map((parsed.agents ?? []).map(agent => [agent.name, agent] as const))
@@ -322,24 +321,19 @@ const spawning = new Set<Promise<void>>()
 /**
  * lastdrop's own binary: the runner T3 Code lastdrop (the T3 Code fork) names in its threads' environment, which
  * answers the same commands through the fork; else beside this plugin inside lastdrop.app, else the usual install.
+ * A fork thread never falls back to the app: a failing fork runner fails the command.
  */
 async function runner($: EngineInterface): Promise<string> {
   return (await forkRunner($)) ?? appRunner($)
 }
 
-/**
- * The fork's runner while it answers: unset, its file gone, or its last catalog read failed (a refused token,
- * the fork's server down, no output), the app's runner takes every command until a catalog read works again.
- */
-let forkFailed = false
+/** The runner a T3 Code lastdrop thread (`LASTDROP_RUNNER` set) names; undefined outside one. */
 async function forkRunner($: EngineInterface): Promise<string | undefined> {
-  return forkFailed ? undefined : forkFile($)
+  return (await $.env.get('LASTDROP_RUNNER')) || undefined
 }
 
-async function forkFile($: EngineInterface): Promise<string | undefined> {
-  const fork = await $.env.get('LASTDROP_RUNNER')
-  return fork && await $.fs.exists(fork) ? fork : undefined
-}
+/** Where a fork thread sends the user instead of the app. */
+const FORK_SETTINGS = 'Check T3 Code’s Settings → Providers → lastdrop agents, or update T3 Code.'
 
 async function appRunner($: EngineInterface): Promise<string> {
   const bundled = `${$.plugin.root}/../../../MacOS/lastdrop`
@@ -497,7 +491,11 @@ async function record($: EngineInterface, id: string, line: Line): Promise<void>
 /** Admission happens before native spawn; it never starts a remote model or claims a warm process. */
 async function admission($: EngineInterface, request: Request): Promise<'routed' | 'no_room'> {
   if (nativeTasks === undefined) await syncCatalog($)
-  if (!nativeTasks) throw new Error('Update the lastdrop app and plugin together: this app does not support native routed tasks.')
+  if (!nativeTasks) {
+    throw new Error(await forkRunner($)
+      ? `T3 Code lastdrop’s runner gave no catalog with native routed tasks. ${FORK_SETTINGS}`
+      : 'Update the lastdrop app and plugin together: this app does not support native routed tasks.')
+  }
   const stream = $.process.spawn({ argv: [await runner($), '--agent-route'], input: JSON.stringify(request) })
   const run = new Run(stream[Symbol.asyncIterator]())
   try {
@@ -758,7 +756,9 @@ async function remoteTurn($: EngineInterface, e: TurnStepInput, route: Route, si
     if ('noRoom' in begun) throw new Error('No other account has room after the native agent started. lastdrop did not run it on the session’s account.')
     if ('error' in begun) throw new Error(begun.error)
     run = begun.run
-    if (String(begun.line.agentId) !== id) throw new Error('lastdrop’s runner did not keep the native agent id. Update the lastdrop app and plugin together.')
+    if (String(begun.line.agentId) !== id) {
+      throw new Error(`lastdrop’s runner did not keep the native agent id. ${await forkRunner($) ? 'Update T3 Code.' : 'Update the lastdrop app and plugin together.'}`)
+    }
     await started($, begun.line, route.description, route.ran, route.toolUseId, plain)
     const show = progress(report, plain)
     // Switches made before the agent started (a fallback taken at once) still show in its row.
@@ -1515,7 +1515,10 @@ export const register: Register = on => {
     if (owns(type)) {
       agent = type.slice(TYPE_PREFIX.length)
       if (!isAdded(agent)) await syncCatalog($)
-      if (!agentModels) return { deny: 'Update the lastdrop app: this one does not support added agents.' }
+      if (!agentModels) {
+        return { deny: await forkRunner($) ? `T3 Code lastdrop’s runner gave no added agents. ${FORK_SETTINGS}`
+          : 'Update the lastdrop app: this one does not support added agents.' }
+      }
       if (!isAdded(agent)) return { deny: `Agent type ${type} isn't available. ${availableTypes()}` }
       if (e.agentId !== undefined || e.isolation === 'remote' || e.name !== undefined) {
         return { deny: `lastdrop's agents (${type}) run only from the main session, unnamed, without remote isolation.` }
