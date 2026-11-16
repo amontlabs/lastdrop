@@ -934,7 +934,7 @@ test('the main loop listing gets what the lastdrop: types are, and the pointer t
 })
 
 // T3 Code lastdrop (the T3 Code fork) names its own runner in each thread's environment: it answers the same
-// commands through the fork, so the fork works without the app. Without it, or once its file is gone, the app's.
+// commands through the fork, so the fork works without the app, and a fork thread never asks the app, even when its runner fails.
 const FORK_RUNNER = '/Users/me/.t3/lastdrop/bin/lastdrop'
 
 test('in a T3 Code lastdrop thread every runner command goes to the fork\'s runner', async ($, on) => {
@@ -948,26 +948,42 @@ test('in a T3 Code lastdrop thread every runner command goes to the fork\'s runn
   expect(e.calls.every(c => c.runner === FORK_RUNNER)).toBe(true)
 })
 
-test('a fork runner whose file is gone leaves the commands to the app', async ($, on) => {
+test('a fork runner whose file is gone fails its commands and never asks the app', async ($, on) => {
   const e = engine([$, on], { catalog: CATALOG, env: { LASTDROP_RUNNER: FORK_RUNNER } })
   e.remove(FORK_RUNNER)
   await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-  expect(await listing($)).toBe(`${NATIVE_LISTING}\n\n${TYPES}${COMMAND}`)
-  expect(e.calls.length > 0 && e.calls.every(c => c.runner.endsWith('/../../../MacOS/lastdrop'))).toBe(true)
+  expect(await listing($)).toBe(NATIVE_LISTING)
+  expect(e.registered).toEqual([])
+  expect(e.calls.some(c => c.runner !== FORK_RUNNER)).toBe(false)
 })
 
 for (const [why, output] of [['a refused token', lines({ type: 'error', text: 'lastdrop\'s runner refused the request' })], ['no output (server down)', '']]) {
-  test(`a fork runner that gives no catalog (${why}) leaves every command to the app`, async ($, on) => {
+  test(`a fork runner that gives no catalog (${why}) never leaves a command to the app`, async ($, on) => {
     const e = engine([$, on], { catalog: CATALOG, env: { LASTDROP_RUNNER: FORK_RUNNER }, forkCatalog: output })
     await $.session.start({ cwd: '/work' } as never)
     await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
-    expect(e.registered.map(r => r.name)).toEqual(['sol', 'argon'])
-    await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_fallback' })
-    await step($, 'turn-fallback')
-    const after = e.calls.filter(c => c.flag !== '--agent-catalog')
-    expect(after.length > 0 && after.every(c => c.runner.endsWith('/../../../MacOS/lastdrop'))).toBe(true)
+    expect(e.registered).toEqual([])
+    const denied = await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_nocatalog' }) as { deny?: string }
+    expect(denied.deny).toContain('Settings → Providers → lastdrop agents')
+    expect(denied.deny).not.toContain('lastdrop app')
+    expect(e.calls.length > 0 && e.calls.every(c => c.runner === FORK_RUNNER)).toBe(true)
   })
 }
+
+test('a fork runner whose catalog fails after a good read keeps the last catalog and never asks the app', async ($, on) => {
+  const options: Options = { catalog: CATALOG, env: { T3CODE_THREAD_ID: 'thread-1', LASTDROP_RUNNER: FORK_RUNNER } }
+  const e = engine([$, on], options)
+  await $.session.start({ cwd: '/work' } as never)
+  await $.classic.UserPromptSubmit({ prompt: 'hi' } as never)
+  expect(e.registered.map(r => r.name)).toEqual(['sol', 'argon'])
+  options.forkCatalog = ''
+  await $.classic.UserPromptSubmit({ prompt: 'again' } as never)
+  await e.launch({ subagent_type: 'lastdrop:sol', tool_use_id: 'toolu_kept' })
+  await step($, 'turn-kept')
+  expect(e.calls.filter(c => c.flag === '--agent-catalog').length).toBeGreaterThan(1)
+  expect(e.calls.find(c => c.flag === '--agent-run')?.request.agent).toBe('sol')
+  expect(e.calls.every(c => c.runner === FORK_RUNNER)).toBe(true)
+})
 
 test('in a T3 Code lastdrop thread a worktree call goes to the fork, which makes the worktree and names it', async ($, on) => {
   const worktree = '/Users/me/.t3/worktrees/work/t3-abc'
