@@ -9,13 +9,35 @@ reference; their code is in git history, and the settings and screens they descr
 Accounts are added in Settings → Accounts (**Add account…**). Settings → Claude holds the **Agents in Claude Code**
 switch, **T3 Code threads**, **Save Claude usage** and the account limits.
 
+## Claude Code's own login (2026-11-16)
+
+`~/.claude`'s login (keychain item `Claude Code-credentials`, what `claude /login` in a terminal changes) is never
+one of lastdrop's accounts. Until 2026-11-16 Main was that login, so signing a terminal in to another account
+silently changed Main, and work went on an account at its weekly limit. Now every account, Main included, is a
+sign-in folder of its own, `~/.claude-accounts/<key>` with its keychain item named after the folder; profiles
+still link `~/.claude`'s settings, skills and history (`ClaudeProfile`).
+
+- lastdrop never reads that login's usage or renews it. Work falls back to it only while no account can take it:
+  a subagent or ACP run while none of lastdrop's accounts is signed in (`AgentRun.pick`), a T3 thread while none
+  is signed in or every one is at a limit (`ThreadLauncher.decide`). The panel and Settings → Accounts then say
+  "Using Claude Code's own login — sign an account in to keep lastdrop separate". The ledger and the agent
+  registry record such runs as `@terminal` (`ClaudeAccount.terminal`); a thread the ledger doesn't know counts as
+  one, so once an account is signed in it moves to it as a fork.
+- Migration: an `accounts.json` from before keeps its `main` (key, name, menu bar, notifications) with a new,
+  empty folder, so it shows signed out (and asks to be signed in) until signed in from lastdrop. Nothing is copied
+  from `~/.claude`: its refresh token rotates, so a copy would sign one of the two out. Ledger entries on `main`
+  stay `main`.
+- Main is signed in, renamed and removed like any other account. Removing every account leaves the Claude list
+  empty; nothing puts a Main back (`AccountsConfig.normalize` restores the main account of every provider but
+  Claude's).
+
 ## T3 Code threads on accounts with room (2026-11-09)
 
 lastdrop chooses the account for each T3 Code thread too, not only for subagents. T3's Claude provider has
 a **Binary path** setting. It points to `~/Library/Application Support/lastdrop/bin/claude-thread`, a
 wrapper that runs `lastdrop --claude-thread <T3's arguments>`. The launcher (`ThreadLauncher`) chooses the
 account, sets its sign-in and profile in the environment (`ClaudeAccount.runEnvironment`, below; nothing for
-Main), and runs the real `claude` behind a line relay (`ThreadRelay`, below; it `execve`d claude until
+Claude Code's own login), and runs the real `claude` behind a line relay (`ThreadRelay`, below; it `execve`d claude until
 2026-11-13, and `LASTDROP_THREAD_RELAY=0` still does). T3 keeps every
 Claude-only feature, because it still talks to Claude Code. A generic ACP provider would have lost idle
 compaction, limit display, forks and steering.
@@ -37,6 +59,7 @@ saves a T3 setting in the same instant. Under the switch, **Set it by hand** giv
 (`ProviderSessionManager`, T3 0.1.7). Each start asks one question: *is this conversation's cache still warm
 on its account, and does that account have room?* If yes, the thread stays. If not, it goes to the best account:
 - A new thread (`--session-id`) goes to the best account. Main is one of the candidates, like any other account.
+  With none signed in, or every one at a limit, it runs on Claude Code's own login (next section).
 - A warm one stays, unless its account is at a known limit, removed or signed out.
 - A cold one (last answer more than 55 minutes ago; the cache lasts an hour on subscriptions) may move.
 - A just-compacted one may move. T3's idle compaction runs about two minutes before the cache expires, so it

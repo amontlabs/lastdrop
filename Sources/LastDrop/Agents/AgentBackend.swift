@@ -120,7 +120,7 @@ enum ClaudeBackend: AgentBackend {
         let permissionMode = AgentRun.mappedPermissionMode(job.permissionMode)
         let onProcess = events.process
         if let entry = job.resume {
-            guard let account = config.ordered.first(where: { $0.id == entry.account }) else {
+            guard let account = ClaudeAccount.find(entry.account, in: config.ordered) else {
                 return .init(text: "The \(entry.account) account is no longer in lastdrop.", isError: true, limitReached: false,
                              turns: 0, permissionDenials: 0)
             }
@@ -213,7 +213,7 @@ enum ClaudeBackend: AgentBackend {
         let account = ClaudeAccount(id: entry.account)
         // The same environment as the run: the account's sign-in, in its profile when it has one.
         let env = account.runEnvironment(from: [:])
-        let export = account.isMain ? "" : ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"].map { key in
+        let export = account.isTerminal ? "" : ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"].map { key in
             env[key].map { "export \(key)=\(ClaudeSignIn.shellQuote($0))\n" } ?? "unset \(key)\n"
         }.joined()
         return "\(export)cd \(ClaudeSignIn.shellQuote(entry.directory)) || exit 1\nexec claude --resume \(entry.sessionID)"

@@ -7,7 +7,7 @@ import Foundation
 /// several processes write it (each launch, each subagent run, the app).
 enum SessionLedger {
     struct Session: Codable, Equatable, Sendable {
-        /// `ClaudeAccount.id`: "main", or an account's folder name.
+        /// `ClaudeAccount.id`: "main", or an account's folder name; `ClaudeAccount.terminalID` for Claude Code's own login.
         var account: String
         var startedAt: Date
         /// For a conversation forked from another (`--fork-session`, when a thread or an agent moves to another

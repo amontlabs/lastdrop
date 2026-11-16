@@ -211,7 +211,7 @@ enum AgentRun {
         }
         if let agentID = request.resume {
             guard let entry = AgentRegistry.lookup(agentID).map({ resumable($0, cwd: request.cwd) }),
-                  let account = accounts.first(where: { $0.id == entry.account }) else {
+                  let account = ClaudeAccount.find(entry.account, in: accounts) else {
                 emit(["type": "error", "text": "No agent \(agentID) was started by lastdrop."])
                 return
             }
@@ -351,7 +351,7 @@ enum AgentRun {
         var entry = entry, result = result, tried = tried
         var toolUses = result.toolUses, durationMs = result.durationMs
         while result.limitReached || result.modelUnavailable || result.transient != nil, !AgentRegistry.wasStopped(agentID),
-              let from = accounts.first(where: { $0.id == entry.account }) {
+              let from = ClaudeAccount.find(entry.account, in: accounts) {
             let cause: String
             if result.modelUnavailable {
                 cause = "\(from.id) doesn't include \(entry.model ?? "the model")"
@@ -662,21 +662,29 @@ enum AgentRun {
     }
 
     /// The account under the ceiling for a run on `model`: the smallest plan first, the calling session's own
-    /// included like any other.
+    /// included like any other. While none of the accounts is signed in, Claude Code's own login, if it has one.
     static func pick(_ accounts: [ClaudeAccount], config: ClaudeAccountsConfig, own: String?, model: String? = nil,
                              excluding tried: Set<String>, log: Bool = true) async -> ClaudeAccount? {
         var candidates: [SubagentAccounts.Candidate] = []
         var skipped: [String] = []
-        for account in accounts where !tried.contains(account.id) {
+        var anySignedIn = false
+        for account in accounts {
             guard let signedIn = ClaudeProvider.signedInAccount(configDir: account.cliConfigDir).uuid else { continue }
             let usage = await SubagentUsage.shared.usage(account)
             // Only signing in again would let it run anything.
             guard usage.usable else { skipped.append("\(account.id) needs sign-in"); continue }
+            anySignedIn = true
+            guard !tried.contains(account.id) else { continue }
             // Its API kept failing with passing errors a moment ago: new work goes elsewhere for a while.
             guard !AgentRegistry.isTroubled(account.id) else { skipped.append("\(account.id) failing for now"); continue }
             candidates.append(.init(account: account, name: account.id, sessionUsed: usage.session, weeklyUsed: usage.weekly,
                                     modelUsed: usage.used(model: model), isOwn: signedIn == own,
                                     size: SubagentUsage.size(account)))
+        }
+        if !anySignedIn {
+            guard !tried.contains(ClaudeAccount.terminalID), ClaudeProvider.signedInAccount(configDir: nil).uuid != nil else { return nil }
+            if log { SubagentLog.write("no account of lastdrop's is signed in → Claude Code's own login") }
+            return .terminal
         }
         let choice = SubagentAccounts.pick(candidates, sessionThreshold: config.sessionThreshold, weeklyThreshold: config.weeklyThreshold)
         if log { SubagentLog.write("own \(own?.prefix(8) ?? "?"); " + candidates.map {

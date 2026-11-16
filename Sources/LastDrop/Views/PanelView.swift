@@ -103,10 +103,13 @@ struct LimitsList: View {
 
     var body: some View {
         let providers = model.connectedProviders
-        if providers.isEmpty {
-            EmptyPanel(text: "No accounts yet.", action: "Add an Account…") { WindowPresenter.settings(model, page: .accounts) }
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 4) {
+            if model.usesClaudeCodeLogin {
+                ClaudeCodeLoginNote { WindowPresenter.settings(model, page: .accounts) }
+            }
+            if providers.isEmpty {
+                EmptyPanel(text: "No accounts yet.", action: "Add an Account…") { WindowPresenter.settings(model, page: .accounts) }
+            } else {
                 ForEach(model.accountsNeedingSignIn) { info in
                     SignInBanner(name: info.name) { model.signInAgain(info.account.key) }
                 }
@@ -157,6 +160,23 @@ private struct ProviderGroup: View {
                 }
             }
         }
+    }
+}
+
+/// No Claude account of lastdrop's is signed in: Claude work runs on whatever `claude /login` last signed in.
+private struct ClaudeCodeLoginNote: View {
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle").foregroundStyle(.secondary)
+            Text(AppModel.claudeCodeLoginNote).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+            Spacer(minLength: 4)
+            Button("Accounts…", action: action).controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 

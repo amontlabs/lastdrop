@@ -240,10 +240,10 @@ final class ClaudeProfileTests: LastDropTestCase {
         let runner = SubagentRunner.environment(for: account, from: base)
         XCTAssertEqual(runner["CLAUDE_CONFIG_DIR"], env["CLAUDE_CONFIG_DIR"])
         XCTAssertNil(runner["CLAUDE_CODE_ACCOUNT_UUID"])
-        // Main is never given a profile.
-        let main = ClaudeAccount(id: "main").runEnvironment(from: base)
-        XCTAssertNil(main["CLAUDE_CONFIG_DIR"])
-        XCTAssertNil(main["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+        // Claude Code's own login is never given a profile, nor a sign-in folder.
+        let terminal = ClaudeAccount.terminal.runEnvironment(from: base)
+        XCTAssertNil(terminal["CLAUDE_CONFIG_DIR"])
+        XCTAssertNil(terminal["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
     }
 
     func testUsageCacheIsReadFromTheProfile() {

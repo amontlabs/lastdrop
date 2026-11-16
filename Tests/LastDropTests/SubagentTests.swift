@@ -150,7 +150,7 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertNil(pro["CLAUDE_CONFIG_DIR"])
         XCTAssertTrue(pro["CLAUDE_SECURESTORAGE_CONFIG_DIR"]!.hasSuffix("/.claude-accounts/Pro"))
         XCTAssertEqual(pro[AgentRun.nestedMarker], "1")
-        XCTAssertNil(SubagentRunner.environment(for: ClaudeAccount(id: "main"), from: base)["CLAUDE_CONFIG_DIR"])
+        XCTAssertNil(SubagentRunner.environment(for: .terminal, from: base)["CLAUDE_CONFIG_DIR"])
     }
 
     func testRunEnvironmentSignsInThroughTheAccountsFolderInTheMainProfile() {
@@ -159,9 +159,42 @@ final class SubagentTests: LastDropTestCase {
         XCTAssertNil(pro["CLAUDE_CONFIG_DIR"])
         XCTAssertEqual(pro["CLAUDE_SECURESTORAGE_CONFIG_DIR"], ClaudeAccount(id: "Pro").cliConfigDir)
         XCTAssertEqual(pro["PATH"], "/bin")
+        // Main signs in through a folder of its own like any account; only Claude Code's own login runs bare.
         let main = ClaudeAccount(id: "main").runEnvironment(from: base)
-        XCTAssertNil(main["CLAUDE_CONFIG_DIR"])
-        XCTAssertNil(main["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+        XCTAssertEqual(main["CLAUDE_SECURESTORAGE_CONFIG_DIR"], ClaudeAccount(id: "main").cliConfigDir)
+        let terminal = ClaudeAccount.terminal.runEnvironment(from: base)
+        XCTAssertNil(terminal["CLAUDE_CONFIG_DIR"])
+        XCTAssertNil(terminal["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+    }
+
+    func testWorkFallsBackToClaudeCodesOwnLoginOnlyWhileNoAccountIsSignedIn() async throws {
+        let config = ClaudeAccountsConfig(AccountsConfig())
+        XCTAssertEqual(config.ordered.map(\.id), ["main"])
+        // Main is signed out (a migrated Main has an empty folder) and Claude Code has no login: nowhere to run.
+        var picked = await AgentRun.pick(config.ordered, config: config, own: nil, excluding: [], log: false)
+        XCTAssertNil(picked)
+        // Claude Code's own login, signed in from a terminal, takes the work.
+        let terminalConfig = ClaudeProvider.sharedConfig
+        try JSONSerialization.data(withJSONObject: ["oauthAccount": ["accountUuid": "terminal-uuid"]])
+            .write(to: URL(fileURLWithPath: terminalConfig))
+        XCTAssertFalse(config.hasSignedInAccount)
+        picked = await AgentRun.pick(config.ordered, config: config, own: nil, excluding: [], log: false)
+        XCTAssertEqual(picked, .terminal)
+        picked = await AgentRun.pick(config.ordered, config: config, own: nil, excluding: [ClaudeAccount.terminalID], log: false)
+        XCTAssertNil(picked, "tried once is enough")
+        // Main signed in from lastdrop: work goes to it, never to that login.
+        let folder = ClaudeAccount(id: "main").cliConfigDir!
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["oauthAccount": ["accountUuid": "main-uuid"]])
+            .write(to: URL(fileURLWithPath: folder + "/.claude.json"))
+        XCTAssertTrue(config.hasSignedInAccount)
+        picked = await AgentRun.pick(config.ordered, config: config, own: nil, excluding: [], log: false)
+        XCTAssertEqual(picked?.id, "main")
+        picked = await AgentRun.pick(config.ordered, config: config, own: nil, excluding: ["main"], log: false)
+        XCTAssertNil(picked, "a signed-in account that can't take it doesn't hand it to Claude Code's own login")
+        // A run recorded on that login resumes there.
+        XCTAssertEqual(ClaudeAccount.find(ClaudeAccount.terminalID, in: config.ordered), .terminal)
+        XCTAssertNil(ClaudeAccount.find("gone", in: config.ordered))
     }
 
     func testMCPConfigIsOnlyPassedToAnEndpoint() {

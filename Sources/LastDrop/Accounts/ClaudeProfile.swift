@@ -1,6 +1,6 @@
 import Foundation
 
-/// A non-main account's Claude Code profile: `~/.claude` seen through links, with a `.claude.json` of its own.
+/// A Claude account's Claude Code profile (Main's too): `~/.claude` seen through links, with a `.claude.json` of its own.
 ///
 /// Claude Code keeps its global state in `<CLAUDE_CONFIG_DIR or home>/.claude.json`, and part of that state
 /// belongs to the signed-in account (who it is, the answers Anthropic gave it: usage, model access, feature
@@ -8,8 +8,8 @@ import Foundation
 /// away and asks again, which gets the account rate limited on the usage endpoint. No setting moves that one
 /// file, so an account runs with `CLAUDE_CONFIG_DIR` naming a folder where everything is `~/.claude` (links)
 /// except `.claude.json`. That file is `~/.claude.json` with the account's own keys swapped in, rebuilt each
-/// time a session starts: MCP servers, project trust and every key lastdrop doesn't know come from Main, so
-/// Main's file is never written and stays the one place to change them.
+/// time a session starts: MCP servers, project trust and every key lastdrop doesn't know come from
+/// `~/.claude.json`, so that file is never written and stays the one place to change them.
 enum ClaudeProfile {
     /// Tests point `~/.claude` elsewhere.
     nonisolated(unsafe) static var sharedOverride: String?
@@ -39,7 +39,7 @@ enum ClaudeProfile {
     /// shared between accounts is the fault this fixes. Any other key, known or not, is shared.
     static func isOwn(_ key: String) -> Bool { ownKeys.contains(key) || key.lowercased().contains("cache") }
 
-    /// Main's config with the account's own keys in place of Main's.
+    /// `~/.claude.json` (`main`) with the account's own keys in place of the ones there.
     static func merged(main: [String: Any], own: [String: Any]) -> [String: Any] {
         main.filter { !isOwn($0.key) }.merging(own.filter { isOwn($0.key) }) { _, own in own }
     }
@@ -56,7 +56,7 @@ enum ClaudeProfile {
     // MARK: Preparing
 
     /// Brings the account's profile up to date and returns it, for `CLAUDE_CONFIG_DIR`. Nil when there is none
-    /// to use (Main's config can't be read and no profile was made before): the session then runs in `~/.claude`.
+    /// to use (`~/.claude.json` can't be read and no profile was made before): the session then runs in `~/.claude`.
     static func prepare(folder: String) -> String? {
         let dir = directory(folder: folder)
         let fm = FileManager.default
@@ -92,8 +92,8 @@ enum ClaudeProfile {
         }
     }
 
-    /// Rewrites the profile's `.claude.json` from Main's and the account's own keys, under Claude Code's own
-    /// config lock so a running session's save and this one never cross. Skipped while Main's config can't be
+    /// Rewrites the profile's `.claude.json` from `~/.claude.json` and the account's own keys, under Claude Code's own
+    /// config lock so a running session's save and this one never cross. Skipped while `~/.claude.json` can't be
     /// read or the lock is held: the next start does it.
     static func sync(folder: String) throws {
         let file = configFile(folder: folder)

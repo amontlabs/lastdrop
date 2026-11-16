@@ -71,6 +71,8 @@ final class AppModel {
     private(set) var launchAtLoginError: String?
     // Accounts (AppModel+Accounts.swift)
     var localChecks: [String: LocalCheck] = [:]
+    /// Claude Code's own login (`~/.claude`) is signed in; refreshed with `localChecks`.
+    var claudeCodeSignedIn = false
     var connectStatus = ConnectStatus.idle
     /// The account added last, which the add-account sheet shows once it's done.
     var lastConnected: String?
@@ -274,10 +276,11 @@ final class AppModel {
         return [account.provider.displayName, detail].compactMap { $0 }.joined(separator: " ")
     }
 
-    /// An account no longer in lastdrop: "claude.Pro" → "Claude Pro".
+    /// An account no longer in lastdrop: "claude.Pro" → "Claude Pro". Runs on Claude Code's own login are its.
     nonisolated static func statsName(id: String) -> String {
         let parts = id.split(separator: ".", maxSplits: 1).map(String.init)
         let provider = ProviderID(rawValue: parts[0])?.displayName ?? parts[0]
+        if parts.count == 2 && parts[1] == ClaudeAccount.terminalID { return "Claude Code login" }
         return parts.count == 2 && parts[1] != Account.mainKey ? "\(provider) \(parts[1])" : provider
     }
 

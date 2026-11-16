@@ -11,8 +11,14 @@ final class ClaudeAccountsTests: LastDropTestCase {
     }
 
     func testFolders() {
-        XCTAssertNil(ClaudeAccount(id: "main").cliConfigDir)
+        // Main has its own sign-in folder and keychain item: `claude /login` in a terminal never changes it.
+        let main = ClaudeAccount(id: "main").cliConfigDir
+        XCTAssertTrue(main!.hasSuffix("/.claude-accounts/main"))
+        XCTAssertNotEqual(ClaudeProvider.keychainService(configDir: main), ClaudeProvider.keychainService(configDir: nil))
+        XCTAssertEqual(ClaudeProvider(configDir: main).usageID, "main", "Main keeps its usage key")
         XCTAssertTrue(ClaudeAccount(id: "Pro").cliConfigDir!.hasSuffix("/.claude-accounts/Pro"))
+        XCTAssertNil(ClaudeAccount.terminal.cliConfigDir)
+        XCTAssertEqual(ClaudeProvider(configDir: nil).usageID, ClaudeAccount.terminalID)
     }
 
     func testSlug() {
@@ -27,10 +33,12 @@ final class ClaudeAccountsTests: LastDropTestCase {
         c.order = ["gone", "main", "main"]
         c.normalize()
         XCTAssertEqual(c.order, ["main", "Pro"])
+        XCTAssertEqual(c.ordered.map(\.id), ["main", "Pro"])
+        // Main removed: it stays off the list.
         c.order = ["Pro"]
         c.normalize()
-        XCTAssertEqual(c.order, ["main", "Pro"])
-        XCTAssertEqual(c.ordered.map(\.id), ["main", "Pro"])
+        XCTAssertEqual(c.order, ["Pro"])
+        XCTAssertEqual(c.ordered.map(\.id), ["Pro"])
     }
 
     func testOldThresholdFileStillLoads() throws {

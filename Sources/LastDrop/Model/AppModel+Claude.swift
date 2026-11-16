@@ -188,6 +188,8 @@ extension AppModel {
             let name = "Claude (\(info.name))"
             let text = problem == "endsSoon"
                 ? "\(name)'s sign-in ends \(signIn.endsAt.map { Format.clock($0) } ?? "soon"). Sign in again to keep lastdrop using it."
+                : signIn.state == .signedOut
+                ? "\(name) isn't signed in to lastdrop. Until it is, lastdrop doesn't run anything on it."
                 : "\(name) needs you to sign in again. Until then, lastdrop doesn't run anything on it."
             postSignIn(text, account: id)
         }

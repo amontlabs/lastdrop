@@ -13,9 +13,11 @@ final class AccountsTests: LastDropTestCase {
 
     func testWhereEachAccountKeepsItsLogin() {
         for provider in ProviderID.allCases {
-            XCTAssertNil(Account.main(provider).folder)
+            if provider != .claude { XCTAssertNil(Account.main(provider).folder) }
             XCTAssertEqual(Account.main(provider).keychainItem("zai-api-key"), "zai-api-key")
         }
+        // Claude's Main is a sign-in of lastdrop's own, never `~/.claude`.
+        XCTAssertTrue(Account.main(.claude).folder!.hasSuffix("/.claude-accounts/main"))
         XCTAssertTrue(Account(provider: .claude, key: "Pro").folder!.hasSuffix("/.claude-accounts/Pro"))
         XCTAssertTrue(Account(provider: .codex, key: "work").folder!.hasSuffix("/.codex-accounts/work"))
         XCTAssertNil(Account(provider: .zai, key: "work").folder)
@@ -65,6 +67,27 @@ final class AccountsTests: LastDropTestCase {
         config.remove("openrouter.main")
         config.remove("openrouter.team")
         XCTAssertEqual(keys(config, .openrouter), ["main"])
+    }
+
+    func testClaudesMainIsRemovedAndAddedLikeAnyAccount() throws {
+        var config = AccountsConfig()
+        XCTAssertNil(config.add(.claude, name: "Main"), "taken")
+        _ = config.add(.claude, name: "Pro")
+        config.remove("claude.main")
+        XCTAssertEqual(keys(config, .claude), ["Pro"])
+        // Saved and read back, the list stays without it: nothing puts a Main back.
+        let decoded = try JSONDecoder.lastdrop.decode(AccountsConfig.self, from: JSONEncoder.lastdrop.encode(config))
+        XCTAssertEqual(keys(decoded, .claude), ["Pro"])
+        XCTAssertEqual(ClaudeAccountsConfig(decoded).ordered.map(\.id), ["Pro"])
+        config.remove("claude.Pro")
+        XCTAssertTrue(keys(config, .claude).isEmpty)
+        XCTAssertEqual(config.add(.claude, name: "main")?.key, "main")
+        // An older list's Main keeps its key, name and settings.
+        let old = #"{"accounts":[{"provider":"claude","key":"main","name":"Max","addedAt":1,"notifyAt":0.9}]}"#
+        let migrated = try JSONDecoder.lastdrop.decode(AccountsConfig.self, from: Data(old.utf8))
+        XCTAssertEqual(migrated.account("claude.main")?.name, "Max")
+        XCTAssertEqual(migrated.account("claude.main")?.notifyAt, 0.9)
+        XCTAssertFalse(ClaudeAccountsConfig(migrated).hasSignedInAccount, "signed out until signed in from lastdrop")
     }
 
     func testNormalizeDropsDuplicatesAndRestoresMain() throws {

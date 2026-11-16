@@ -43,20 +43,35 @@ enum LastDropPaths {
     }
 }
 
-/// One Claude account: a Claude Code sign-in of its own. Main is the default one (`~/.claude`); every other
-/// account lives in `~/.claude-accounts/<name>` (`CLAUDE_CONFIG_DIR`). lastdrop shows each account's
-/// limits and runs subagents on the accounts that have room (`lastdrop --mcp`).
+/// One Claude account: a Claude Code sign-in of its own, in `~/.claude-accounts/<key>` (`CLAUDE_CONFIG_DIR` for
+/// signing in, `CLAUDE_SECURESTORAGE_CONFIG_DIR` for runs), Main's included. lastdrop shows each account's limits
+/// and runs subagents on the accounts that have room (`lastdrop --mcp`).
+///
+/// Claude Code's own login (`~/.claude`, keychain item `Claude Code-credentials`, what `claude /login` in a
+/// terminal changes) is never one of them: `terminal` stands for it, and work falls back to it only while no
+/// account of lastdrop's is signed in. Main meant that login until 2026-11-16; it keeps its key and name and
+/// shows signed out until it is signed in from lastdrop. Nothing is copied from `~/.claude`: its refresh token
+/// rotates, so a copy would sign one of the two out.
 struct ClaudeAccount: Codable, Hashable, Sendable, Identifiable {
     static let mainID = "main"
+    /// Claude Code's own login, as the ledger and the agent registry record a run on it. Never in the list.
+    static let terminalID = "@terminal"
+    static let terminal = ClaudeAccount(id: terminalID)
 
-    /// "main", or a short name also used as the folder name ("Pro").
+    /// "main", or a short name also used as the folder name ("Pro"); `terminalID` for Claude Code's own login.
     var id: String
     var addedAt = Date()
 
     var isMain: Bool { id == Self.mainID }
+    var isTerminal: Bool { id == Self.terminalID }
 
-    /// `CLAUDE_CONFIG_DIR` for this account (where its sign-in lives); nil for Main (the default `~/.claude`).
-    var cliConfigDir: String? { Account(provider: .claude, key: id).folder }
+    /// The account's sign-in folder; nil for Claude Code's own login (the default `~/.claude`).
+    var cliConfigDir: String? { isTerminal ? nil : Account(provider: .claude, key: id).folder }
+
+    /// The account `id` names among `accounts`, or Claude Code's own login.
+    static func find(_ id: String, in accounts: [ClaudeAccount]) -> ClaudeAccount? {
+        id == terminalID ? .terminal : accounts.first { $0.id == id }
+    }
 
     init(id: String) { self.id = id }
 
@@ -74,7 +89,7 @@ struct ClaudeAccount: Codable, Hashable, Sendable, Identifiable {
 struct ClaudeAccountsConfig: Codable, Equatable, Sendable {
     /// Accounts besides Main.
     var accounts: [ClaudeAccount] = []
-    /// Priority order of account IDs; always contains "main" exactly once.
+    /// Priority order of account IDs; "main" at most once, and only while Main is on the list.
     var order: [String] = [ClaudeAccount.mainID]
     /// An account takes subagents while its Session and its Weekly use are below these (0...1).
     var sessionThreshold = ClaudeAccountsConfig.defaultThreshold
@@ -91,12 +106,13 @@ struct ClaudeAccountsConfig: Codable, Equatable, Sendable {
         weeklyThreshold = try c.decodeIfPresent(Double.self, forKey: .weeklyThreshold) ?? Self.defaultThreshold
     }
 
-    /// Every account, Main included, in priority order.
+    /// Every account, Main included when it is on the list, in priority order.
     var ordered: [ClaudeAccount] {
         order.compactMap { id in id == ClaudeAccount.mainID ? ClaudeAccount(id: id) : accounts.first { $0.id == id } }
     }
 
-    /// Keeps `order` consistent with `accounts`: drops unknown IDs, appends missing ones, one "main".
+    /// Keeps `order` consistent with `accounts`: drops unknown and repeated IDs, appends missing ones. Main is
+    /// on the list while `order` names it.
     mutating func normalize() {
         var seen = Set<String>()
         order = order.filter { id in
@@ -104,8 +120,12 @@ struct ClaudeAccountsConfig: Codable, Equatable, Sendable {
             seen.insert(id)
             return true
         }
-        if !seen.contains(ClaudeAccount.mainID) { order.insert(ClaudeAccount.mainID, at: 0) }
         for a in accounts where !seen.contains(a.id) { order.append(a.id) }
+    }
+
+    /// Some account of the list has a sign-in in its folder; otherwise work falls back to Claude Code's own login.
+    var hasSignedInAccount: Bool {
+        ordered.contains { ClaudeProvider.signedInAccount(configDir: $0.cliConfigDir).uuid != nil }
     }
 
     /// The Claude pool and the thresholds of `all`.
@@ -169,11 +189,11 @@ extension JSONDecoder {
 }
 
 extension ClaudeAccount {
-    /// The environment to run claude on this account. Main runs as it is: `~/.claude` and the default sign-in.
-    /// Another account is signed in through `CLAUDE_SECURESTORAGE_CONFIG_DIR` (its folder holds the sign-in) and
-    /// runs in its profile (`CLAUDE_CONFIG_DIR`): `~/.claude` through links, so settings, plugins and
-    /// conversations are Main's, with a `.claude.json` of its own (`ClaudeProfile`). Building the environment
-    /// brings that profile up to date.
+    /// The environment to run claude on this account. Claude Code's own login runs as it is: `~/.claude` and the
+    /// default sign-in. An account is signed in through `CLAUDE_SECURESTORAGE_CONFIG_DIR` (its folder holds the
+    /// sign-in) and runs in its profile (`CLAUDE_CONFIG_DIR`): `~/.claude` through links, so settings, plugins and
+    /// conversations are the user's own, with a `.claude.json` of its own (`ClaudeProfile`). Building the
+    /// environment brings that profile up to date.
     func runEnvironment(from base: [String: String]) -> [String: String] {
         var env = base
         env.removeValue(forKey: "CLAUDE_CONFIG_DIR")
