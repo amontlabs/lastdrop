@@ -1644,6 +1644,17 @@ test('with the lastdrop instance set up, an added model on T3\'s Claude instance
   expect(delegateCalls(e).length).toBe(0)
 })
 
+test('a runner that names its own T3 instance (a T3 Code fork) gets that id in the form, the call that passes and the listing', async ($, on) => {
+  const e = engine([$, on], { liveCatalog: () => ({ ...CATALOG, t3Instance: true, t3InstanceId: 'lastdropAgents' }), env: { T3CODE_THREAD_ID: 'thread-1' }, t3: { [DELEGATE]: SHELL } })
+  await $.classic.UserPromptSubmit({ prompt: 'hi', permission_mode: 'auto' } as never)
+  expect((await delegate($, { target: { model: 'sol' } })).deny).toBe(FORM.replace('"lastdrop"', '"lastdropAgents"'))
+  expect(delegateCalls(e).length).toBe(0)
+  const fields = { target: { providerInstanceId: 'lastdropAgents', model: 'sol' } }
+  await delegate($, fields)
+  expect(passed(e)).toEqual(asWritten(fields))
+  expect(await listing($)).toContain('call delegate_task with target: { providerInstanceId: "lastdropAgents", model: "<name>" }')
+})
+
 // A plain Claude child goes to T3 as written in every mode; its run is noted beside the call.
 const PARENT = { T3CODE_THREAD_ID: 'parent-1' }
 for (const mode of ['auto', 'default', 'bypassPermissions', undefined]) {
